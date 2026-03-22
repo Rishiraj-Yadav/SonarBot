@@ -100,6 +100,11 @@ async def test_gmail_tools_search_read_and_send(monkeypatch) -> None:
     search_result = await tools["gmail_search"].handler({"query": "in:inbox", "limit": 5})
     assert search_result["threads"][0]["subject"] == "Test Subject"
 
+    latest_result = await tools["gmail_latest_email"].handler({})
+    assert latest_result["found"] is True
+    assert latest_result["subject"] == "Test Subject"
+    assert latest_result["body"] == "Hello there"
+
     read_result = await tools["gmail_read_thread"].handler({"thread_id": "thread-1"})
     assert read_result["messages"][0]["body"] == "Hello there"
 
@@ -107,6 +112,8 @@ async def test_gmail_tools_search_read_and_send(monkeypatch) -> None:
         {"to": "friend@example.com", "subject": "Hi", "body": "Checking in"}
     )
     assert send_result["id"] == "sent-1"
+
+    assert "required" not in tools["gmail_search"].parameters
 
 
 @pytest.mark.asyncio

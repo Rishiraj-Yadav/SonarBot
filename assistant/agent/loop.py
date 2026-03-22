@@ -12,6 +12,7 @@ from assistant.agent.context import build_model_messages
 from assistant.agent.queue import AgentQueue, AgentRequest
 from assistant.agent.session import create_message
 from assistant.agent.streaming import merge_text_chunks
+from assistant.models.base import ToolCall
 
 EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 TypingEmitter = Callable[[str], Awaitable[None]]
@@ -134,7 +135,7 @@ class AgentLoop:
             if request.system_suffix:
                 system_prompt = f"{system_prompt}\n\n{request.system_suffix}".strip()
             text_chunks: list[str] = []
-            tool_calls = []
+            tool_calls: list[ToolCall] = []
             usage = None
 
             try:
@@ -146,8 +147,6 @@ class AgentLoop:
                 ):
                     if response.text:
                         text_chunks.append(response.text)
-                        if not request.silent and current_connection_id:
-                            await self.event_emitter(current_connection_id, "agent.chunk", {"text": response.text})
                     if response.tool_calls:
                         tool_calls.extend(response.tool_calls)
                     if response.usage is not None:
@@ -184,6 +183,9 @@ class AgentLoop:
                 )
 
             if not tool_calls:
+                if assistant_text and not request.silent and current_connection_id:
+                    for chunk in self._chunk_for_delivery(assistant_text):
+                        await self.event_emitter(current_connection_id, "agent.chunk", {"text": chunk})
                 if not request.silent and current_connection_id:
                     await self.event_emitter(current_connection_id, "agent.done", {"session_key": request.session_key})
                 return
@@ -209,6 +211,9 @@ class AgentLoop:
                 )
 
             await self.compaction_manager.maybe_compact(session, system_prompt)
+
+    def _chunk_for_delivery(self, text: str, size: int = 120) -> list[str]:
+        return [text[index : index + size] for index in range(0, len(text), size)] or [text]
 
     async def _dispatch_tool(self, tool_name: str, tool_input: dict[str, Any], session_key: str) -> dict[str, Any]:
         try:

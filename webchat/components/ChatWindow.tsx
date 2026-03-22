@@ -38,7 +38,17 @@ export function ChatWindow() {
   const socketRef = useRef<WebSocket | null>(null);
   const pendingIdRef = useRef<string | null>(null);
   const currentReplyId = useRef<string | null>(null);
+  const ignoredInlineChunkRef = useRef<string | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
   const deviceId = useMemo(() => getDeviceId(), []);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) {
+      return;
+    }
+    transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
+  }, [messages]);
 
   useEffect(() => {
     let disposed = false;
@@ -77,13 +87,53 @@ export function ChatWindow() {
               ),
             );
             currentReplyId.current = null;
+            ignoredInlineChunkRef.current = null;
+            pendingIdRef.current = null;
+            return;
+          }
+
+          const payload = (frame.payload as Record<string, unknown> | undefined) ?? undefined;
+          const commandResponse = typeof payload?.command_response === "string" ? payload.command_response : null;
+          if (commandResponse) {
+            ignoredInlineChunkRef.current = commandResponse;
+            setMessages((current) => {
+              const replyId = currentReplyId.current ?? crypto.randomUUID();
+              currentReplyId.current = replyId;
+              const placeholder = [...current]
+                .reverse()
+                .find((item) => item.role === "assistant" && item.content === "Thinking...");
+              if (placeholder) {
+                return current.map((item) =>
+                  item.id === placeholder.id ? { ...item, id: replyId, content: commandResponse } : item,
+                );
+              }
+              const existing = current.find((item) => item.id === replyId);
+              if (existing) {
+                return current.map((item) =>
+                  item.id === replyId ? { ...item, content: commandResponse } : item,
+                );
+              }
+              return [...current, { id: replyId, role: "assistant", content: commandResponse }];
+            });
           }
         }
         if (frame.type === "event" && frame.event === "agent.chunk") {
           const text = String((frame.payload as Record<string, unknown> | undefined)?.text ?? "");
+          if (ignoredInlineChunkRef.current && text === ignoredInlineChunkRef.current) {
+            ignoredInlineChunkRef.current = null;
+            return;
+          }
           setMessages((current) => {
             const replyId = currentReplyId.current ?? crypto.randomUUID();
             currentReplyId.current = replyId;
+            const placeholder = [...current]
+              .reverse()
+              .find((item) => item.role === "assistant" && item.content === "Thinking...");
+            if (placeholder) {
+              return current.map((item) =>
+                item.id === placeholder.id ? { ...item, id: replyId, content: text } : item,
+              );
+            }
             const existing = current.find((item) => item.id === replyId);
             if (!existing) {
               return [...current, { id: replyId, role: "assistant", content: text }];
@@ -103,6 +153,8 @@ export function ChatWindow() {
             ),
           );
           currentReplyId.current = null;
+          ignoredInlineChunkRef.current = null;
+          pendingIdRef.current = null;
         }
       };
     };
@@ -143,49 +195,82 @@ export function ChatWindow() {
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.4fr_0.8fr]">
-      <section className="rounded-[2rem] border border-line bg-white p-5 shadow-card">
-        <div className="mb-4 flex items-center justify-between">
+    <div className="space-y-4">
+      <section className="rounded-[2rem] border border-white/80 bg-white/85 p-5 shadow-panel backdrop-blur">
+        <div className="flex flex-col gap-4 border-b border-line/70 pb-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-accent">Live Chat</p>
-            <h1 className="text-3xl font-semibold">SonarBot</h1>
+            <p className="text-xs uppercase tracking-[0.28em] text-accent">Live Relay</p>
+            <h1 className="mt-2 font-display text-4xl leading-none text-ink">SonarBot Console</h1>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">
+              One continuous thread across tools, memory, and automation. Ask naturally, use slash commands, or trigger
+              OAuth and browser tasks from the same panel.
+            </p>
           </div>
-          <div className={`rounded-full px-3 py-1 text-xs ${socketReady ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-            {socketReady ? "Connected" : "Connecting"}
+          <div className="flex flex-wrap gap-2">
+            <div
+              className={`rounded-full px-3 py-1 text-xs ${
+                socketReady ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+              }`}
+            >
+              {socketReady ? "Realtime connected" : "Reconnecting"}
+            </div>
+            <div className="rounded-full bg-glow px-3 py-1 text-xs text-accent">Session webchat_main</div>
+            <div className="rounded-full bg-sand px-3 py-1 text-xs text-slate-700">Transport WebSocket</div>
           </div>
         </div>
 
-        <div className="mb-4 flex h-[60vh] flex-col gap-3 overflow-y-auto rounded-3xl bg-mist/60 p-4">
+        <div
+          ref={transcriptRef}
+          className="mt-5 flex h-[68vh] flex-col gap-3 overflow-y-auto rounded-[1.75rem] border border-line/70 bg-gradient-to-b from-foam via-white to-white px-4 py-5"
+        >
+          {messages.length === 0 ? (
+            <div className="rounded-[1.5rem] border border-dashed border-line/80 bg-white/80 p-5 text-sm text-slate-500">
+              Your conversation will appear here. Try asking SonarBot about recent email, GitHub repos, or use
+              <span className="mx-1 rounded bg-glow px-2 py-1 text-accent">/oauth-status</span>
+              to inspect connected providers.
+            </div>
+          ) : null}
           {messages.map((message) => (
             <MessageBubble key={message.id} role={message.role} content={message.content} />
           ))}
         </div>
 
-        <form onSubmit={onSubmit} className="flex gap-3">
+        <form onSubmit={onSubmit} className="mt-4 flex gap-3 rounded-[1.5rem] border border-line/70 bg-white/90 p-3">
           <input
-            className="flex-1 rounded-2xl border border-line px-4 py-3 outline-none transition focus:border-accent"
+            className="flex-1 rounded-2xl bg-transparent px-3 py-3 outline-none transition placeholder:text-slate-400"
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="Send a message or try /skills"
+            placeholder="Ask about Gmail, GitHub, memory, or try /skills"
           />
-          <button className="rounded-2xl bg-accent px-5 py-3 text-white transition hover:bg-ink" type="submit">
+          <button
+            className="rounded-2xl bg-accent px-5 py-3 text-sm font-medium text-white transition hover:bg-ink"
+            type="submit"
+          >
             Send
           </button>
         </form>
       </section>
 
-      <div className="space-y-6">
-        <section className="rounded-3xl border border-line bg-white p-5 shadow-card">
-          <p className="text-xs uppercase tracking-[0.2em] text-accent">Quick Notes</p>
-          <h2 className="mt-2 text-2xl font-semibold">Command Surface</h2>
-          <ul className="mt-4 space-y-2 text-sm text-slate-600">
-            <li>/new starts a fresh session</li>
-            <li>/status shows the current runtime state</li>
-            <li>/memory prints long-term memory</li>
-            <li>/skills lists enabled skills</li>
+      <section className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-[1.75rem] border border-white/80 bg-white/80 p-5 shadow-card">
+          <p className="text-xs uppercase tracking-[0.24em] text-accent">Command Surface</p>
+          <h2 className="mt-2 font-display text-2xl text-ink">Fast paths</h2>
+          <ul className="mt-4 space-y-2 text-sm leading-6 text-slate-600">
+            <li><span className="font-medium text-ink">/new</span> starts a fresh session thread</li>
+            <li><span className="font-medium text-ink">/status</span> shows runtime and session details</li>
+            <li><span className="font-medium text-ink">/oauth-status</span> lists connected providers</li>
+            <li><span className="font-medium text-ink">/skills</span> shows enabled workflow skills</li>
           </ul>
-        </section>
-      </div>
+        </div>
+        <div className="rounded-[1.75rem] border border-white/80 bg-gradient-to-br from-ink to-accent p-5 text-white shadow-card">
+          <p className="text-xs uppercase tracking-[0.24em] text-white/70">Connected Capabilities</p>
+          <h2 className="mt-2 font-display text-2xl">What SonarBot can reach</h2>
+          <p className="mt-3 text-sm leading-6 text-white/85">
+            Gmail, GitHub, memory, browser automation, search, and delegated agent tasks all feed into this same live
+            workspace.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }

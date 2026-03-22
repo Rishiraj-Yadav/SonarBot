@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -108,7 +107,14 @@ class GeminiProvider(ModelProvider):
             name = message.get("name", "tool")
             return f"Tool result from {name}:\n{content}"
         if message.get("tool_calls") and not content:
-            return f"Tool calls requested: {json.dumps(message['tool_calls'])}"
+            tool_names = [
+                str(tool_call.get("name", "tool"))
+                for tool_call in message.get("tool_calls", [])
+                if isinstance(tool_call, dict)
+            ]
+            if tool_names:
+                return f"Assistant requested tool call(s): {', '.join(tool_names)}"
+            return "Assistant requested a tool call."
         return content
 
     def _parse_response(self, data: dict[str, Any]) -> tuple[str, list[ToolCall], UsageStats | None]:

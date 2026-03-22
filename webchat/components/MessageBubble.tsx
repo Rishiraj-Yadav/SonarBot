@@ -41,9 +41,18 @@ function renderLinkedContent(content: string): ReactNode {
 
 export function MessageBubble({ role, content }: Props) {
   const isUser = role === "user";
+  const isAssistant = role === "assistant";
   return (
-    <div className={`rounded-2xl px-4 py-3 shadow-card ${isUser ? "bg-accent text-white" : "bg-white text-ink"}`}>
-      <div className="mb-1 text-xs uppercase tracking-[0.2em] opacity-70">{role}</div>
+    <div
+      className={`max-w-[88%] rounded-[1.5rem] border px-4 py-3 shadow-card ${
+        isUser
+          ? "ml-auto border-accent/20 bg-accent text-white"
+          : isAssistant
+            ? "border-white/80 bg-white/95 text-ink"
+            : "border-line bg-sand/70 text-ink"
+      }`}
+    >
+      <div className="mb-1 text-[11px] uppercase tracking-[0.24em] opacity-70">{role}</div>
       <div className="whitespace-pre-wrap text-sm leading-6">{renderLinkedContent(content)}</div>
     </div>
   );

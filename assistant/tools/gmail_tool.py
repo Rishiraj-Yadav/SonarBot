@@ -15,46 +15,43 @@ GMAIL_API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 def build_gmail_tools(oauth_token_manager) -> list[ToolDefinition]:
     async def gmail_search(payload: dict[str, Any]) -> dict[str, Any]:
-        query = str(payload.get("query", "")).strip()
+        query = str(payload.get("query", "")).strip() or "in:inbox"
         limit = max(1, min(int(payload.get("limit", 10)), 25))
         token = await _require_google_token(oauth_token_manager)
 
-        threads_response = await _gmail_request(
-            token,
-            "GET",
-            f"{GMAIL_API_ROOT}/threads",
-            params={"q": query, "maxResults": limit},
-        )
-        thread_refs = threads_response.get("threads", []) or []
-
-        results: list[dict[str, Any]] = []
-        for ref in thread_refs[:limit]:
-            thread_id = str(ref.get("id", ""))
-            if not thread_id:
-                continue
-            thread = await _gmail_request(
-                token,
-                "GET",
-                f"{GMAIL_API_ROOT}/threads/{thread_id}",
-                params={
-                    "format": "metadata",
-                    "metadataHeaders": ["Subject", "From", "Date"],
-                },
-            )
-            latest_message = (thread.get("messages", []) or [{}])[-1]
-            headers = _headers_to_dict(latest_message.get("payload", {}).get("headers", []))
-            results.append(
-                {
-                    "thread_id": thread_id,
-                    "history_id": thread.get("historyId"),
-                    "snippet": thread.get("snippet", ""),
-                    "subject": headers.get("Subject", ""),
-                    "from": headers.get("From", ""),
-                    "date": headers.get("Date", ""),
-                }
-            )
+        results = await _list_thread_summaries(token, query=query, limit=limit)
 
         return {"query": query, "count": len(results), "threads": results}
+
+    async def gmail_latest_email(payload: dict[str, Any]) -> dict[str, Any]:
+        token = await _require_google_token(oauth_token_manager)
+        query = str(payload.get("query", "")).strip() or "in:inbox"
+        summaries = await _list_thread_summaries(token, query=query, limit=1)
+        if not summaries:
+            return {"query": query, "found": False, "message": "No matching Gmail threads were found."}
+
+        latest = summaries[0]
+        thread = await _gmail_request(
+            token,
+            "GET",
+            f"{GMAIL_API_ROOT}/threads/{latest['thread_id']}",
+            params={"format": "full"},
+        )
+        latest_message = (thread.get("messages", []) or [{}])[-1]
+        payload_block = latest_message.get("payload", {}) or {}
+        headers = _headers_to_dict(payload_block.get("headers", []))
+        return {
+            "query": query,
+            "found": True,
+            "thread_id": latest["thread_id"],
+            "message_id": latest_message.get("id"),
+            "subject": headers.get("Subject", latest.get("subject", "")),
+            "from": headers.get("From", latest.get("from", "")),
+            "to": headers.get("To", ""),
+            "date": headers.get("Date", latest.get("date", "")),
+            "snippet": latest.get("snippet", ""),
+            "body": _extract_gmail_body(payload_block),
+        }
 
     async def gmail_read_thread(payload: dict[str, Any]) -> dict[str, Any]:
         thread_id = str(payload["thread_id"]).strip()
@@ -116,16 +113,26 @@ def build_gmail_tools(oauth_token_manager) -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="gmail_search",
-            description="Search Gmail threads with a Gmail query string and return matching thread summaries.",
+            description="Search Gmail threads and return matching thread summaries. If query is omitted, return the newest inbox threads.",
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "default": 10},
                 },
-                "required": ["query"],
             },
             handler=gmail_search,
+        ),
+        ToolDefinition(
+            name="gmail_latest_email",
+            description="Get the newest received Gmail message. Optionally provide a Gmail query to narrow the latest match.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                },
+            },
+            handler=gmail_latest_email,
         ),
         ToolDefinition(
             name="gmail_read_thread",
@@ -170,6 +177,45 @@ def build_gmail_tools(oauth_token_manager) -> list[ToolDefinition]:
             handler=gmail_create_draft,
         ),
     ]
+
+
+async def _list_thread_summaries(access_token: str, *, query: str, limit: int) -> list[dict[str, Any]]:
+    threads_response = await _gmail_request(
+        access_token,
+        "GET",
+        f"{GMAIL_API_ROOT}/threads",
+        params={"q": query, "maxResults": limit},
+    )
+    thread_refs = threads_response.get("threads", []) or []
+
+    results: list[dict[str, Any]] = []
+    for ref in thread_refs[:limit]:
+        thread_id = str(ref.get("id", ""))
+        if not thread_id:
+            continue
+        thread = await _gmail_request(
+            access_token,
+            "GET",
+            f"{GMAIL_API_ROOT}/threads/{thread_id}",
+            params={
+                "format": "metadata",
+                "metadataHeaders": ["Subject", "From", "Date", "To"],
+            },
+        )
+        latest_message = (thread.get("messages", []) or [{}])[-1]
+        headers = _headers_to_dict(latest_message.get("payload", {}).get("headers", []))
+        results.append(
+            {
+                "thread_id": thread_id,
+                "history_id": thread.get("historyId"),
+                "snippet": thread.get("snippet", ""),
+                "subject": headers.get("Subject", ""),
+                "from": headers.get("From", ""),
+                "to": headers.get("To", ""),
+                "date": headers.get("Date", ""),
+            }
+        )
+    return results
 
 
 async def _require_google_token(oauth_token_manager) -> str:

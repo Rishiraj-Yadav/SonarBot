@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from assistant.agent.session import create_message
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.gateway.protocol import AgentSendParams, RequestFrame, ResponseFrame
 
@@ -24,6 +25,7 @@ class GatewayRouter:
     hook_runner: Any
     presence_registry: Any
     oauth_flow_manager: Any
+    tool_registry: Any
     started_at: datetime
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
@@ -55,6 +57,7 @@ class GatewayRouter:
         metadata = dict(metadata or {})
         metadata.setdefault("trace_id", uuid4().hex)
         stripped = message.strip()
+        system_suffix = self._augment_system_suffix_for_intent(stripped, system_suffix)
         if stripped.startswith("/"):
             return await self._handle_slash_command(
                 connection_id=connection_id,
@@ -72,6 +75,9 @@ class GatewayRouter:
                 session_key=session_key,
                 raw_command="/oauth-status",
             )
+        shortcut = await self._handle_tool_shortcut(request_id, session_key, stripped, metadata)
+        if shortcut is not None:
+            return shortcut
 
         hook_event = await self.hook_runner.fire_event(
             "message:received",
@@ -369,3 +375,171 @@ class GatewayRouter:
     def _looks_like_oauth_status_request(self, message: str) -> bool:
         lowered = message.lower().strip()
         return lowered in {"oauth status", "show oauth status", "show connected oauth providers"}
+
+    async def _handle_tool_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        lowered = message.lower().strip()
+        if self._looks_like_latest_email_request(lowered):
+            try:
+                result = await self.tool_registry.dispatch("gmail_latest_email", {"session_key": session_key})
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_latest_email_response(result)
+            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if self._looks_like_repo_count_request(lowered):
+            try:
+                result = await self.tool_registry.dispatch("github_list_repos", {"limit": 50, "session_key": session_key})
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            repositories = result.get("repositories", []) if isinstance(result, dict) else []
+            response_text = f"You currently have {len(repositories)} repositories visible through the connected GitHub account."
+            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if self._looks_like_pull_request_check(lowered):
+            repo_ref = await self._resolve_repo_reference(session_key, message)
+            if repo_ref is None:
+                response_text = (
+                    "I need the repository name to check pull requests. Tell me the repo as owner/name, "
+                    "for example Rishiraj-Yadav/Personal-AI-Assistant."
+                )
+                await self._persist_inline_exchange(session_key, message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            owner, repo = repo_ref
+            try:
+                result = await self.tool_registry.dispatch(
+                    "github_list_pull_requests",
+                    {"owner": owner, "repo": repo, "limit": 20, "state": "open", "session_key": session_key},
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_pull_request_response(owner, repo, result)
+            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        return None
+
+    def _augment_system_suffix_for_intent(self, message: str, existing: str | None) -> str | None:
+        lowered = message.lower()
+        hints: list[str] = []
+        if (("last" in lowered or "latest" in lowered) and ("mail" in lowered or "email" in lowered)) or (
+            "recent email" in lowered
+        ):
+            hints.append(
+                "If Google OAuth is connected and the user wants the newest email, prefer gmail_latest_email. "
+                "Do not ask for a search query unless the user explicitly asks for filtering."
+            )
+        if ("repo" in lowered or "repository" in lowered) and ("how many" in lowered or "count" in lowered):
+            hints.append(
+                "If GitHub OAuth is connected and the user asks for a repository count, use github_list_repos and "
+                "count the returned repositories instead of asking a follow-up question."
+            )
+        if not hints:
+            return existing
+        if existing:
+            return f"{existing}\n\n## Intent Hint\n" + "\n".join(hints)
+        return "## Intent Hint\n" + "\n".join(hints)
+
+    def _looks_like_latest_email_request(self, lowered: str) -> bool:
+        has_email_word = "mail" in lowered or "email" in lowered
+        has_latest_word = "last" in lowered or "latest" in lowered or "newest" in lowered
+        received_hint = "received" in lowered or "got" in lowered or "inbox" in lowered
+        return has_email_word and has_latest_word and received_hint
+
+    def _looks_like_repo_count_request(self, lowered: str) -> bool:
+        has_repo_word = "repo" in lowered or "repository" in lowered
+        has_count_word = "how many" in lowered or "count" in lowered
+        return has_repo_word and has_count_word
+
+    def _looks_like_pull_request_check(self, lowered: str) -> bool:
+        pr_hint = "pull request" in lowered or "pull requests" in lowered or re.search(r"\bpr\b", lowered) is not None
+        status_hint = any(token in lowered for token in ("is there", "are there", "list", "show", "open"))
+        repo_hint = "repo" in lowered or "repository" in lowered or self._extract_repo_from_text(lowered) is not None
+        return bool(pr_hint and (status_hint or repo_hint))
+
+    def _format_latest_email_response(self, result: dict[str, Any]) -> str:
+        if not result.get("found"):
+            return str(result.get("message", "No matching Gmail threads were found."))
+        snippet = str(result.get("snippet", "")).strip()
+        body = str(result.get("body", "")).strip()
+        preview = body or snippet or "No preview was available."
+        preview = preview[:600].strip()
+        return (
+            "Latest email in your inbox:\n"
+            f"From: {result.get('from', 'Unknown sender')}\n"
+            f"Subject: {result.get('subject', '(no subject)')}\n"
+            f"Date: {result.get('date', 'Unknown date')}\n\n"
+            f"Preview:\n{preview}"
+        )
+
+    def _format_pull_request_response(self, owner: str, repo: str, result: dict[str, Any]) -> str:
+        pull_requests = result.get("pull_requests", []) if isinstance(result, dict) else []
+        if not pull_requests:
+            return f"There are no open pull requests in {owner}/{repo}."
+        lines = [f"There are {len(pull_requests)} open pull request(s) in {owner}/{repo}:"]
+        for pull in pull_requests[:5]:
+            lines.append(
+                f"- #{pull.get('number')}: {pull.get('title', '(no title)')} by {pull.get('user', 'unknown')} "
+                f"({pull.get('html_url', 'no url')})"
+            )
+        if len(pull_requests) > 5:
+            lines.append(f"...and {len(pull_requests) - 5} more.")
+        return "\n".join(lines)
+
+    async def _resolve_repo_reference(self, session_key: str, message: str) -> tuple[str, str] | None:
+        direct = self._extract_repo_from_text(message)
+        if direct is not None:
+            return direct
+        history = await self.session_manager.session_history(session_key, limit=20)
+        for item in reversed(history):
+            content = str(item.get("content", ""))
+            extracted = self._extract_repo_from_text(content)
+            if extracted is not None:
+                return extracted
+        return None
+
+    def _extract_repo_from_text(self, text: str) -> tuple[str, str] | None:
+        match = re.search(r"\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\b", text)
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    async def _persist_inline_exchange(
+        self,
+        session_key: str,
+        user_message: str,
+        assistant_message: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        session = await self.session_manager.load_or_create(session_key)
+        await self.session_manager.append_message(
+            session,
+            create_message("user", user_message, **metadata),
+        )
+        await self.session_manager.append_message(
+            session,
+            create_message("assistant", assistant_message),
+        )

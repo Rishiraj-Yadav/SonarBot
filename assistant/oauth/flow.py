@@ -23,6 +23,7 @@ class OAuthFlowManager:
         self.config = config
         self.token_manager = token_manager
         self._pending_by_state: dict[str, PendingOAuthFlow] = {}
+        self._completed_by_state: dict[str, dict[str, Any]] = {}
 
     async def start_oauth_flow(self, provider_name: str) -> dict[str, Any]:
         provider = get_oauth_provider(provider_name, self.config)
@@ -50,6 +51,10 @@ class OAuthFlowManager:
     async def handle_callback(self, provider_name: str, code: str, state: str) -> dict[str, Any]:
         pending = self._pending_by_state.get(state)
         if pending is None:
+            completed = self._completed_by_state.get(state)
+            if completed is not None and completed.get("provider") == provider_name:
+                return completed
+        if pending is None:
             raise RuntimeError("Unknown or expired OAuth state.")
         if pending.provider_name != provider_name:
             raise RuntimeError("OAuth provider mismatch for this state.")
@@ -60,6 +65,7 @@ class OAuthFlowManager:
         if not pending.result_future.done():
             pending.result_future.set_result(saved)
         self._pending_by_state.pop(state, None)
+        self._completed_by_state[state] = saved
         return saved
 
     async def wait_for_completion(self, state: str, timeout: int = 300) -> dict[str, Any]:

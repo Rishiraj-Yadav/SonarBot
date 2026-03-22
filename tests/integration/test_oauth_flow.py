@@ -54,6 +54,9 @@ async def test_oauth_flow_saves_and_refreshes_token(app_config, monkeypatch) -> 
     assert refreshed["access_token"] == "token-2"
     assert refreshed["refresh_token"] == "refresh-1"
 
+    repeated = await flow_manager.handle_callback("google", "auth-code", flow["state"])
+    assert repeated["access_token"] == "token-1"
+
 
 @pytest.mark.asyncio
 async def test_get_token_falls_back_to_most_recent_provider_token(app_config) -> None:

@@ -141,6 +141,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             hook_runner=hook_runner,
             presence_registry=presence_registry,
             oauth_flow_manager=oauth_flow_manager,
+            tool_registry=tool_registry,
             started_at=started_at,
         )
         channels = _build_channels(runtime_config, connection_manager, router)
@@ -242,7 +243,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         services: GatewayServices = app.state.services
         resolved = _resolve_webchat_session_key(session_key)
         history = await services.session_manager.session_history(resolved, limit=min(max(limit, 1), 200))
-        return {"session_key": resolved, "messages": history}
+        return {"session_key": resolved, "messages": _format_webchat_history(history)}
 
     @app.get("/api/dashboard")
     async def dashboard(session_key: str = "webchat_main") -> dict[str, Any]:
@@ -503,3 +504,23 @@ async def _emit_inline_command_response(
     session_key = str(payload.get("session_key", "main"))
     await services.connection_manager.send_event(connection_id, "agent.chunk", {"text": str(command_text)})
     await services.connection_manager.send_event(connection_id, "agent.done", {"session_key": session_key})
+
+
+def _format_webchat_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formatted: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", "")).strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        formatted.append(
+            {
+                "id": str(message.get("id", uuid4().hex)),
+                "role": role,
+                "content": content,
+                "created_at": message.get("created_at"),
+            }
+        )
+    return formatted
