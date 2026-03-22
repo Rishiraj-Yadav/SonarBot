@@ -1,0 +1,93 @@
+# Local secrets and runtime config
+.env
+.env.*
+!.env.example
+assistant/config.toml
+config.toml
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.nox/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+site/
+build/
+dist/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Test and debug outputs
+debug_tmp/
+debug_subagent/
+*.tmp
+*.temp
+*.bak
+
+# Logs and local databases
+*.log
+*.out
+*.err
+*.pid
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Local assistant runtime state
+.assistant/
+chroma/
+
+# Generated workspace artifacts
+workspace/inbox/
+workspace/browser/
+workspace/sandbox/
+workspace/memory/
+
+# WebChat / Node / Next.js
+webchat/node_modules/
+webchat/.next/
+webchat/out/
+webchat/.turbo/
+webchat/coverage/
+webchat/playwright-report/
+webchat/test-results/
+webchat/*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Keep committed examples and lockfiles
+!.env.example
+!config.toml.example
+!requirements.txt
+!pyproject.toml
+!uv.lock

@@ -1,0 +1,2 @@
+- If there are urgent tasks recorded in today's memory, remind me during heartbeat checks.
+- Keep long-term memory concise and factual when writing durable notes.

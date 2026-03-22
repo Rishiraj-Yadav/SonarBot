@@ -1,0 +1,65 @@
+"""Tool registry and dispatch."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
+
+ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+CleanupHandler = Callable[[], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class ToolDefinition:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    handler: ToolHandler
+
+
+class ToolRegistry:
+    def __init__(self) -> None:
+        self._tools: dict[str, ToolDefinition] = {}
+        self._cleanup_handlers: list[CleanupHandler] = []
+
+    def register(self, tool: ToolDefinition) -> None:
+        self._tools[tool.name] = tool
+
+    def register_cleanup(self, handler: CleanupHandler) -> None:
+        self._cleanup_handlers.append(handler)
+
+    def has(self, tool_name: str) -> bool:
+        return tool_name in self._tools
+
+    def names(self) -> list[str]:
+        return list(self._tools.keys())
+
+    def subset(self, tool_names: list[str] | None = None) -> "ToolRegistry":
+        child = ToolRegistry()
+        selected = tool_names or list(self._tools.keys())
+        for name in selected:
+            if name in self._tools:
+                child.register(self._tools[name])
+        return child
+
+    def get_tools_schema(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+            for tool in self._tools.values()
+        ]
+
+    async def dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+        if tool_name not in self._tools:
+            raise KeyError(f"Unknown tool '{tool_name}'.")
+        return await self._tools[tool_name].handler(tool_input)
+
+    async def close(self) -> None:
+        if not self._cleanup_handlers:
+            return
+        await asyncio.gather(*(handler() for handler in self._cleanup_handlers), return_exceptions=True)

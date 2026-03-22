@@ -1,0 +1,470 @@
+"""FastAPI server and WebSocket gateway."""
+
+from __future__ import annotations
+
+import json
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+
+from assistant.agent.loop import AgentLoop
+from assistant.agent.queue import QueueMode
+from assistant.agent.session_manager import SessionManager
+from assistant.agent.system_prompt import SystemPromptBuilder
+from assistant.automation import (
+    AutomationScheduler,
+    HeartbeatService,
+    StandingOrdersManager,
+    render_webhook_message,
+    verify_webhook_signature,
+)
+from assistant.channels.base import ChannelMessage
+from assistant.channels.telegram.adapter import TelegramChannel
+from assistant.channels.webchat import get_webchat_device_id
+from assistant.config import AppConfig, load_config
+from assistant.gateway.auth import authenticate_token
+from assistant.gateway.connection_manager import ConnectionManager
+from assistant.gateway.device_registry import DeviceRegistry
+from assistant.gateway.protocol import ConnectFrame, HelloOkFrame, RequestFrame, ResponseFrame
+from assistant.gateway.router import GatewayRouter
+from assistant.hooks.runner import HookRunner
+from assistant.memory import MemoryManager
+from assistant.models import get_provider
+from assistant.multi_agent import PresenceRegistry, SubAgentManager
+from assistant.oauth import OAuthFlowManager, OAuthTokenManager
+from assistant.sandbox import SandboxRuntime
+from assistant.skills.registry import SkillRegistry
+from assistant.skills.watcher import SkillWatcher
+from assistant.tools.agent_send_tool import build_agent_send_tool
+from assistant.tools import create_default_tool_registry
+from assistant.utils import configure_logging, get_logger
+
+
+@dataclass(slots=True)
+class GatewayServices:
+    config: AppConfig
+    connection_manager: ConnectionManager
+    device_registry: DeviceRegistry
+    session_manager: SessionManager
+    memory_manager: MemoryManager
+    prompt_builder: SystemPromptBuilder
+    tool_registry: Any
+    model_provider: Any
+    agent_loop: AgentLoop
+    router: GatewayRouter
+    started_at: datetime
+    channels: list[Any]
+    skill_registry: SkillRegistry
+    skill_watcher: SkillWatcher
+    hook_runner: HookRunner
+    standing_orders: StandingOrdersManager
+    automation_scheduler: AutomationScheduler | None
+    heartbeat_service: HeartbeatService
+    oauth_token_manager: OAuthTokenManager
+    oauth_flow_manager: OAuthFlowManager
+    presence_registry: PresenceRegistry
+    sub_agent_manager: SubAgentManager
+    sandbox_runtime: SandboxRuntime
+    logger: Any
+
+
+def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        runtime_config = config or load_config()
+        runtime_config.ensure_runtime_dirs()
+        configure_logging(runtime_config.logs_dir / "gateway.log")
+        logger = get_logger("gateway")
+        connection_manager = ConnectionManager(rate_limit_per_minute=runtime_config.gateway.rate_limit_per_minute)
+        device_registry = DeviceRegistry(runtime_config)
+        await device_registry.initialize()
+        session_manager = SessionManager(runtime_config)
+        memory_manager = MemoryManager(runtime_config)
+        skill_registry = SkillRegistry(runtime_config)
+        skill_registry.start()
+        skill_watcher = SkillWatcher(skill_registry)
+        hook_runner = HookRunner(runtime_config)
+        hook_runner.load_hooks()
+        oauth_token_manager = OAuthTokenManager(runtime_config)
+        await oauth_token_manager.initialize()
+        oauth_flow_manager = OAuthFlowManager(runtime_config, oauth_token_manager)
+        sandbox_runtime = SandboxRuntime(runtime_config)
+        prompt_builder = SystemPromptBuilder(
+            runtime_config.agent.workspace_dir,
+            memory_manager=memory_manager,
+            skill_registry=skill_registry,
+        )
+        provider = model_provider or get_provider(runtime_config)
+        tool_registry = create_default_tool_registry(
+            runtime_config,
+            memory_manager=memory_manager,
+            model_provider=provider,
+            oauth_flow_manager=oauth_flow_manager,
+            oauth_token_manager=oauth_token_manager,
+            sandbox_runtime=sandbox_runtime,
+        )
+        presence_registry = PresenceRegistry()
+        agent_loop = AgentLoop(
+            config=runtime_config,
+            model_provider=provider,
+            tool_registry=tool_registry,
+            session_manager=session_manager,
+            system_prompt_builder=prompt_builder,
+            event_emitter=connection_manager.send_event,
+            typing_emitter=connection_manager.send_typing,
+        )
+        presence_registry.register("main", "main", capabilities=tool_registry.names())
+        sub_agent_manager = SubAgentManager(
+            config=runtime_config,
+            model_provider=provider,
+            session_manager=session_manager,
+            base_tool_registry=tool_registry,
+            presence_registry=presence_registry,
+        )
+        tool_registry.register(build_agent_send_tool(sub_agent_manager))
+        started_at = datetime.now(timezone.utc)
+        router = GatewayRouter(
+            config=runtime_config,
+            agent_loop=agent_loop,
+            connection_manager=connection_manager,
+            session_manager=session_manager,
+            memory_manager=memory_manager,
+            skill_registry=skill_registry,
+            hook_runner=hook_runner,
+            presence_registry=presence_registry,
+            started_at=started_at,
+        )
+        channels = _build_channels(runtime_config, connection_manager, router)
+        standing_orders = StandingOrdersManager(runtime_config.agent.workspace_dir)
+        automation_scheduler = AutomationScheduler(runtime_config, agent_loop) if runtime_config.automation.cron_jobs else None
+        heartbeat_service = HeartbeatService(runtime_config, agent_loop, standing_orders)
+        app.state.services = GatewayServices(
+            config=runtime_config,
+            connection_manager=connection_manager,
+            device_registry=device_registry,
+            session_manager=session_manager,
+            memory_manager=memory_manager,
+            prompt_builder=prompt_builder,
+            tool_registry=tool_registry,
+            model_provider=provider,
+            agent_loop=agent_loop,
+            router=router,
+            started_at=started_at,
+            channels=channels,
+            skill_registry=skill_registry,
+            skill_watcher=skill_watcher,
+            hook_runner=hook_runner,
+            standing_orders=standing_orders,
+            automation_scheduler=automation_scheduler,
+            heartbeat_service=heartbeat_service,
+            oauth_token_manager=oauth_token_manager,
+            oauth_flow_manager=oauth_flow_manager,
+            presence_registry=presence_registry,
+            sub_agent_manager=sub_agent_manager,
+            sandbox_runtime=sandbox_runtime,
+            logger=logger,
+        )
+        await session_manager.start_pruning_task()
+        await prompt_builder.start()
+        await skill_watcher.start()
+        await agent_loop.start()
+        if automation_scheduler is not None:
+            await automation_scheduler.start()
+        await heartbeat_service.start()
+        for channel in channels:
+            connection_manager.register_channel(channel)
+            await channel.start()
+        await _run_startup_hooks(app.state.services)
+        try:
+            yield
+        finally:
+            await agent_loop.wait_for_idle(timeout=30)
+            await connection_manager.close_all()
+            for channel in channels:
+                await channel.stop()
+            await heartbeat_service.stop()
+            if automation_scheduler is not None:
+                await automation_scheduler.stop()
+            await agent_loop.stop()
+            await tool_registry.close()
+            await prompt_builder.stop()
+            await skill_watcher.stop()
+            await session_manager.stop_pruning_task()
+
+    app = FastAPI(title="SonarBot Gateway", lifespan=lifespan)
+
+    @app.get("/__health")
+    async def health() -> dict[str, object]:
+        services: GatewayServices = app.state.services
+        return services.router.health_payload()
+
+    @app.get("/webchat/history")
+    async def webchat_history(session_key: str = "main", limit: int = 50) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        resolved = _resolve_webchat_session_key(session_key)
+        history = await services.session_manager.session_history(resolved, limit=min(max(limit, 1), 200))
+        return {"session_key": resolved, "messages": history}
+
+    @app.get("/api/dashboard")
+    async def dashboard(session_key: str = "webchat_main") -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        return await services.router.dashboard_payload(session_key)
+
+    @app.get("/api/skills")
+    async def list_skills() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        skills = [
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "eligible": skill.eligible,
+                "enabled": skill.enabled,
+                "user_invocable": skill.user_invocable,
+                "path": str(skill.path),
+            }
+            for skill in services.skill_registry.list_all()
+        ]
+        return {"skills": skills}
+
+    @app.post("/api/skills/{name}/toggle")
+    async def toggle_skill(name: str) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        skill = services.skill_registry.toggle(name)
+        return {"name": skill.name, "enabled": skill.enabled}
+
+    @app.get("/api/settings")
+    async def settings() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        return {
+            "gateway": {
+                "host": services.config.gateway.host,
+                "port": services.config.gateway.port,
+            },
+            "agent": {
+                "workspace_dir": str(services.config.agent.workspace_dir),
+                "model": services.config.agent.model,
+                "max_tokens": services.config.agent.max_tokens,
+                "context_window": services.config.agent.context_window,
+            },
+            "channels": services.config.channels.enabled,
+            "automation": {
+                "heartbeat_interval_minutes": services.config.automation.heartbeat_interval_minutes,
+                "cron_jobs": [job.model_dump() for job in services.config.automation.cron_jobs],
+            },
+        }
+
+    @app.post("/webhooks/{name}")
+    async def receive_webhook(name: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        webhook = services.config.automation.webhooks.get(name)
+        if webhook is None:
+            return {"ok": False, "error": "Unknown webhook."}
+        body = await request.body()
+        if not verify_webhook_signature(webhook.secret, body, request.headers.get("X-Signature")):
+            return {"ok": False, "error": "Invalid signature."}
+        payload = json.loads(body.decode("utf-8"))
+        message = render_webhook_message(webhook.message_template, payload)
+        await services.router.route_user_message(
+            connection_id="",
+            request_id=f"webhook-{uuid4().hex}",
+            session_key="main",
+            message=message,
+            metadata={"source": "webhook", "name": name},
+            mode=QueueMode.FOLLOWUP,
+        )
+        return {"ok": True}
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket) -> None:
+        await websocket.accept()
+        services = app.state.services
+        connection = None
+        try:
+            raw_connect = await websocket.receive_text()
+            connect_frame = ConnectFrame.model_validate(json.loads(raw_connect))
+            if not authenticate_token(connect_frame.auth.token, services.config.gateway.token):
+                await websocket.close(code=1008, reason="Invalid gateway token.")
+                return
+
+            connection = await services.connection_manager.connect(websocket, connect_frame.device_id)
+            await services.device_registry.seen(connect_frame.device_id)
+            await websocket.send_text(HelloOkFrame().model_dump_json())
+
+            while True:
+                raw_request = await websocket.receive_text()
+                request_id = "rate-limit"
+                try:
+                    raw_payload = json.loads(raw_request)
+                    if isinstance(raw_payload, dict):
+                        request_id = str(raw_payload.get("id", request_id))
+                except Exception:
+                    pass
+                if not services.connection_manager.allow_request(connection.connection_id):
+                    response = ResponseFrame(id=request_id, ok=False, error="Rate limit exceeded. Try again in a minute.")
+                    await services.connection_manager.send_response(connection.connection_id, response)
+                    continue
+                response = await _process_websocket_request(
+                    services,
+                    connection.connection_id,
+                    raw_request,
+                )
+                if response is not None:
+                    await services.connection_manager.send_response(connection.connection_id, response)
+                    await _emit_inline_command_response(services, connection.connection_id, response)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if connection is not None:
+                await services.connection_manager.disconnect(connection.connection_id)
+            else:
+                await services.connection_manager.disconnect_websocket(websocket)
+
+    @app.websocket("/webchat/ws")
+    async def webchat_websocket(websocket: WebSocket) -> None:
+        await websocket.accept()
+        services = app.state.services
+        device_id = get_webchat_device_id(websocket)
+        connection = await services.connection_manager.connect(websocket, device_id)
+        await services.device_registry.seen(device_id)
+        try:
+            while True:
+                raw_text = await websocket.receive_text()
+                request_id = "rate-limit"
+                payload = json.loads(raw_text)
+                if isinstance(payload, dict):
+                    request_id = str(payload.get("id", request_id))
+                if not services.connection_manager.allow_request(connection.connection_id):
+                    response = ResponseFrame(id=request_id, ok=False, error="Rate limit exceeded. Try again in a minute.")
+                    await services.connection_manager.send_response(connection.connection_id, response)
+                    continue
+                if payload.get("type") == "connect":
+                    await websocket.send_text(HelloOkFrame().model_dump_json())
+                    continue
+                if payload.get("type") == "req" and "params" in payload and "session_key" not in payload["params"]:
+                    payload["params"]["session_key"] = "webchat_main"
+                try:
+                    request = RequestFrame.model_validate(payload)
+                except Exception as exc:
+                    response = ResponseFrame(id=payload.get("id", "unknown"), ok=False, error=f"Malformed frame: {exc}")
+                    await services.connection_manager.send_response(connection.connection_id, response)
+                    continue
+                response = await services.router.handle_request(connection.connection_id, request)
+                await services.connection_manager.send_response(connection.connection_id, response)
+                await _emit_inline_command_response(services, connection.connection_id, response)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await services.connection_manager.disconnect(connection.connection_id)
+
+    return app
+
+
+async def _process_websocket_request(
+    services: GatewayServices,
+    connection_id: str,
+    raw_request: str,
+) -> ResponseFrame | None:
+    try:
+        payload = json.loads(raw_request)
+        request = RequestFrame.model_validate(payload)
+    except Exception as exc:
+        request_id = payload.get("id", "unknown") if isinstance(payload, dict) else "unknown"
+        return ResponseFrame(id=request_id, ok=False, error=f"Malformed frame: {exc}")
+    return await services.router.handle_request(connection_id, request)
+
+
+def _build_channels(config: AppConfig, connection_manager: ConnectionManager, router: GatewayRouter) -> list[Any]:
+    async def handle_channel_message(message: ChannelMessage) -> str:
+        route_id = connection_manager.register_channel_route(
+            channel_name=message.channel,
+            sender_id=message.sender_id,
+            recipient_id=message.metadata.get("chat_id", message.sender_id),
+            metadata={"media_type": message.media_type, "media_path": message.media_path},
+        )
+        session_key = f"{message.channel}:{message.sender_id}"
+        content = _channel_message_to_text(message)
+        response = await router.route_user_message(
+            connection_id=route_id,
+            request_id=uuid4().hex,
+            session_key=session_key,
+            message=content,
+            metadata={
+                "channel": message.channel,
+                "sender_id": message.sender_id,
+                "media_type": message.media_type,
+                "media_path": message.media_path,
+            },
+        )
+        if not response.ok:
+            await connection_manager.send_event(route_id, "agent.chunk", {"text": response.error or "Request rejected."})
+            await connection_manager.send_event(route_id, "agent.done", {"session_key": session_key})
+        else:
+            payload = response.payload or {}
+            command_text = payload.get("command_response")
+            if command_text:
+                await connection_manager.send_event(route_id, "agent.chunk", {"text": str(command_text)})
+                await connection_manager.send_event(
+                    route_id,
+                    "agent.done",
+                    {"session_key": str(payload.get("session_key", session_key))},
+                )
+        return route_id
+
+    channels: list[Any] = []
+    if "telegram" in config.channels.enabled:
+        channels.append(TelegramChannel(config=config, inbound_handler=handle_channel_message))
+    return channels
+
+
+def _channel_message_to_text(message: ChannelMessage) -> str:
+    content = message.text.strip()
+    if message.media_type and message.media_path:
+        attachment_line = f"[Attached {message.media_type}: {message.media_path}]"
+        content = f"{content}\n\n{attachment_line}".strip()
+    return content or "(empty message)"
+
+
+def _resolve_webchat_session_key(session_key: str) -> str:
+    normalized = session_key.strip() or "main"
+    return normalized if normalized.startswith("webchat_") else f"webchat_{normalized}"
+
+
+async def _run_startup_hooks(services: GatewayServices) -> None:
+    event = await services.hook_runner.fire_event(
+        "gateway:startup",
+        context={
+            "session_key": "main",
+            "workspace_dir": str(services.config.agent.workspace_dir),
+        },
+    )
+    for message in event.messages:
+        text = message.get("text") or message.get("content") or message.get("message")
+        if not text:
+            continue
+        await services.router.route_user_message(
+            connection_id="",
+            request_id=f"startup-{uuid4().hex}",
+            session_key=str(message.get("session_key", "main")),
+            message=str(text),
+            metadata={"source": "startup-hook"},
+            mode=QueueMode.FOLLOWUP,
+            silent=bool(message.get("silent", True)),
+        )
+
+
+async def _emit_inline_command_response(
+    services: GatewayServices,
+    connection_id: str,
+    response: ResponseFrame,
+) -> None:
+    payload = response.payload or {}
+    command_text = payload.get("command_response")
+    if not command_text:
+        return
+    session_key = str(payload.get("session_key", "main"))
+    await services.connection_manager.send_event(connection_id, "agent.chunk", {"text": str(command_text)})
+    await services.connection_manager.send_event(connection_id, "agent.done", {"session_key": session_key})

@@ -1,0 +1,49 @@
+[gateway]
+host = "127.0.0.1"
+port = 8765
+token = "change-me"
+rate_limit_per_minute = 10
+
+[agent]
+workspace_dir = "workspace"
+model = "gemini-2.0-flash"
+max_tokens = 2048
+context_window = 32768
+max_sessions_per_key = 20
+session_max_age_days = 90
+
+[agent.compaction.memory_flush]
+enabled = true
+
+[llm]
+gemini_api_key = ""
+openai_api_key = ""
+
+[channels]
+enabled = []
+
+[telegram]
+bot_token = ""
+allowed_user_ids = []
+
+[automation]
+heartbeat_interval_minutes = 15
+cron_jobs = []
+
+[tools]
+brave_api_key = ""
+browser_headless = true
+
+[oauth.google]
+client_id = ""
+client_secret = ""
+
+[oauth.github]
+client_id = ""
+client_secret = ""
+
+[sandbox]
+enabled = false
+image = "python:3.12-slim"
+cpu_limit = 0.5
+memory_limit_mb = 512
