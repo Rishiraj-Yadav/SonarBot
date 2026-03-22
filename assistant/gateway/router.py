@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,7 @@ class GatewayRouter:
     skill_registry: Any
     hook_runner: Any
     presence_registry: Any
+    oauth_flow_manager: Any
     started_at: datetime
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
@@ -59,6 +61,16 @@ class GatewayRouter:
                 request_id=request_id,
                 session_key=session_key,
                 raw_command=stripped,
+            )
+        oauth_provider = self._match_oauth_connect_request(stripped)
+        if oauth_provider is not None:
+            return await self._start_oauth_flow(request_id, session_key, oauth_provider)
+        if self._looks_like_oauth_status_request(stripped):
+            return await self._handle_slash_command(
+                connection_id=connection_id,
+                request_id=request_id,
+                session_key=session_key,
+                raw_command="/oauth-status",
             )
 
         hook_event = await self.hook_runner.fire_event(
@@ -248,6 +260,40 @@ class GatewayRouter:
                 },
             )
 
+        if command_name == "oauth":
+            provider = arguments.strip().lower()
+            if provider not in {"google", "github"}:
+                return ResponseFrame(id=request_id, ok=False, error="Use /oauth google or /oauth github.")
+            return await self._start_oauth_flow(request_id, session_key, provider)
+
+        if command_name in {"oauth-status", "oauth_status"}:
+            hook_event = await self.hook_runner.fire_event(
+                "command:oauth-status",
+                context={
+                    "session_key": session_key,
+                    "command": command_name,
+                    "arguments": arguments,
+                    "logs_dir": str(self.config.logs_dir),
+                },
+            )
+            providers = await self.oauth_flow_manager.token_manager.list_connected()
+            if providers:
+                lines = [
+                    f"- {item['provider']} ({item.get('user_id', 'default')}), expires: {item.get('expires_at', 'unknown')}"
+                    for item in providers
+                ]
+                response_text = "Connected OAuth providers:\n" + "\n".join(lines)
+            else:
+                response_text = "No OAuth providers are connected yet."
+            extra = self._flatten_hook_messages(hook_event.messages)
+            if extra:
+                response_text = f"{response_text}\n\n{extra}"
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text, "providers": providers},
+            )
+
         skill = self.skill_registry.find_user_invocable(command_name)
         if skill is not None:
             skill_prompt = self.skill_registry.load_skill_prompt(skill.name)
@@ -276,6 +322,30 @@ class GatewayRouter:
 
         return ResponseFrame(id=request_id, ok=False, error=f"Unknown slash command '/{command_name}'.")
 
+    async def _start_oauth_flow(self, request_id: str, session_key: str, provider: str) -> ResponseFrame:
+        try:
+            result = await self.oauth_flow_manager.start_oauth_flow(provider)
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = (
+            f"Open this URL in your browser to connect {provider}:\n"
+            f"{result['authorize_url']}\n\n"
+            f"After approving access, SonarBot will receive the callback at:\n{result['redirect_uri']}\n\n"
+            "Then come back here and run /oauth-status."
+        )
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "authorize_url": result["authorize_url"],
+                "redirect_uri": result["redirect_uri"],
+                "provider": provider,
+            },
+        )
+
     def _flatten_hook_messages(self, messages: list[dict[str, Any]]) -> str:
         lines = []
         for item in messages:
@@ -283,3 +353,19 @@ class GatewayRouter:
             if text:
                 lines.append(str(text))
         return "\n\n".join(lines)
+
+    def _match_oauth_connect_request(self, message: str) -> str | None:
+        lowered = message.lower()
+        if "google" in lowered and ("connect" in lowered or "oauth" in lowered) and "account" in lowered:
+            return "google"
+        if "github" in lowered and ("connect" in lowered or "oauth" in lowered) and "account" in lowered:
+            return "github"
+        if re.search(r"\bconnect\b.*\bgoogle\b", lowered):
+            return "google"
+        if re.search(r"\bconnect\b.*\bgithub\b", lowered):
+            return "github"
+        return None
+
+    def _looks_like_oauth_status_request(self, message: str) -> bool:
+        lowered = message.lower().strip()
+        return lowered in {"oauth status", "show oauth status", "show connected oauth providers"}

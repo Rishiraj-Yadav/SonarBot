@@ -5,6 +5,8 @@ from assistant.tools.agent_send_tool import build_agent_send_tool
 from assistant.tools.browser_tool import build_browser_tools
 from assistant.tools.exec_tool import build_exec_tool
 from assistant.tools.file_tool import build_file_tools
+from assistant.tools.github_tool import build_github_tools
+from assistant.tools.gmail_tool import build_gmail_tools
 from assistant.tools.llm_task_tool import build_llm_task_tool
 from assistant.tools.memory_tool import build_memory_tools
 from assistant.tools.oauth_tool import build_oauth_tools
@@ -42,6 +44,10 @@ def create_default_tool_registry(
         registry.register(build_llm_task_tool(model_provider))
     if oauth_flow_manager is not None and oauth_token_manager is not None:
         for tool in build_oauth_tools(oauth_flow_manager, oauth_token_manager):
+            registry.register(tool)
+        for tool in build_gmail_tools(oauth_token_manager):
+            registry.register(tool)
+        for tool in build_github_tools(oauth_token_manager):
             registry.register(tool)
     if sub_agent_manager is not None:
         registry.register(build_agent_send_tool(sub_agent_manager))

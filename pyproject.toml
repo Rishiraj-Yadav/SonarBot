@@ -1,7 +1,7 @@
 [project]
 name = "sonarbot-assistant"
-version = "0.5.0"
-description = "SonarBot autonomous assistant with advanced memory, browser sessions, OAuth, ACP, sub-agents, and sandboxing"
+version = "0.6.0"
+description = "SonarBot autonomous assistant with advanced memory, browser sessions, Gmail/GitHub integrations, OAuth, ACP, sub-agents, and sandboxing"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

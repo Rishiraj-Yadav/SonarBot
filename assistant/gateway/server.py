@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from assistant.agent.loop import AgentLoop
 from assistant.agent.queue import QueueMode
@@ -139,6 +140,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             skill_registry=skill_registry,
             hook_runner=hook_runner,
             presence_registry=presence_registry,
+            oauth_flow_manager=oauth_flow_manager,
             started_at=started_at,
         )
         channels = _build_channels(runtime_config, connection_manager, router)
@@ -205,6 +207,35 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
     async def health() -> dict[str, object]:
         services: GatewayServices = app.state.services
         return services.router.health_payload()
+
+    @app.get("/oauth/callback/{provider_name}")
+    async def oauth_callback(provider_name: str, code: str = "", state: str = "", error: str = ""):
+        services: GatewayServices = app.state.services
+        pretty_provider = {"github": "GitHub", "google": "Google"}.get(provider_name.lower(), provider_name.title())
+        if error:
+            return HTMLResponse(
+                f"<html><body><h2>OAuth failed for {pretty_provider}</h2><p>{error}</p></body></html>",
+                status_code=400,
+            )
+        if not code or not state:
+            return JSONResponse({"ok": False, "error": "Missing code or state."}, status_code=400)
+        try:
+            saved = await services.oauth_flow_manager.handle_callback(provider_name, code, state)
+        except Exception as exc:
+            return HTMLResponse(
+                f"<html><body><h2>OAuth callback error</h2><p>{exc}</p></body></html>",
+                status_code=400,
+            )
+        return HTMLResponse(
+            (
+                "<html><body>"
+                f"<h2>{pretty_provider} connected</h2>"
+                "<p>You can close this tab and return to SonarBot.</p>"
+                f"<pre>{json.dumps({'provider': saved.get('provider'), 'user_id': saved.get('user_id')}, indent=2)}</pre>"
+                "</body></html>"
+            ),
+            status_code=200,
+        )
 
     @app.get("/webchat/history")
     async def webchat_history(session_key: str = "main", limit: int = 50) -> dict[str, Any]:

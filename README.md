@@ -1,6 +1,6 @@
 # SonarBot
 
-SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps its state on disk, serves CLI, Telegram, and WebChat clients, and now includes the full Phase 5 baseline: advanced memory ranking, browser login session reuse, ACP interop, sandbox execution, and polished diagnostics/onboarding.
+SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps its state on disk, serves CLI, Telegram, and WebChat clients, and now includes the full Phase 6 baseline: advanced memory, browser login session reuse, ACP interop, sandbox execution, diagnostics, and OAuth-backed Gmail/GitHub integrations.
 
 ## Current Project Status
 
@@ -9,6 +9,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Phase 3 webchat + automation: WebChat UI/backend, skills, hooks, cron, heartbeat, standing orders, webhook ingestion, browser/PDF/search tools
 - [x] Phase 4 OAuth + orchestration: encrypted OAuth storage, Google/GitHub flows, sub-agents, sandbox-aware shell execution, device/session CLI commands, structured logging, graceful shutdown
 - [x] Phase 5 advanced polish: temporal memory decay, MMR reranking, multimodal memory indexing, browser login sessions, session snapshots, ACP client/tool, `assistant doctor`, expanded e2e/load/unit tests, deployment/config docs
+- [x] Phase 6 service integrations: Gmail search/read/send/draft tools, GitHub repo/issue/PR read tools, Gmail briefing skill, GitHub PR summary skill, OAuth token fallback for connected accounts
 
 ## What You Can Use Today
 
@@ -18,6 +19,8 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - persistent sessions with compaction and snapshots
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
+- Gmail tools: search, read thread, send, create draft
+- GitHub tools: list repos, list issues, list pull requests, get pull request details
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
 - optional Docker sandbox execution
 

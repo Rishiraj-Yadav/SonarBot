@@ -55,6 +55,8 @@ class OAuthTokenManager:
     async def get_token(self, provider: str, user_id: str = "default") -> dict[str, Any] | None:
         await self.initialize()
         record = await self._read_token(provider, user_id)
+        if record is None and user_id == "default":
+            record = await self._read_any_token(provider)
         if record is None:
             return None
         return await self.refresh_if_needed(provider, record)
@@ -101,6 +103,17 @@ class OAuthTokenManager:
             async with db.execute(
                 "SELECT encrypted_payload FROM oauth_tokens WHERE provider = ? AND user_id = ?",
                 (provider, user_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._decrypt_payload(row[0])
+
+    async def _read_any_token(self, provider: str) -> dict[str, Any] | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT encrypted_payload FROM oauth_tokens WHERE provider = ? ORDER BY updated_at DESC LIMIT 1",
+                (provider,),
             ) as cursor:
                 row = await cursor.fetchone()
         if row is None:
