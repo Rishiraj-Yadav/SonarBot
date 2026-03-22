@@ -34,7 +34,7 @@ from assistant.gateway.router import GatewayRouter
 from assistant.hooks.runner import HookRunner
 from assistant.memory import MemoryManager
 from assistant.models import get_provider
-from assistant.multi_agent import PresenceRegistry, SubAgentManager
+from assistant.multi_agent import ACPClient, PresenceRegistry, SubAgentManager
 from assistant.oauth import OAuthFlowManager, OAuthTokenManager
 from assistant.sandbox import SandboxRuntime
 from assistant.skills.registry import SkillRegistry
@@ -68,6 +68,7 @@ class GatewayServices:
     oauth_flow_manager: OAuthFlowManager
     presence_registry: PresenceRegistry
     sub_agent_manager: SubAgentManager
+    acp_client: ACPClient
     sandbox_runtime: SandboxRuntime
     logger: Any
 
@@ -93,6 +94,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         await oauth_token_manager.initialize()
         oauth_flow_manager = OAuthFlowManager(runtime_config, oauth_token_manager)
         sandbox_runtime = SandboxRuntime(runtime_config)
+        acp_client = ACPClient(runtime_config)
         prompt_builder = SystemPromptBuilder(
             runtime_config.agent.workspace_dir,
             memory_manager=memory_manager,
@@ -106,6 +108,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             oauth_flow_manager=oauth_flow_manager,
             oauth_token_manager=oauth_token_manager,
             sandbox_runtime=sandbox_runtime,
+            acp_client=acp_client,
         )
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
@@ -165,6 +168,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             oauth_flow_manager=oauth_flow_manager,
             presence_registry=presence_registry,
             sub_agent_manager=sub_agent_manager,
+            acp_client=acp_client,
             sandbox_runtime=sandbox_runtime,
             logger=logger,
         )

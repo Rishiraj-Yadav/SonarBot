@@ -11,13 +11,14 @@ def build_memory_tools(memory_manager) -> list[ToolDefinition]:
     async def memory_write(payload: dict[str, Any]) -> dict[str, Any]:
         content = str(payload["content"])
         memory_type = payload.get("memory_type", "daily")
+        image_path = str(payload.get("image_path", "")).strip() or None
         if memory_type == "daily":
-            return await memory_manager.write_daily(content)
+            return await memory_manager.write_daily(content, image_path=image_path)
         if memory_type == "longterm":
             key = str(payload.get("key") or "").strip()
             if not key:
                 raise ValueError("memory_write with memory_type='longterm' requires a key.")
-            return await memory_manager.write_long_term(key, content)
+            return await memory_manager.write_long_term(key, content, image_path=image_path)
         raise ValueError("memory_type must be 'daily' or 'longterm'.")
 
     async def memory_get(payload: dict[str, Any]) -> dict[str, Any]:
@@ -31,6 +32,9 @@ def build_memory_tools(memory_manager) -> list[ToolDefinition]:
         limit = int(payload.get("limit", 5))
         return {"query": query, "results": await memory_manager.search(query, limit)}
 
+    async def memory_stats(_payload: dict[str, Any]) -> dict[str, Any]:
+        return await memory_manager.stats()
+
     return [
         ToolDefinition(
             name="memory_write",
@@ -41,6 +45,7 @@ def build_memory_tools(memory_manager) -> list[ToolDefinition]:
                     "content": {"type": "string"},
                     "memory_type": {"type": "string", "enum": ["daily", "longterm"], "default": "daily"},
                     "key": {"type": "string"},
+                    "image_path": {"type": "string"},
                 },
                 "required": ["content"],
             },
@@ -68,5 +73,11 @@ def build_memory_tools(memory_manager) -> list[ToolDefinition]:
                 "required": ["query"],
             },
             handler=memory_search,
+        ),
+        ToolDefinition(
+            name="memory_stats",
+            description="Return memory index coverage, oldest note date, and approximate token coverage.",
+            parameters={"type": "object", "properties": {}},
+            handler=memory_stats,
         ),
     ]

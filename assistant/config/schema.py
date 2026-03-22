@@ -91,6 +91,9 @@ class TelegramConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     vector_enabled: bool = True
+    temporal_decay_lambda: float = 0.02
+    mmr_lambda: float = 0.7
+    multimodal_enabled: bool = True
 
 
 class WebhookConfig(BaseModel):
@@ -186,6 +189,10 @@ class AppConfig(BaseModel):
     @property
     def launch_agents_dir(self) -> Path:
         return Path.home() / "Library" / "LaunchAgents"
+
+    @property
+    def acp_registry_path(self) -> Path:
+        return self.assistant_home / "acp_agents.json"
 
     def ensure_runtime_dirs(self) -> None:
         self.assistant_home.mkdir(parents=True, exist_ok=True)

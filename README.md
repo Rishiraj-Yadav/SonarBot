@@ -1,46 +1,41 @@
 # SonarBot
 
-SonarBot is a local-first autonomous AI assistant that runs as a daemon, persists its memory and sessions on disk, serves multiple user channels, and now includes Phase 4 capabilities for OAuth, sub-agents, sandboxed execution, and runtime hardening.
+SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps its state on disk, serves CLI, Telegram, and WebChat clients, and now includes the full Phase 5 baseline: advanced memory ranking, browser login session reuse, ACP interop, sandbox execution, and polished diagnostics/onboarding.
 
 ## Current Project Status
 
 - [x] Phase 1 foundation: FastAPI gateway, WebSocket protocol, CLI REPL, Gemini provider, core file/shell tools, JSONL session storage
 - [x] Phase 2 memory + Telegram: daily and long-term markdown memory, hybrid search, Telegram adapter, session pruning, pre-compaction memory flush
 - [x] Phase 3 webchat + automation: WebChat UI/backend, skills, hooks, cron, heartbeat, standing orders, webhook ingestion, browser/PDF/search tools
-- [x] Phase 4 OAuth: encrypted OAuth token storage, local callback flow manager, Google + GitHub provider support, `oauth_connect` and `oauth_status` tools
-- [x] Phase 4 multi-agent: presence registry, sub-agent manager, isolated delegated sessions, `agent_send` tool
-- [x] Phase 4 sandboxing: Docker-backed sandbox runtime plus sandbox-aware `exec_shell`
-- [x] Phase 4 hardening: request rate limiting, structured logging setup, device registry, richer health payload, graceful shutdown waiting, retry + circuit breaker for model calls
-- [x] Phase 4 CLI updates: `devices` and `sessions` command groups, service-file generation during onboarding
-- [x] Automated test coverage across Phases 1-4
-- [ ] Phase 5 advanced memory ranking, browser login sessions, ACP interop, deployment docs, and full production polish
+- [x] Phase 4 OAuth + orchestration: encrypted OAuth storage, Google/GitHub flows, sub-agents, sandbox-aware shell execution, device/session CLI commands, structured logging, graceful shutdown
+- [x] Phase 5 advanced polish: temporal memory decay, MMR reranking, multimodal memory indexing, browser login sessions, session snapshots, ACP client/tool, `assistant doctor`, expanded e2e/load/unit tests, deployment/config docs
 
-## What The Repo Includes Now
+## What You Can Use Today
 
-- CLI over `WS /ws`
-- Telegram channel adapter
+- CLI chat over `WS /ws`
+- Telegram bot replies with streaming edits
 - WebChat UI over `WS /webchat/ws`
-- markdown memory plus optional vector search
-- slash commands, skills, hooks, cron, heartbeat, and webhooks
-- OAuth token management for Google and GitHub
-- sub-agent delegation with isolated sessions
+- persistent sessions with compaction and snapshots
+- markdown memory with hybrid search, temporal decay, MMR, and memory stats
+- browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
+- hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
 - optional Docker sandbox execution
 
-## Quickstart
+## Quickstart In 5 Steps
 
-1. Install Python dependencies.
+1. Install dependencies.
 
 ```bash
 uv sync --extra dev
 ```
 
-2. If you want the optional semantic memory stack too:
+2. If you want semantic/vector memory too:
 
 ```bash
 uv sync --extra dev --extra memory
 ```
 
-3. Copy `.env.example` to `.env` and add at least `GEMINI_API_KEY`.
+3. Copy `.env.example` to `.env` and set at least `GEMINI_API_KEY`.
 
 ```bash
 copy .env.example .env
@@ -52,20 +47,15 @@ copy .env.example .env
 uv run assistant onboard
 ```
 
-5. Start the gateway.
+5. Start the gateway and try the clients.
 
 ```bash
 uv run assistant start
-```
-
-6. In another terminal, check health and chat.
-
-```bash
 uv run assistant status
 uv run assistant chat
 ```
 
-7. Optional WebChat:
+Optional WebChat:
 
 ```bash
 cd webchat
@@ -74,6 +64,13 @@ npm run dev
 ```
 
 Then open `http://localhost:3000`.
+
+## Screenshots
+
+- WebChat UI: run the Next.js frontend and open `http://localhost:3000`
+- Telegram conversation: message the configured bot from an allowlisted Telegram account
+
+The repo doesn’t currently commit screenshot image assets, but the UI and Telegram flows are live and ready to capture locally.
 
 ## API Keys And Secrets
 
@@ -102,8 +99,9 @@ Core:
 - `assistant status`
 - `assistant chat`
 - `assistant onboard`
+- `assistant doctor`
 
-Phase 4 additions:
+Management:
 
 - `assistant devices list`
 - `assistant devices approve <id>`
@@ -116,14 +114,17 @@ Phase 4 additions:
 
 ```text
 assistant/   Runtime: gateway, agent loop, channels, memory, oauth, multi-agent, sandbox, tools
-cli/         Typer CLI, onboarding, ws client, device/session command groups
-tests/       Unit and integration coverage
+cli/         Typer CLI, onboarding wizard, diagnostics, ws client, device/session commands
+docs/        Architecture, skills, hooks, deployment, and config reference
+tests/       Unit, integration, e2e, and load coverage
 webchat/     Next.js 15 + Tailwind control plane
-workspace/   Default workspace prompt and memory templates
+workspace/   Default workspace prompt, memory, automation, and identity templates
 ```
 
-## Still Open
+## Documentation
 
-- ACP interoperability
-- advanced memory re-ranking and browser login session reuse
-- deeper production deployment polish and documentation
+- `docs/architecture.md`
+- `docs/skills.md`
+- `docs/hooks.md`
+- `docs/deployment.md`
+- `docs/config_reference.md`

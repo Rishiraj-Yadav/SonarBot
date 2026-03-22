@@ -67,6 +67,10 @@ class SkillRegistry:
                 return skill
         return None
 
+    def load_skill_prompt(self, name: str) -> str:
+        skill = self.skills[name]
+        return skill.load_markdown()
+
     def active_count(self) -> int:
         return len(self.list_enabled())
 

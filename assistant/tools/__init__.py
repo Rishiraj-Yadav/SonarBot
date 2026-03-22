@@ -1,5 +1,6 @@
 """Tool registry factory."""
 
+from assistant.tools.acp_tool import build_acp_tools
 from assistant.tools.agent_send_tool import build_agent_send_tool
 from assistant.tools.browser_tool import build_browser_tools
 from assistant.tools.exec_tool import build_exec_tool
@@ -20,6 +21,7 @@ def create_default_tool_registry(
     oauth_token_manager=None,
     sub_agent_manager=None,
     sandbox_runtime=None,
+    acp_client=None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in build_file_tools(config.agent.workspace_dir):
@@ -43,6 +45,9 @@ def create_default_tool_registry(
             registry.register(tool)
     if sub_agent_manager is not None:
         registry.register(build_agent_send_tool(sub_agent_manager))
+    if acp_client is not None:
+        for tool in build_acp_tools(acp_client):
+            registry.register(tool)
     if sandbox_runtime is not None:
         registry.register_cleanup(sandbox_runtime.close)
     return registry

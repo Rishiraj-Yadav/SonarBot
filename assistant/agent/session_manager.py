@@ -40,6 +40,7 @@ class SessionManager:
         session_id = f"{created_at.replace(':', '').replace('-', '').replace('+00:00', 'Z')}-{uuid4().hex[:8]}"
         session_dir = self.config.sessions_dir / self._session_dir_name(session_key)
         storage_path = session_dir / f"{session_id}.jsonl"
+        snapshot_path = session_dir / f"{session_id}.snapshot.json"
 
         def _create() -> None:
             session_dir.mkdir(parents=True, exist_ok=True)
@@ -54,6 +55,7 @@ class SessionManager:
             created_at=created_at,
             updated_at=created_at,
             storage_path=storage_path,
+            snapshot_path=snapshot_path,
             metadata={"memory_flush_ran": False},
         )
         self._active_sessions[session_key] = session
@@ -120,6 +122,7 @@ class SessionManager:
         session.messages = [summary_message, *remaining]
         session.token_count = estimate_tokens(session.messages)
         session.updated_at = utc_now_iso()
+        await asyncio.to_thread(session.snapshot)
 
     async def _append_record(self, storage_path: Path, record: dict[str, Any]) -> None:
         def _write() -> None:
@@ -137,11 +140,22 @@ class SessionManager:
         return candidates[0] if candidates else None
 
     def _load_session_from_path(self, session_key: str, storage_path: Path) -> Session:
+        snapshot_path = storage_path.with_suffix(".snapshot.json")
+        snapshot_data = self._load_snapshot(snapshot_path)
         messages_by_id: dict[str, dict[str, Any]] = {}
         ordered_ids: list[str] = []
-        created_at = utc_now_iso()
-        updated_at = created_at
-        first_message_seen = False
+        created_at = snapshot_data.get("created_at", utc_now_iso())
+        updated_at = snapshot_data.get("updated_at", created_at)
+        first_message_seen = bool(snapshot_data)
+        snapshot_created_at = self._parse_iso_datetime(snapshot_data.get("snapshot_created_at"))
+
+        if snapshot_data:
+            messages = snapshot_data.get("messages", [])
+            for message in messages:
+                if not isinstance(message, dict) or "id" not in message:
+                    continue
+                messages_by_id[message["id"]] = message
+                ordered_ids.append(message["id"])
 
         if storage_path.exists():
             with storage_path.open("r", encoding="utf-8") as handle:
@@ -150,10 +164,14 @@ class SessionManager:
                     if not line:
                         continue
                     record = json.loads(line)
+                    record_created_at = self._parse_iso_datetime(record.get("created_at"))
+                    if snapshot_created_at is not None and record_created_at is not None and record_created_at <= snapshot_created_at:
+                        continue
                     updated_at = record.get("created_at", updated_at)
                     if record.get("record_type") == "message":
                         messages_by_id[record["id"]] = record
-                        ordered_ids.append(record["id"])
+                        if record["id"] not in ordered_ids:
+                            ordered_ids.append(record["id"])
                         if not first_message_seen:
                             created_at = record.get("created_at", created_at)
                             first_message_seen = True
@@ -175,7 +193,11 @@ class SessionManager:
             created_at=created_at,
             updated_at=updated_at,
             storage_path=storage_path,
-            metadata={"memory_flush_ran": False},
+            snapshot_path=snapshot_path,
+            metadata={
+                "memory_flush_ran": False,
+                **({"snapshot_created_at": snapshot_data.get("snapshot_created_at")} if snapshot_data else {}),
+            },
         )
 
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
@@ -250,6 +272,7 @@ class SessionManager:
                 modified_at = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
                 if modified_at < cutoff:
                     file_path.unlink(missing_ok=True)
+                    file_path.with_suffix(".snapshot.json").unlink(missing_ok=True)
                 else:
                     fresh_files.append(file_path)
 
@@ -258,9 +281,31 @@ class SessionManager:
                 target_dir = archive_root / session_dir.name
                 target_dir.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(file_path), str(target_dir / file_path.name))
+                snapshot_path = file_path.with_suffix(".snapshot.json")
+                if snapshot_path.exists():
+                    shutil.move(str(snapshot_path), str(target_dir / snapshot_path.name))
 
     def _session_dir_name(self, session_key: str) -> str:
         return quote(session_key, safe="")
 
     def _session_key_from_dir_name(self, dir_name: str) -> str:
         return unquote(dir_name)
+
+    def _load_snapshot(self, snapshot_path: Path) -> dict[str, Any]:
+        if not snapshot_path.exists():
+            return {}
+        try:
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
+    def _parse_iso_datetime(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError:
+            return None

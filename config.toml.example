@@ -2,7 +2,7 @@
 host = "127.0.0.1"
 port = 8765
 token = "change-me"
-rate_limit_per_minute = 10
+rate_limit_per_minute = 20
 
 [agent]
 workspace_dir = "workspace"
@@ -25,6 +25,12 @@ enabled = []
 [telegram]
 bot_token = ""
 allowed_user_ids = []
+
+[memory]
+vector_enabled = true
+temporal_decay_lambda = 0.02
+mmr_lambda = 0.7
+multimodal_enabled = true
 
 [automation]
 heartbeat_interval_minutes = 15

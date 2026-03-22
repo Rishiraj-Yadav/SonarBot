@@ -25,6 +25,17 @@ class SkillDefinition:
     def user_invocable(self) -> bool:
         return bool(self.metadata.get("user_invocable") or self.metadata.get("user-invocable"))
 
+    @property
+    def skill_file(self) -> Path:
+        return self.path / "SKILL.md"
+
+    def load_markdown(self) -> str:
+        return self.skill_file.read_text(encoding="utf-8")
+
+    def load_body(self) -> str:
+        _frontmatter, body = parse_frontmatter(self.load_markdown())
+        return body.strip()
+
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not text.startswith("---"):

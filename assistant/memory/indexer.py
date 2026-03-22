@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from assistant.memory.embeddings import get_embedder
@@ -20,9 +21,17 @@ class MemoryIndexer:
         self.config = config
         self._collection = None
 
-    def upsert_content(self, source: str, content: str, when: datetime | None = None) -> None:
+    def upsert_content(
+        self,
+        source: str,
+        content: str,
+        when: datetime | None = None,
+        image_path: str | None = None,
+    ) -> None:
         chunks = chunk_text(content)
-        if not chunks:
+        multimodal_chunks = self._build_multimodal_chunks(content, image_path)
+        documents = chunks + multimodal_chunks
+        if not documents:
             return
 
         collection = self._get_collection()
@@ -30,15 +39,26 @@ class MemoryIndexer:
             return
 
         embedder = get_embedder()
-        embeddings = embedder.encode(chunks)
+        embeddings = embedder.encode(documents)
         if hasattr(embeddings, "tolist"):
             embeddings = embeddings.tolist()
         iso_when = (when or datetime.utcnow()).isoformat()
         ids = [f"{source}:{index}" for index in range(len(chunks))]
         metadatas: list[dict[str, Any]] = [
-            {"source": source, "date": iso_when, "chunk_index": index} for index in range(len(chunks))
+            {"source": source, "date": iso_when, "chunk_index": index, "kind": "text"} for index in range(len(chunks))
         ]
-        collection.upsert(ids=ids, documents=chunks, metadatas=metadatas, embeddings=embeddings)
+        for extra_index, _chunk in enumerate(multimodal_chunks):
+            ids.append(f"{source}:image:{extra_index}")
+            metadatas.append(
+                {
+                    "source": source,
+                    "date": iso_when,
+                    "chunk_index": len(chunks) + extra_index,
+                    "kind": "image",
+                    "image_path": image_path or "",
+                }
+            )
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
 
     def query(self, query: str, limit: int) -> list[dict[str, Any]]:
         collection = self._get_collection()
@@ -66,6 +86,13 @@ class MemoryIndexer:
                 }
             )
         return output
+
+    def _build_multimodal_chunks(self, content: str, image_path: str | None) -> list[str]:
+        if not image_path:
+            return []
+        image_name = Path(image_path).stem.replace("-", " ").replace("_", " ").strip()
+        summary = " ".join(content.split()[:40])
+        return [f"Image memory for {image_name}. Related note: {summary}".strip()]
 
     def _get_collection(self):
         if not getattr(self.config.memory, "vector_enabled", True):

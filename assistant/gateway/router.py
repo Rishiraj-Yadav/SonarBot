@@ -250,6 +250,7 @@ class GatewayRouter:
 
         skill = self.skill_registry.find_user_invocable(command_name)
         if skill is not None:
+            skill_prompt = self.skill_registry.load_skill_prompt(skill.name)
             await self.hook_runner.fire_event(
                 f"command:{command_name}",
                 context={
@@ -268,6 +269,7 @@ class GatewayRouter:
                     request_id=request_id,
                     mode=QueueMode.STEER,
                     metadata={"skill_command": skill.name},
+                    system_suffix=f"## Active Skill\n{skill_prompt}",
                 )
             )
             return ResponseFrame(id=request_id, ok=True, payload={"queued": True, "session_key": session_key, "skill": skill.name})
