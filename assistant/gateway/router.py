@@ -33,6 +33,7 @@ class GatewayRouter:
     automation_engine: Any
     user_profiles: Any
     started_at: datetime
+    system_access_manager: Any = None
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
         if request.method == "health":
@@ -178,7 +179,7 @@ class GatewayRouter:
         raw_command: str,
     ) -> ResponseFrame:
         parts = raw_command[1:].split(maxsplit=1)
-        command_name = parts[0].lower()
+        command_name = parts[0].lower().split("@", maxsplit=1)[0]
         arguments = parts[1] if len(parts) > 1 else ""
 
         if command_name in {"new", "reset"}:
@@ -454,6 +455,60 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": f"{decision.title()} approval '{approval_id}'."},
             )
 
+        if command_name in {"host-approvals", "host_approvals"}:
+            if self.system_access_manager is None:
+                return ResponseFrame(id=request_id, ok=False, error="System access is not configured.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            approvals = await self.system_access_manager.list_approvals(user_id)
+            if approvals:
+                lines = [
+                    f"- {item['approval_id']}: {item['status']} ({item['action_kind']} -> {item['target_summary']})"
+                    for item in approvals[:10]
+                ]
+                response_text = "Host approval queue:\n" + "\n".join(lines)
+            else:
+                response_text = "No pending or recent host approvals."
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": session_key,
+                    "command_response": response_text,
+                    "host_approvals": approvals,
+                },
+            )
+
+        if command_name in {"host-approve", "host_approve", "host-reject", "host_reject"}:
+            if self.system_access_manager is None:
+                return ResponseFrame(id=request_id, ok=False, error="System access is not configured.")
+            approval_id = arguments.strip()
+            if not approval_id:
+                user_id = await self._resolve_user_id(connection_id, session_key)
+                approval_id, info_text = await self._resolve_default_host_approval(user_id)
+                if approval_id is None:
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={
+                            "queued": False,
+                            "session_key": session_key,
+                            "command_response": info_text or "No host approvals found.",
+                        },
+                    )
+            decision = "approved" if "approve" in command_name else "rejected"
+            approval = await self.system_access_manager.decide_approval(approval_id, decision)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": session_key,
+                    "command_response": f"{decision.title()} host approval '{approval_id}'.",
+                    "host_approval": approval,
+                },
+            )
+
         skill = self.skill_registry.find_user_invocable(command_name)
         if skill is not None:
             skill_prompt = self.skill_registry.load_skill_prompt(skill.name)
@@ -630,6 +685,10 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         lowered = message.lower().strip()
+        host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
+        if host_shortcut is not None:
+            return host_shortcut
+
         if self._looks_like_latest_email_request(lowered):
             try:
                 result = await self.tool_registry.dispatch("gmail_latest_email", {"session_key": session_key})
@@ -688,6 +747,167 @@ class GatewayRouter:
 
         return None
 
+    async def _handle_host_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if not self._has_host_tools():
+            return None
+
+        folder_name = self._match_known_host_folder(lowered)
+        if folder_name and self._looks_like_list_folder_request(lowered):
+            try:
+                result = await self.tool_registry.dispatch(
+                    "list_host_dir",
+                    {
+                        "path": f"~/{folder_name}",
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_directory_response(folder_name, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        explicit_root = self._extract_host_search_root(lowered)
+        if explicit_root is not None and self._looks_like_list_folder_request(lowered) and folder_name is None:
+            label = self._describe_host_root(explicit_root)
+            try:
+                result = await self.tool_registry.dispatch(
+                    "list_host_dir",
+                    {
+                        "path": explicit_root,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_directory_response(label, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        search_term = self._extract_host_search_term(lowered)
+        if search_term:
+            wants_folder = any(token in lowered for token in ("folder", "directory"))
+            try:
+                result = await self.tool_registry.dispatch(
+                    "search_host_files",
+                    {
+                        "root": explicit_root or "@allowed",
+                        "pattern": "*",
+                        "name_query": search_term,
+                        "directories_only": wants_folder,
+                        "limit": 20,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            if wants_folder and self._wants_folder_contents(lowered):
+                folder_match = self._pick_folder_match_for_contents(search_term, result)
+                if folder_match is not None:
+                    try:
+                        listing = await self.tool_registry.dispatch(
+                            "list_host_dir",
+                            {
+                                "path": folder_match["path"],
+                                "session_key": session_key,
+                                "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                            },
+                        )
+                    except Exception as exc:
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    response_text = self._format_host_folder_contents_response(folder_match, listing)
+                else:
+                    response_text = self._format_host_search_response(search_term, result)
+            else:
+                response_text = self._format_host_search_response(search_term, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        app_name = self._match_app_open_request(lowered)
+        if app_name:
+            command = self._build_app_launch_command(app_name)
+            try:
+                result = await self.tool_registry.dispatch(
+                    "exec_shell",
+                    {
+                        "command": command,
+                        "host": True,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_exec_response(app_name, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        desktop_note = self._parse_desktop_note_creation_request(original_message)
+        if desktop_note is not None:
+            filename, content = desktop_note
+            try:
+                result = await self.tool_registry.dispatch(
+                    "write_host_file",
+                    {
+                        "path": f"~/Desktop/{filename}",
+                        "content": content,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_write_response(filename, "Desktop", result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if self._looks_like_desktop_note_request(lowered):
+            response_text = (
+                "I can create that directly on your Desktop now. "
+                "Tell me the filename and content, for example: "
+                "\"create a note called todo.txt on my Desktop with content Buy milk\"."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        return None
+
     def _augment_system_suffix_for_intent(self, message: str, existing: str | None) -> str | None:
         lowered = message.lower()
         hints: list[str] = []
@@ -702,6 +922,12 @@ class GatewayRouter:
             hints.append(
                 "If GitHub OAuth is connected and the user asks for a repository count, use github_list_repos and "
                 "count the returned repositories instead of asking a follow-up question."
+            )
+        if any(token in lowered for token in ("desktop", "downloads", "documents", "notepad", "folder", "drive", "r:")):
+            hints.append(
+                "You have host-system access tools inside the configured allowed host roots: list_host_dir, search_host_files, "
+                "read_host_file, write_host_file, and exec_shell with host=true. Do not claim you are limited to the workspace "
+                "when the request is about Desktop, Downloads, Documents, allowed drives such as R:/, or opening simple Windows apps."
             )
         if not hints:
             return existing
@@ -755,6 +981,26 @@ class GatewayRouter:
         except TypeError:
             LOGGER.info("skill_activated skill=%s source=%s trace_id=%s", skill_name, source, trace_id)
 
+    async def _resolve_default_host_approval(self, user_id: str) -> tuple[str | None, str | None]:
+        if self.system_access_manager is None:
+            return None, "System access is not configured."
+        approvals = await self.system_access_manager.list_approvals(user_id)
+        pending = [
+            approval
+            for approval in approvals
+            if str(approval.get("status", "")).lower() == "pending" and not bool(approval.get("expired"))
+        ]
+        if len(pending) == 1:
+            return str(pending[0].get("approval_id", "")), None
+        if len(pending) > 1:
+            return None, "You have multiple pending host approvals. Run /host-approvals and then use /host-approve <approval_id>."
+        if approvals:
+            latest = approvals[0]
+            latest_id = str(latest.get("approval_id", "unknown"))
+            latest_status = str(latest.get("status", "unknown"))
+            return None, f"The most recent host approval '{latest_id}' is already {latest_status}."
+        return None, "No host approvals found."
+
     def _looks_like_latest_email_request(self, lowered: str) -> bool:
         has_email_word = "mail" in lowered or "email" in lowered
         has_latest_word = "last" in lowered or "latest" in lowered or "newest" in lowered
@@ -771,6 +1017,222 @@ class GatewayRouter:
         status_hint = any(token in lowered for token in ("is there", "are there", "list", "show", "open"))
         repo_hint = "repo" in lowered or "repository" in lowered or self._extract_repo_from_text(lowered) is not None
         return bool(pr_hint and (status_hint or repo_hint))
+
+    def _has_host_tools(self) -> bool:
+        has_tool = getattr(self.tool_registry, "has", None)
+        return callable(has_tool) and all(
+            has_tool(name) for name in ("list_host_dir", "search_host_files", "exec_shell")
+        )
+
+    def _looks_like_list_folder_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in (
+                "show me files",
+                "show files",
+                "list files",
+                "list the files",
+                "what is in",
+                "what's in",
+                "open folder",
+                "show contents",
+                "show the contents",
+                "browse",
+            )
+        )
+
+    def _match_known_host_folder(self, lowered: str) -> str | None:
+        mapping = {
+            "downloads": "Downloads",
+            "desktop": "Desktop",
+            "documents": "Documents",
+            "pictures": "Pictures",
+            "music": "Music",
+            "videos": "Videos",
+        }
+        for token, folder in mapping.items():
+            if token in lowered:
+                return folder
+        return None
+
+    def _extract_host_search_term(self, lowered: str) -> str | None:
+        patterns = (
+            r"\b(?:search|find)(?:\s+for)?\s+(.+?)\s+(?:folder|file|directory)\b",
+            r"\b(.+?)\s+(?:folder|file|directory)\s+(?:in|on)\s+(?:the\s+)?(?:r\s*:|r\s*drive|r\s*dive)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            term = self._clean_host_search_term(match.group(1))
+            if term:
+                return term
+        return None
+
+    def _clean_host_search_term(self, value: str) -> str | None:
+        cleaned = re.sub(r"[^a-z0-9._ -]", " ", value.lower())
+        cleaned = re.sub(r"\b(?:called|named)\b", " ", cleaned)
+        cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned.strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or None
+
+    def _extract_host_search_root(self, lowered: str) -> str | None:
+        if re.search(r"\br\s*:?\s*(?:drive|dive)?\b", lowered) or "r:\\" in lowered or "r:/" in lowered:
+            return "R:/"
+        return None
+
+    def _describe_host_root(self, root: str) -> str:
+        normalized = root.strip().replace("\\", "/").lower()
+        if normalized == "r:/":
+            return "R drive"
+        return root
+
+    def _wants_folder_contents(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in (
+                "inside it",
+                "inside that",
+                "inside the folder",
+                "what is there inside",
+                "what's inside",
+                "tell me what is there inside",
+                "tell me what's inside",
+                "tell me what is inside",
+                "tell me whats inside",
+            )
+        )
+
+    def _compact_search_name(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+    def _pick_folder_match_for_contents(self, search_term: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        matches = [match for match in result.get("matches", []) if match.get("is_dir")]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        compact_term = self._compact_search_name(search_term)
+        exactish = [
+            match
+            for match in matches
+            if self._compact_search_name(str(match.get("name", ""))) == compact_term
+        ]
+        if len(exactish) == 1:
+            return exactish[0]
+        return None
+
+    def _match_app_open_request(self, lowered: str) -> str | None:
+        if not any(token in lowered for token in ("open", "launch", "start")):
+            return None
+        app_aliases = {
+            "notepad": "notepad",
+            "calculator": "calculator",
+            "calc": "calculator",
+            "paint": "paint",
+            "file explorer": "explorer",
+            "explorer": "explorer",
+        }
+        for alias, app_name in app_aliases.items():
+            if alias in lowered:
+                return app_name
+        return None
+
+    def _build_app_launch_command(self, app_name: str) -> str:
+        command_map = {
+            "notepad": "Start-Process -FilePath 'notepad.exe'",
+            "calculator": "Start-Process -FilePath 'calc.exe'",
+            "paint": "Start-Process -FilePath 'mspaint.exe'",
+            "explorer": "Start-Process -FilePath 'explorer.exe'",
+        }
+        return command_map.get(app_name, f"Start-Process -FilePath '{app_name}'")
+
+    def _looks_like_desktop_note_request(self, lowered: str) -> bool:
+        return "desktop" in lowered and "note" in lowered and any(token in lowered for token in ("create", "make", "write"))
+
+    def _parse_desktop_note_creation_request(self, message: str) -> tuple[str, str] | None:
+        match = re.search(
+            r"(?:create|make|write)\s+(?:a\s+)?note(?:\s+called|\s+named)?\s+([^\s]+)\s+(?:on\s+my\s+desktop|to\s+my\s+desktop)\s+with\s+content\s+(.+)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        filename = match.group(1).strip().strip("\"'")
+        content = match.group(2).strip().strip("\"'")
+        if not filename.lower().endswith(".txt"):
+            filename = f"{filename}.txt"
+        return (filename, content) if filename and content else None
+
+    def _format_host_directory_response(self, folder_name: str, result: dict[str, Any]) -> str:
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        if not entries:
+            return f"The {folder_name} folder is empty or I could not find any visible items there."
+        lines = [f"Here are the first {min(len(entries), 12)} item(s) in your {folder_name} folder:"]
+        for entry in entries[:12]:
+            suffix = "/" if entry.get("is_dir") else ""
+            lines.append(f"- {entry.get('name', 'unknown')}{suffix}")
+        if len(entries) > 12:
+            lines.append(f"...and {len(entries) - 12} more.")
+        return "\n".join(lines)
+
+    def _format_host_search_response(self, search_term: str, result: dict[str, Any]) -> str:
+        matches = result.get("matches", []) if isinstance(result, dict) else []
+        directories_only = bool(result.get("directories_only")) if isinstance(result, dict) else False
+        scope = self._describe_host_search_scope(result if isinstance(result, dict) else {})
+        if not matches:
+            noun = "folder" if directories_only else "file or folder"
+            return f"I couldn't find any {noun} matching '{search_term}' in {scope}."
+        noun = "folder(s)" if directories_only else "match(es)"
+        lines = [f"I found {len(matches)} {noun} for '{search_term}' in {scope}:"]
+        for match in matches[:10]:
+            label = f"{match.get('name', 'unknown')}{'/' if match.get('is_dir') else ''}"
+            lines.append(f"- {label} -> {match.get('path', '')}")
+        if len(matches) > 10:
+            lines.append(f"...and {len(matches) - 10} more.")
+        return "\n".join(lines)
+
+    def _describe_host_search_scope(self, result: dict[str, Any]) -> str:
+        root = str(result.get("root", "")).strip()
+        searched_roots = [str(item) for item in result.get("searched_roots", [])]
+        if root and root not in {"", "@allowed"}:
+            return root
+        if any(str(item).replace("\\", "/").lower() == "r:/" for item in searched_roots):
+            return "your allowed host locations, including R:/"
+        return "your allowed host locations"
+
+    def _format_host_folder_contents_response(self, folder_match: dict[str, Any], listing: dict[str, Any]) -> str:
+        folder_path = str(folder_match.get("path", ""))
+        entries = listing.get("entries", []) if isinstance(listing, dict) else []
+        if not entries:
+            return f"I found the folder at {folder_path}, but it looks empty."
+        lines = [f"I found the folder at {folder_path}. Here are the first {min(len(entries), 12)} item(s) inside it:"]
+        for entry in entries[:12]:
+            suffix = "/" if entry.get("is_dir") else ""
+            lines.append(f"- {entry.get('name', 'unknown')}{suffix}")
+        if len(entries) > 12:
+            lines.append(f"...and {len(entries) - 12} more.")
+        return "\n".join(lines)
+
+    def _format_host_exec_response(self, app_name: str, result: dict[str, Any]) -> str:
+        status = str(result.get("status", "completed"))
+        if status.startswith("blocked") or status in {"rejected", "expired"}:
+            return (
+                f"I didn't open {app_name} because the host action was {status}. "
+                "Check /host-approvals if you want to review pending requests."
+            )
+        if int(result.get("exit_code", 1)) == 0:
+            return f"I launched {app_name} on your computer."
+        return f"I tried to launch {app_name}, but it failed: {result.get('stderr', 'unknown error')}"
+
+    def _format_host_write_response(self, filename: str, folder_name: str, result: dict[str, Any]) -> str:
+        status = str(result.get("status", "completed"))
+        if status.startswith("blocked") or status in {"rejected", "expired"}:
+            return (
+                f"I didn't create {filename} in your {folder_name} because the host action was {status}. "
+                "Check /host-approvals if you want to review pending requests."
+            )
+        return f"I created {filename} in your {folder_name}."
 
     def _format_latest_email_response(self, result: dict[str, Any]) -> str:
         if not result.get("found"):

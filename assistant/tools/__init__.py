@@ -7,6 +7,7 @@ from assistant.tools.exec_tool import build_exec_tool
 from assistant.tools.file_tool import build_file_tools
 from assistant.tools.github_tool import build_github_tools
 from assistant.tools.gmail_tool import build_gmail_tools
+from assistant.tools.host_file_tool import build_host_file_tools
 from assistant.tools.llm_task_tool import build_llm_task_tool
 from assistant.tools.memory_tool import build_memory_tools
 from assistant.tools.oauth_tool import build_oauth_tools
@@ -24,11 +25,22 @@ def create_default_tool_registry(
     sub_agent_manager=None,
     sandbox_runtime=None,
     acp_client=None,
+    system_access_manager=None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in build_file_tools(config.agent.workspace_dir):
         registry.register(tool)
-    registry.register(build_exec_tool(config.agent.workspace_dir, sandbox_runtime=sandbox_runtime, sandbox_enabled=config.sandbox.enabled))
+    registry.register(
+        build_exec_tool(
+            config.agent.workspace_dir,
+            sandbox_runtime=sandbox_runtime,
+            sandbox_enabled=config.sandbox.enabled,
+            system_access_manager=system_access_manager,
+        )
+    )
+    if system_access_manager is not None:
+        for tool in build_host_file_tools(system_access_manager):
+            registry.register(tool)
     if memory_manager is not None:
         for tool in build_memory_tools(memory_manager):
             registry.register(tool)

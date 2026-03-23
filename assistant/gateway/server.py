@@ -43,6 +43,7 @@ from assistant.oauth import OAuthFlowManager, OAuthTokenManager
 from assistant.sandbox import SandboxRuntime
 from assistant.skills.registry import SkillRegistry
 from assistant.skills.watcher import SkillWatcher
+from assistant.system_access import SystemAccessManager
 from assistant.tools.agent_send_tool import build_agent_send_tool
 from assistant.tools import create_default_tool_registry
 from assistant.utils import configure_logging, get_logger
@@ -79,6 +80,7 @@ class GatewayServices:
     user_profiles: UserProfileStore
     automation_store: AutomationStore
     automation_engine: AutomationEngine
+    system_access_manager: SystemAccessManager
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -95,6 +97,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         memory_manager = MemoryManager(runtime_config)
         user_profiles = UserProfileStore(runtime_config)
         await user_profiles.initialize()
+        system_access_manager = SystemAccessManager(
+            runtime_config,
+            connection_manager=connection_manager,
+            user_profiles=user_profiles,
+        )
+        await system_access_manager.initialize()
         skill_registry = SkillRegistry(runtime_config)
         skill_registry.start()
         skill_watcher = SkillWatcher(skill_registry)
@@ -119,6 +127,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             oauth_token_manager=oauth_token_manager,
             sandbox_runtime=sandbox_runtime,
             acp_client=acp_client,
+            system_access_manager=system_access_manager,
         )
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         presence_registry = PresenceRegistry()
@@ -154,10 +163,11 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             oauth_flow_manager=oauth_flow_manager,
             tool_registry=tool_registry,
             automation_engine=None,
+            system_access_manager=system_access_manager,
             user_profiles=user_profiles,
             started_at=started_at,
         )
-        channels = _build_channels(runtime_config, connection_manager, router, user_profiles)
+        channels = _build_channels(runtime_config, connection_manager, router, user_profiles, system_access_manager)
         standing_orders = StandingOrdersManager(runtime_config.agent.workspace_dir)
         automation_store = AutomationStore(runtime_config)
         await automation_store.initialize()
@@ -204,6 +214,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles=user_profiles,
             automation_store=automation_store,
             automation_engine=automation_engine,
+            system_access_manager=system_access_manager,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()
@@ -384,6 +395,40 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             },
         }
 
+    @app.get("/api/system-access/approvals")
+    async def system_access_approvals(request: Request, limit: int = 20) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        approvals = await services.system_access_manager.list_approvals(user_id, limit=max(1, min(limit, 100)))
+        return {"approvals": approvals}
+
+    @app.post("/api/system-access/approvals/{approval_id}")
+    async def decide_system_access_approval(approval_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        payload = await request.json()
+        decision = str(payload.get("decision", "approved"))
+        approval = await services.system_access_manager.decide_approval(approval_id, decision)
+        return {"ok": True, "approval": approval}
+
+    @app.get("/api/system-access/audit")
+    async def system_access_audit(session_id: str | None = None, today: bool = False, limit: int = 50) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        rows = await services.system_access_manager.list_audit(
+            session_id=session_id,
+            today_only=today,
+            limit=max(1, min(limit, 200)),
+        )
+        return {"entries": rows}
+
+    @app.post("/api/system-access/audit/{backup_id}/restore")
+    async def restore_system_access_backup(backup_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        result = await services.system_access_manager.restore_backup(backup_id, user_id=user_id)
+        return {"ok": True, "result": result}
+
     @app.post("/webhooks/{name}")
     async def receive_webhook(name: str, request: Request) -> dict[str, Any]:
         services: GatewayServices = app.state.services
@@ -514,6 +559,7 @@ def _build_channels(
     connection_manager: ConnectionManager,
     router: GatewayRouter,
     user_profiles: UserProfileStore,
+    system_access_manager: SystemAccessManager,
 ) -> list[Any]:
     async def handle_channel_message(message: ChannelMessage) -> str:
         user_id = await user_profiles.resolve_user_id(
@@ -563,7 +609,13 @@ def _build_channels(
 
     channels: list[Any] = []
     if "telegram" in config.channels.enabled:
-        channels.append(TelegramChannel(config=config, inbound_handler=handle_channel_message))
+        channels.append(
+            TelegramChannel(
+                config=config,
+                inbound_handler=handle_channel_message,
+                host_approval_handler=system_access_manager.decide_approval,
+            )
+        )
     return channels
 
 

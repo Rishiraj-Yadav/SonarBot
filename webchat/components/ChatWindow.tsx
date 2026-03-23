@@ -153,6 +153,15 @@ export function ChatWindow() {
             );
           }
         }
+        if (frame.type === "event" && (frame.event === "host_approval.created" || frame.event === "host_approval.updated")) {
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("sonarbot:host-approval", {
+                detail: (frame.payload as Record<string, unknown> | undefined) ?? {},
+              }),
+            );
+          }
+        }
         if (frame.type === "event" && frame.event === "agent.done") {
           setMessages((current) =>
             current.map((item) =>
@@ -269,6 +278,7 @@ export function ChatWindow() {
             <li><span className="font-medium text-ink">/status</span> shows runtime and session details</li>
             <li><span className="font-medium text-ink">/oauth-status</span> lists connected providers</li>
             <li><span className="font-medium text-ink">/skills</span> shows enabled workflow skills</li>
+            <li><span className="font-medium text-ink">/host-approvals</span> lists pending host approvals</li>
           </ul>
         </div>
         <div className="rounded-[1.75rem] border border-white/80 bg-gradient-to-br from-ink to-accent p-5 text-white shadow-card">

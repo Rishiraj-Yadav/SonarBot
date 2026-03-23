@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CleanupHandler = Callable[[], Awaitable[None]]
+ResultRedactor = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -17,6 +18,8 @@ class ToolDefinition:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    persistence_policy: str = "full"
+    redactor: ResultRedactor | None = None
 
 
 class ToolRegistry:
@@ -32,6 +35,11 @@ class ToolRegistry:
 
     def has(self, tool_name: str) -> bool:
         return tool_name in self._tools
+
+    def get(self, tool_name: str) -> ToolDefinition:
+        if tool_name not in self._tools:
+            raise KeyError(f"Unknown tool '{tool_name}'.")
+        return self._tools[tool_name]
 
     def names(self) -> list[str]:
         return list(self._tools.keys())
@@ -55,9 +63,13 @@ class ToolRegistry:
         ]
 
     async def dispatch(self, tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
-        if tool_name not in self._tools:
-            raise KeyError(f"Unknown tool '{tool_name}'.")
-        return await self._tools[tool_name].handler(tool_input)
+        return await self.get(tool_name).handler(tool_input)
+
+    def redact_result(self, tool_name: str, tool_input: dict[str, Any], tool_result: dict[str, Any]) -> dict[str, Any]:
+        definition = self.get(tool_name)
+        if definition.persistence_policy != "redacted" or definition.redactor is None:
+            return tool_result
+        return definition.redactor(tool_input, tool_result)
 
     async def close(self) -> None:
         if not self._cleanup_handlers:

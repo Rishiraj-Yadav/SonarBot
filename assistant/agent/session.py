@@ -36,6 +36,7 @@ class Session:
     session_id: str
     session_key: str
     messages: list[dict[str, Any]]
+    persisted_messages: list[dict[str, Any]]
     token_count: int
     created_at: str
     updated_at: str
@@ -47,7 +48,7 @@ class Session:
         payload = {
             "session_id": self.session_id,
             "session_key": self.session_key,
-            "messages": self.messages,
+            "messages": self.persisted_messages,
             "token_count": self.token_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

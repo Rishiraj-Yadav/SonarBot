@@ -12,6 +12,7 @@ from rich.console import Console
 
 from assistant.config import load_config
 from assistant.main import app as asgi_app
+from cli.commands.audit import app as audit_app
 from cli.commands.devices import app as devices_app
 from cli.commands.sessions import app as sessions_app
 from cli.doctor import run_doctor
@@ -19,6 +20,7 @@ from cli.onboard import run_onboarding
 from cli.ws_client import GatewayClient
 
 app = typer.Typer(help="SonarBot Phase 5 CLI")
+app.add_typer(audit_app, name="audit")
 app.add_typer(devices_app, name="devices")
 app.add_typer(sessions_app, name="sessions")
 console = Console()

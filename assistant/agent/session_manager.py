@@ -51,6 +51,7 @@ class SessionManager:
             session_id=session_id,
             session_key=session_key,
             messages=[],
+            persisted_messages=[],
             token_count=0,
             created_at=created_at,
             updated_at=created_at,
@@ -96,9 +97,17 @@ class SessionManager:
     async def get_session_by_id(self, session_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._get_session_by_id_sync, session_id)
 
-    async def append_message(self, session: Session, message: dict[str, Any]) -> None:
-        await self._append_record(session.storage_path, message)
+    async def append_message(
+        self,
+        session: Session,
+        message: dict[str, Any],
+        *,
+        persisted_message: dict[str, Any] | None = None,
+    ) -> None:
+        record = persisted_message or message
+        await self._append_record(session.storage_path, record)
         session.messages.append(message)
+        session.persisted_messages.append(record)
         session.token_count = estimate_tokens(session.messages)
         session.updated_at = utc_now_iso()
 
@@ -119,7 +128,9 @@ class SessionManager:
         }
         await self._append_record(session.storage_path, record)
         remaining = [message for message in session.messages if message["id"] not in set(trimmed_ids)]
+        persisted_remaining = [message for message in session.persisted_messages if message["id"] not in set(trimmed_ids)]
         session.messages = [summary_message, *remaining]
+        session.persisted_messages = [summary_message, *persisted_remaining]
         session.token_count = estimate_tokens(session.messages)
         session.updated_at = utc_now_iso()
         await asyncio.to_thread(session.snapshot)
@@ -189,6 +200,7 @@ class SessionManager:
             session_id=storage_path.stem,
             session_key=session_key,
             messages=messages,
+            persisted_messages=list(messages),
             token_count=estimate_tokens(messages),
             created_at=created_at,
             updated_at=updated_at,

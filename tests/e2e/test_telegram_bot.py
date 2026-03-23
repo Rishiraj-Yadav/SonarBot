@@ -17,9 +17,11 @@ class FakeSentMessage:
     def __init__(self, text: str) -> None:
         self.text = text
         self.edits: list[str] = []
+        self.reply_markup = None
 
-    async def edit_text(self, text: str) -> "FakeSentMessage":
+    async def edit_text(self, text: str, reply_markup=None) -> "FakeSentMessage":
         self.text = text
+        self.reply_markup = reply_markup
         self.edits.append(text)
         return self
 
@@ -27,9 +29,13 @@ class FakeSentMessage:
 class FakeBot:
     def __init__(self) -> None:
         self.session = FakeSession()
+        self.sent_messages: list[FakeSentMessage] = []
 
-    async def send_message(self, chat_id: int, text: str) -> FakeSentMessage:
-        return FakeSentMessage(text)
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> FakeSentMessage:
+        message = FakeSentMessage(text)
+        message.reply_markup = reply_markup
+        self.sent_messages.append(message)
+        return message
 
     async def send_chat_action(self, chat_id: int, action) -> None:
         return None
@@ -59,6 +65,16 @@ class FakeMessage:
         return sent
 
 
+class FakeCallbackQuery:
+    def __init__(self, *, data: str, message: FakeSentMessage) -> None:
+        self.data = data
+        self.message = message
+        self.answered: list[str] = []
+
+    async def answer(self, text: str) -> None:
+        self.answered.append(text)
+
+
 @pytest.mark.asyncio
 async def test_telegram_round_trip_streams_back_to_message(app_config) -> None:
     app_config.telegram.allowed_user_ids = [123]
@@ -83,3 +99,74 @@ async def test_telegram_round_trip_streams_back_to_message(app_config) -> None:
     assert message.answers
     assert message.answers[0].text == "Hello there"
     assert message.answers[0].edits[-1] == "Hello there"
+
+
+@pytest.mark.asyncio
+async def test_telegram_host_approval_inline_buttons_round_trip(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [123]
+    app_config.telegram.bot_token = "test-token"
+    fake_bot = FakeBot()
+    decisions: list[tuple[str, str]] = []
+
+    async def inbound_handler(message):
+        return "route-inline"
+
+    async def host_approval_handler(approval_id: str, decision: str):
+        decisions.append((approval_id, decision))
+        return {
+            "approval_id": approval_id,
+            "action_kind": "write_host_file",
+            "target_summary": "C:/Users/Test/Desktop/note.txt",
+            "category": "ask_once",
+            "status": decision,
+            "payload": {"path": "C:/Users/Test/Desktop/note.txt"},
+        }
+
+    channel = TelegramChannel(
+        config=app_config,
+        inbound_handler=inbound_handler,
+        bot=fake_bot,
+        host_approval_handler=host_approval_handler,
+    )
+
+    approval = {
+        "approval_id": "approval-1",
+        "action_kind": "write_host_file",
+        "target_summary": "C:/Users/Test/Desktop/note.txt",
+        "category": "ask_once",
+        "status": "pending",
+        "payload": {"path": "C:/Users/Test/Desktop/note.txt"},
+    }
+    await channel.send_host_approval_request("456", approval)
+
+    sent = fake_bot.sent_messages[-1]
+    assert sent.reply_markup is not None
+
+    callback = FakeCallbackQuery(data="hostapprove:approval-1:approved", message=sent)
+    await channel.handle_callback_query(callback)
+
+    assert decisions == [("approval-1", "approved")]
+    assert "Status: approved" in sent.text
+    assert callback.answered
+
+
+@pytest.mark.asyncio
+async def test_telegram_buffers_immediate_command_responses(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [123]
+    app_config.telegram.bot_token = "test-token"
+    fake_bot = FakeBot()
+    channel: TelegramChannel | None = None
+
+    async def inbound_handler(message):
+        assert channel is not None
+        await channel.handle_event("route-command", "agent.chunk", {"text": "Known skills"})
+        await channel.handle_event("route-command", "agent.done", {"session_key": "telegram:123"})
+        return "route-command"
+
+    channel = TelegramChannel(config=app_config, inbound_handler=inbound_handler, bot=fake_bot)
+    message = FakeMessage(user_id=123, chat_id=456, text="/skills")
+
+    await channel.handle_message(message)
+
+    assert message.answers
+    assert message.answers[0].text == "Known skills"

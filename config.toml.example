@@ -81,6 +81,83 @@ image = "python:3.12-slim"
 cpu_limit = 0.5
 memory_limit_mb = 512
 
+[system_access]
+enabled = false
+home_root = "~"
+shell = "powershell"
+approval_timeout_seconds = 300
+ask_once_session_cache = true
+default_outside_policy = "deny"
+protected_roots = [
+  "C:/Windows",
+  "C:/Program Files",
+  "C:/Program Files (x86)",
+  "C:/ProgramData",
+  "~/AppData",
+  "C:/$Recycle.Bin",
+  "C:/System Volume Information",
+  "R:/$Recycle.Bin",
+  "R:/System Volume Information",
+]
+audit_log_path = "~/.assistant/logs/system_actions.jsonl"
+backup_root = "~/.assistant/backups/system_access"
+
+[[system_access.path_rules]]
+path = "~/Desktop"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "~/Documents"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "~/Downloads"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "~/Pictures"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "~/Music"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "~/Videos"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
+[[system_access.path_rules]]
+path = "R:/"
+read = "auto_allow"
+write = "ask_once"
+overwrite = "always_ask"
+delete = "always_ask"
+execute = "ask_once"
+
 [users]
 default_user_id = "default"
 primary_channel = "webchat"

@@ -79,6 +79,9 @@ class ConnectionManager:
     def register_channel(self, channel: Any) -> None:
         self._channels[channel.name] = channel
 
+    def get_channel(self, channel_name: str) -> Any | None:
+        return self._channels.get(channel_name)
+
     def register_channel_route(
         self,
         channel_name: str,

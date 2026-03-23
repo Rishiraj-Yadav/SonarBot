@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ChatAction, ContentType
-from aiogram.types import Document, Message, PhotoSize, Voice
+from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineKeyboardMarkup, Message, PhotoSize, Voice
 
 from assistant.channels.base import Channel, ChannelMessage
 from assistant.channels.telegram.media import transcribe_voice
@@ -27,12 +27,22 @@ class TelegramStreamState:
 class TelegramChannel(Channel):
     name = "telegram"
 
-    def __init__(self, config, inbound_handler, bot: Bot | None = None, dispatcher: Dispatcher | None = None) -> None:
+    def __init__(
+        self,
+        config,
+        inbound_handler,
+        bot: Bot | None = None,
+        dispatcher: Dispatcher | None = None,
+        host_approval_handler=None,
+    ) -> None:
         super().__init__(config, inbound_handler)
         self.bot = bot or Bot(token=self.config.telegram.bot_token)
         self.dispatcher = dispatcher or Dispatcher()
+        self.host_approval_handler = host_approval_handler
         self._polling_task: asyncio.Task[None] | None = None
         self._stream_states: dict[str, TelegramStreamState] = {}
+        self._pending_route_events: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        self._host_approval_messages: dict[str, Message | Any] = {}
         self._handlers_registered = False
 
     async def start(self) -> None:
@@ -40,6 +50,7 @@ class TelegramChannel(Channel):
             raise RuntimeError("Telegram is enabled but telegram.bot_token is missing.")
         if not self._handlers_registered:
             self.dispatcher.message.register(self.handle_message)
+            self.dispatcher.callback_query.register(self.handle_callback_query)
             self._handlers_registered = True
         if self._polling_task is None:
             self._polling_task = asyncio.create_task(self.dispatcher.start_polling(self.bot))
@@ -61,6 +72,48 @@ class TelegramChannel(Channel):
     async def send_typing(self, recipient_id: str) -> None:
         await self.bot.send_chat_action(chat_id=int(recipient_id), action=ChatAction.TYPING)
 
+    async def send_host_approval_request(self, recipient_id: str, approval: dict[str, Any]) -> None:
+        approval_id = str(approval["approval_id"])
+        text = self._format_host_approval_text(approval)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Approve", callback_data=f"hostapprove:{approval_id}:approved"),
+                    InlineKeyboardButton(text="Deny", callback_data=f"hostapprove:{approval_id}:rejected"),
+                ]
+            ]
+        )
+        sent = await self.bot.send_message(chat_id=int(recipient_id), text=text, reply_markup=keyboard)
+        self._host_approval_messages[approval_id] = sent
+
+    async def finalize_host_approval(self, approval_id: str, approval: dict[str, Any]) -> None:
+        message = self._host_approval_messages.get(approval_id)
+        if message is None:
+            return
+        try:
+            await message.edit_text(self._format_host_approval_text(approval), reply_markup=None)
+        except TypeError:
+            await message.edit_text(self._format_host_approval_text(approval))
+
+    async def handle_callback_query(self, callback_query: CallbackQuery) -> None:
+        data = getattr(callback_query, "data", "") or ""
+        if not data.startswith("hostapprove:") or self.host_approval_handler is None:
+            return
+        parts = data.split(":", maxsplit=2)
+        if len(parts) != 3:
+            return
+        _, approval_id, decision = parts
+        normalized = "approved" if decision == "approved" else "rejected"
+        approval = await self.host_approval_handler(approval_id, normalized)
+        if hasattr(callback_query, "answer"):
+            await callback_query.answer(f"{normalized.title()} {approval_id}")
+        if callback_query.message is not None:
+            try:
+                await callback_query.message.edit_text(self._format_host_approval_text(approval), reply_markup=None)
+            except TypeError:
+                await callback_query.message.edit_text(self._format_host_approval_text(approval))
+        self._host_approval_messages[approval_id] = callback_query.message
+
     async def handle_message(self, message: Message) -> None:
         user = message.from_user
         if user is None or user.id not in set(self.config.telegram.allowed_user_ids):
@@ -71,16 +124,29 @@ class TelegramChannel(Channel):
             return
 
         route_id = await self.inbound_handler(normalized)
-        self._stream_states[route_id] = TelegramStreamState(
+        state = TelegramStreamState(
             recipient_id=normalized.metadata.get("chat_id", normalized.sender_id),
             source_message=message,
         )
+        self._stream_states[route_id] = state
+        pending_events = self._pending_route_events.pop(route_id, [])
+        for event_name, payload in pending_events:
+            await self._apply_event(route_id, state, event_name, payload)
 
     async def handle_event(self, route_id: str, event_name: str, payload: dict[str, Any]) -> None:
         state = self._stream_states.get(route_id)
         if state is None:
+            self._pending_route_events.setdefault(route_id, []).append((event_name, dict(payload)))
             return
+        await self._apply_event(route_id, state, event_name, payload)
 
+    async def _apply_event(
+        self,
+        route_id: str,
+        state: TelegramStreamState,
+        event_name: str,
+        payload: dict[str, Any],
+    ) -> None:
         if event_name == "agent.chunk":
             state.accumulated_text += payload.get("text", "")
             if state.response_message is None:
@@ -96,6 +162,7 @@ class TelegramChannel(Channel):
 
         if event_name == "agent.done":
             self._stream_states.pop(route_id, None)
+            self._pending_route_events.pop(route_id, None)
 
     async def _normalize_message(self, message: Message) -> ChannelMessage | None:
         text = message.text or message.caption or ""
@@ -153,3 +220,22 @@ class TelegramChannel(Channel):
         inbox_dir = self.config.agent.workspace_dir / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         return inbox_dir / filename
+
+    def _format_host_approval_text(self, approval: dict[str, Any]) -> str:
+        payload = approval.get("payload", {})
+        lines = [
+            "Host action approval required:",
+            f"Action: {approval.get('action_kind', 'unknown')}",
+            f"Target: {approval.get('target_summary', '')}",
+            f"Category: {approval.get('category', '')}",
+            f"Status: {approval.get('status', 'pending')}",
+        ]
+        if payload.get("command"):
+            lines.append(f"Command: {payload['command']}")
+        if payload.get("path"):
+            lines.append(f"Path: {payload['path']}")
+        lines.append("")
+        lines.append(
+            f"Fallback commands: /host-approve {approval.get('approval_id')} or /host-reject {approval.get('approval_id')}"
+        )
+        return "\n".join(lines)

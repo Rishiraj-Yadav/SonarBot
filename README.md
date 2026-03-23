@@ -20,6 +20,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - persistent sessions with compaction and snapshots
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
+- host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
@@ -95,6 +96,41 @@ Recommended:
 
 - keep secrets in local untracked `.env`
 - keep non-secret runtime config in `~/.assistant/config.toml`
+
+## Host Access Policy
+
+SonarBot now supports policy-based host access instead of a single home-root rule.
+
+Default Windows policy:
+
+- allowed `C:` folders:
+  - `~/Desktop`
+  - `~/Documents`
+  - `~/Downloads`
+  - `~/Pictures`
+  - `~/Music`
+  - `~/Videos`
+- broadly allowed data drive:
+  - `R:/`
+- always denied protected paths:
+  - `C:/Windows`
+  - `C:/Program Files`
+  - `C:/Program Files (x86)`
+  - `C:/ProgramData`
+  - `~/AppData`
+  - `C:/$Recycle.Bin`
+  - `C:/System Volume Information`
+  - `R:/$Recycle.Bin`
+  - `R:/System Volume Information`
+
+Approval model:
+
+- read/list/search in allowed roots: auto-allow
+- create/write/copy/move/execute in allowed roots: ask once per session
+- overwrite/delete: always ask
+- destructive/system commands: always deny
+
+You can customize this in `~/.assistant/config.toml` with `[system_access]`, `protected_roots`, and `[[system_access.path_rules]]`.
 
 ## CLI Commands
 

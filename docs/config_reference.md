@@ -108,6 +108,36 @@ cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing" }]
 - `cpu_limit`: float, default `0.5`
 - `memory_limit_mb`: integer, default `512`
 
+### `[system_access]`
+
+- `enabled`: boolean, default `false`; enables host-system file and shell access
+- `home_root`: path, default `~`; legacy fallback root used when no `path_rules` are configured
+- `shell`: string, default `powershell`
+- `approval_timeout_seconds`: integer, default `300`
+- `ask_once_session_cache`: boolean, default `true`
+- `default_outside_policy`: string, default `deny`; what happens when a path does not match any allowed rule
+- `protected_roots`: list of paths that are always blocked, even if a broader rule would otherwise allow them
+- `audit_log_path`: path, default `~/.assistant/logs/system_actions.jsonl`
+- `backup_root`: path, default `~/.assistant/backups/system_access`
+
+### `[[system_access.path_rules]]`
+
+- `path`: path root that the rule applies to
+- `read`: `auto_allow | ask_once | always_ask | deny`
+- `write`: `auto_allow | ask_once | always_ask | deny`
+- `overwrite`: `auto_allow | ask_once | always_ask | deny`
+- `delete`: `auto_allow | ask_once | always_ask | deny`
+- `execute`: `auto_allow | ask_once | always_ask | deny`
+
+Default Windows policy in the example:
+
+- limited `C:` access for `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Pictures`, `~/Music`, and `~/Videos`
+- broad `R:/` access
+- protected/system paths always denied
+- reads/searches/listing allowed inside those roots
+- create/write/copy/move/execute ask once per session
+- overwrite/delete always ask
+
 ### `[users]`
 
 - `default_user_id`: string, default `default`

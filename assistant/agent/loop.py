@@ -223,12 +223,24 @@ class AgentLoop:
                 return
 
             for tool_call in tool_calls:
-                tool_result = await self._dispatch_tool(tool_call.name, tool_call.arguments, session.session_key)
+                tool_input, tool_result, persisted_result = await self._dispatch_tool(
+                    tool_call.name,
+                    tool_call.arguments,
+                    session,
+                    request,
+                    current_connection_id,
+                )
                 await self.session_manager.append_message(
                     session,
                     create_message(
                         "tool",
                         json.dumps(tool_result, ensure_ascii=False),
+                        name=tool_call.name,
+                        tool_call_id=tool_call.id,
+                    ),
+                    persisted_message=create_message(
+                        "tool",
+                        json.dumps(persisted_result, ensure_ascii=False),
                         name=tool_call.name,
                         tool_call_id=tool_call.id,
                     ),
@@ -247,13 +259,27 @@ class AgentLoop:
     def _chunk_for_delivery(self, text: str, size: int = 120) -> list[str]:
         return [text[index : index + size] for index in range(0, len(text), size)] or [text]
 
-    async def _dispatch_tool(self, tool_name: str, tool_input: dict[str, Any], session_key: str) -> dict[str, Any]:
+    async def _dispatch_tool(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        session,
+        request: AgentRequest,
+        current_connection_id: str | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         try:
             payload = dict(tool_input)
-            payload.setdefault("session_key", session_key)
-            return await self.tool_registry.dispatch(tool_name, payload)
+            payload.setdefault("session_key", session.session_key)
+            payload.setdefault("session_id", session.session_id)
+            payload.setdefault("user_id", str((request.metadata or {}).get("user_id", self.config.users.default_user_id)))
+            payload.setdefault("connection_id", current_connection_id or "")
+            payload.setdefault("channel_name", str((request.metadata or {}).get("channel", "")))
+            tool_result = await self.tool_registry.dispatch(tool_name, payload)
+            persisted_result = self.tool_registry.redact_result(tool_name, payload, tool_result)
+            return payload, tool_result, persisted_result
         except Exception as exc:  # pragma: no cover - defensive runtime path
-            return {"error": str(exc), "tool_name": tool_name}
+            error_result = {"error": str(exc), "tool_name": tool_name}
+            return dict(tool_input), error_result, error_result
 
     async def _maybe_capture_long_term_memory(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -163,6 +164,69 @@ class SandboxConfig(BaseModel):
     memory_limit_mb: int = 512
 
 
+SystemAccessDecision = Literal["auto_allow", "ask_once", "always_ask", "deny"]
+
+
+def _default_system_access_protected_roots() -> list[Path]:
+    home = Path.home()
+    return [
+        _expand_path(Path("C:/Windows")),
+        _expand_path(Path("C:/Program Files")),
+        _expand_path(Path("C:/Program Files (x86)")),
+        _expand_path(Path("C:/ProgramData")),
+        _expand_path(home / "AppData"),
+        _expand_path(Path("C:/$Recycle.Bin")),
+        _expand_path(Path("C:/System Volume Information")),
+        _expand_path(Path("R:/$Recycle.Bin")),
+        _expand_path(Path("R:/System Volume Information")),
+    ]
+
+
+class SystemAccessPathRuleConfig(BaseModel):
+    path: Path
+    read: SystemAccessDecision = "auto_allow"
+    write: SystemAccessDecision = "ask_once"
+    overwrite: SystemAccessDecision = "always_ask"
+    delete: SystemAccessDecision = "always_ask"
+    execute: SystemAccessDecision = "ask_once"
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def validate_path(cls, value: str | Path) -> Path:
+        return _expand_path(value)
+
+
+class SystemAccessConfig(BaseModel):
+    enabled: bool = False
+    home_root: Path = Field(default_factory=lambda: _expand_path(Path.home()))
+    shell: str = "powershell"
+    approval_timeout_seconds: int = 300
+    ask_once_session_cache: bool = True
+    default_outside_policy: SystemAccessDecision = "deny"
+    protected_roots: list[Path] = Field(default_factory=_default_system_access_protected_roots)
+    path_rules: list[SystemAccessPathRuleConfig] = Field(default_factory=list)
+    audit_log_path: Path = Field(
+        default_factory=lambda: _expand_path(Path.home() / ".assistant" / "logs" / "system_actions.jsonl")
+    )
+    backup_root: Path = Field(
+        default_factory=lambda: _expand_path(Path.home() / ".assistant" / "backups" / "system_access")
+    )
+
+    @field_validator("home_root", "audit_log_path", "backup_root", mode="before")
+    @classmethod
+    def validate_paths(cls, value: str | Path) -> Path:
+        return _expand_path(value)
+
+    @field_validator("protected_roots", mode="before")
+    @classmethod
+    def validate_protected_roots(cls, value: object) -> list[Path]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, list):
+            return [_expand_path(item) for item in value]
+        raise TypeError("system_access.protected_roots must be a list of paths.")
+
+
 class UsersConfig(BaseModel):
     default_user_id: str = "default"
     primary_channel: str = "webchat"
@@ -186,6 +250,7 @@ class AppConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    system_access: SystemAccessConfig = Field(default_factory=SystemAccessConfig)
     users: UsersConfig = Field(default_factory=UsersConfig)
 
     @field_validator("assistant_home", mode="before")
@@ -260,3 +325,6 @@ class AppConfig(BaseModel):
         (self.agent.workspace_dir / "skills").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "hooks").mkdir(parents=True, exist_ok=True)
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
+        self.system_access.home_root.mkdir(parents=True, exist_ok=True)
+        self.system_access.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.system_access.backup_root.mkdir(parents=True, exist_ok=True)

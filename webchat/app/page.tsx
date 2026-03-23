@@ -1,5 +1,6 @@
 import { AutomationPanel } from "../components/AutomationPanel";
 import { ChatWindow } from "../components/ChatWindow";
+import { HostAccessPanel } from "../components/HostAccessPanel";
 import { SessionList } from "../components/SessionList";
 
 async function getHistory() {
@@ -50,6 +51,7 @@ export default async function Page() {
         <div className="space-y-6">
           <SessionList messages={history} />
           <AutomationPanel />
+          <HostAccessPanel />
         </div>
       </div>
     </main>
