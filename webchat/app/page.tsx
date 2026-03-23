@@ -1,3 +1,4 @@
+import { AutomationPanel } from "../components/AutomationPanel";
 import { ChatWindow } from "../components/ChatWindow";
 import { SessionList } from "../components/SessionList";
 
@@ -46,7 +47,10 @@ export default async function Page() {
       </header>
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_360px]">
         <ChatWindow />
-        <SessionList messages={history} />
+        <div className="space-y-6">
+          <SessionList messages={history} />
+          <AutomationPanel />
+        </div>
       </div>
     </main>
   );

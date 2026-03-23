@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from assistant.agent.queue import AgentRequest, QueueMode
-
-
 class AutomationScheduler:
-    def __init__(self, config, agent_loop) -> None:
+    def __init__(self, config, automation_engine) -> None:
         self.config = config
-        self.agent_loop = agent_loop
+        self.automation_engine = automation_engine
         self.scheduler = None
 
     async def start(self) -> None:
@@ -25,7 +22,7 @@ class AutomationScheduler:
                 self.enqueue_cron_message,
                 trigger=trigger,
                 id=f"cron-{index}",
-                kwargs={"message": job.message},
+                kwargs={"rule_name": f"cron:{index}", "message": job.message},
                 replace_existing=True,
             )
         self.scheduler.start()
@@ -34,14 +31,5 @@ class AutomationScheduler:
         if self.scheduler is not None and self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
-    async def enqueue_cron_message(self, message: str) -> None:
-        await self.agent_loop.enqueue(
-            AgentRequest(
-                connection_id="",
-                session_key="main",
-                message=message,
-                request_id=f"cron-{hash(message)}",
-                mode=QueueMode.FOLLOWUP,
-                metadata={"source": "cron"},
-            )
-        )
+    async def enqueue_cron_message(self, rule_name: str, message: str) -> None:
+        await self.automation_engine.handle_cron_job(rule_name, message)

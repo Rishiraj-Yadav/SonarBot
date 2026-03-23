@@ -10,6 +10,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Phase 4 OAuth + orchestration: encrypted OAuth storage, Google/GitHub flows, sub-agents, sandbox-aware shell execution, device/session CLI commands, structured logging, graceful shutdown
 - [x] Phase 5 advanced polish: temporal memory decay, MMR reranking, multimodal memory indexing, browser login sessions, session snapshots, ACP client/tool, `assistant doctor`, expanded e2e/load/unit tests, deployment/config docs
 - [x] Phase 6 service integrations: Gmail search/read/send/draft tools, GitHub repo/issue/PR read tools, Gmail briefing skill, GitHub PR summary skill, OAuth token fallback for connected accounts
+- [x] Automation V2: unified user profiles, persisted automation runs, background cron/heartbeat/webhook execution, notification inbox, primary-channel delivery, rule pause/resume controls
 
 ## What You Can Use Today
 
@@ -22,6 +23,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
+- automation inbox and run history in WebChat
 - optional Docker sandbox execution
 
 ## Quickstart In 5 Steps

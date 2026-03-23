@@ -28,6 +28,7 @@ class AgentLoop:
         system_prompt_builder,
         event_emitter: EventEmitter,
         typing_emitter: TypingEmitter | None = None,
+        memory_capture_runner=None,
     ) -> None:
         self.config = config
         self.model_provider = model_provider
@@ -36,6 +37,7 @@ class AgentLoop:
         self.system_prompt_builder = system_prompt_builder
         self.event_emitter = event_emitter
         self.typing_emitter = typing_emitter
+        self.memory_capture_runner = memory_capture_runner
         self.queue = AgentQueue()
         self.compaction_manager = CompactionManager(config, session_manager, model_provider, tool_registry)
         self._task: asyncio.Task[None] | None = None
@@ -96,6 +98,14 @@ class AgentLoop:
             try:
                 await self._current_task
             except asyncio.CancelledError:
+                if request.result_future is not None and not request.result_future.done():
+                    request.result_future.set_result(
+                        {
+                            "session_key": request.session_key,
+                            "assistant_text": "",
+                            "status": "cancelled",
+                        }
+                    )
                 if self._current_task is not None and not self._current_task.done():
                     self._current_task.cancel()
                     try:
@@ -129,6 +139,7 @@ class AgentLoop:
         await self.compaction_manager.maybe_compact(session, system_prompt)
 
         current_connection_id = request.connection_id
+        final_text = ""
 
         while True:
             system_prompt = await self.system_prompt_builder.build()
@@ -154,19 +165,31 @@ class AgentLoop:
             except Exception as exc:  # pragma: no cover - defensive runtime path
                 error_text = f"[Model error] {exc}"
                 await self.session_manager.append_message(session, create_message("assistant", error_text))
+                if request.result_future is not None and not request.result_future.done():
+                    request.result_future.set_result(
+                        {
+                            "session_key": request.session_key,
+                            "assistant_text": error_text,
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
                 if not request.silent and current_connection_id:
                     await self.event_emitter(current_connection_id, "agent.chunk", {"text": error_text})
                     await self.event_emitter(current_connection_id, "agent.done", {"session_key": request.session_key})
                 return
 
             assistant_text = merge_text_chunks(text_chunks)
+            if assistant_text:
+                final_text = assistant_text
             skip_assistant_record = request.silent and assistant_text.strip().upper() == "NO_REPLY" and not tool_calls
             if (assistant_text or tool_calls) and not skip_assistant_record:
+                persisted_assistant_text = "" if tool_calls else assistant_text
                 await self.session_manager.append_message(
                     session,
                     create_message(
                         "assistant",
-                        assistant_text,
+                        persisted_assistant_text,
                         tool_calls=[
                             {"id": item.id, "name": item.name, "arguments": item.arguments} for item in tool_calls
                         ],
@@ -183,11 +206,20 @@ class AgentLoop:
                 )
 
             if not tool_calls:
+                if request.result_future is not None and not request.result_future.done():
+                    request.result_future.set_result(
+                        {
+                            "session_key": request.session_key,
+                            "assistant_text": final_text,
+                            "status": "completed",
+                        }
+                    )
                 if assistant_text and not request.silent and current_connection_id:
                     for chunk in self._chunk_for_delivery(assistant_text):
                         await self.event_emitter(current_connection_id, "agent.chunk", {"text": chunk})
                 if not request.silent and current_connection_id:
                     await self.event_emitter(current_connection_id, "agent.done", {"session_key": request.session_key})
+                await self._maybe_capture_long_term_memory(session, request, system_prompt, assistant_text)
                 return
 
             for tool_call in tool_calls:
@@ -222,3 +254,26 @@ class AgentLoop:
             return await self.tool_registry.dispatch(tool_name, payload)
         except Exception as exc:  # pragma: no cover - defensive runtime path
             return {"error": str(exc), "tool_name": tool_name}
+
+    async def _maybe_capture_long_term_memory(
+        self,
+        session,
+        request: AgentRequest,
+        system_prompt: str,
+        assistant_text: str,
+    ) -> None:
+        if self.memory_capture_runner is None or request.silent:
+            return
+        if request.session_key.startswith("automation:"):
+            return
+        if request.message.strip().startswith("/"):
+            return
+        try:
+            await self.memory_capture_runner.maybe_capture(
+                session,
+                system_prompt,
+                request.message,
+                assistant_text,
+            )
+        except Exception:  # pragma: no cover - defensive runtime path
+            return

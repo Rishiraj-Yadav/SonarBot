@@ -97,6 +97,7 @@ class MemoryConfig(BaseModel):
     temporal_decay_lambda: float = 0.02
     mmr_lambda: float = 0.7
     multimodal_enabled: bool = True
+    auto_capture_enabled: bool = True
 
 
 class WebhookConfig(BaseModel):
@@ -109,10 +110,45 @@ class CronJobConfig(BaseModel):
     message: str
 
 
+class AutomationRuleConfig(BaseModel):
+    name: str
+    trigger: str
+    prompt_or_skill: str
+    enabled: bool = True
+    conditions: dict[str, str] = Field(default_factory=dict)
+    action_policy: str = "notify_first"
+    delivery_policy: str = "primary"
+    cooldown_seconds: int = 0
+    dedupe_window_seconds: int = 300
+    quiet_hours_behavior: str = "queue"
+    severity: str = "info"
+
+
+class AutomationDeliveryConfig(BaseModel):
+    retry_attempts: int = 3
+    retry_backoff_seconds: int = 30
+    fallback_to_secondary: bool = True
+
+
+class AutomationApprovalsConfig(BaseModel):
+    enabled: bool = True
+    timeout_minutes: int = 60
+    default_action: str = "deny"
+
+
+class AutomationNotificationsConfig(BaseModel):
+    inbox_retention_days: int = 30
+    default_severity: str = "info"
+
+
 class AutomationConfig(BaseModel):
     heartbeat_interval_minutes: int = 15
     cron_jobs: list[CronJobConfig] = Field(default_factory=list)
     webhooks: dict[str, WebhookConfig] = Field(default_factory=dict)
+    rules: list[AutomationRuleConfig] = Field(default_factory=list)
+    delivery: AutomationDeliveryConfig = Field(default_factory=AutomationDeliveryConfig)
+    approvals: AutomationApprovalsConfig = Field(default_factory=AutomationApprovalsConfig)
+    notifications: AutomationNotificationsConfig = Field(default_factory=AutomationNotificationsConfig)
 
 
 class ToolsConfig(BaseModel):
@@ -127,6 +163,17 @@ class SandboxConfig(BaseModel):
     memory_limit_mb: int = 512
 
 
+class UsersConfig(BaseModel):
+    default_user_id: str = "default"
+    primary_channel: str = "webchat"
+    fallback_channels: list[str] = Field(default_factory=list)
+    quiet_hours_start: str = ""
+    quiet_hours_end: str = ""
+    notification_level: str = "normal"
+    automation_enabled: bool = True
+    auto_link_single_user: bool = True
+
+
 class AppConfig(BaseModel):
     assistant_home: Path = Field(default_factory=lambda: _expand_path(Path.home() / ".assistant"))
     gateway: GatewayConfig
@@ -139,6 +186,7 @@ class AppConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    users: UsersConfig = Field(default_factory=UsersConfig)
 
     @field_validator("assistant_home", mode="before")
     @classmethod

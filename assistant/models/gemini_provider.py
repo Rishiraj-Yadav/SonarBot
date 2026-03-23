@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -93,12 +95,60 @@ class GeminiProvider(ModelProvider):
 
     def _message_to_content(self, message: dict[str, Any]) -> dict[str, Any] | None:
         role = message.get("role", "user")
+        if role == "assistant" and message.get("tool_calls"):
+            return self._assistant_tool_call_content(message)
+        if role == "tool":
+            return self._tool_response_content(message)
+
         text = self._normalize_message_text(message)
         if not text:
             return None
-
         gemini_role = "model" if role == "assistant" else "user"
         return {"role": gemini_role, "parts": [{"text": text}]}
+
+    def _assistant_tool_call_content(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        parts: list[dict[str, Any]] = []
+        content = str(message.get("content", "")).strip()
+        if content:
+            parts.append({"text": content})
+        for tool_call in message.get("tool_calls", []):
+            if not isinstance(tool_call, dict):
+                continue
+            name = str(tool_call.get("name", "")).strip()
+            if not name:
+                continue
+            parts.append(
+                {
+                    "functionCall": {
+                        "name": name,
+                        "args": tool_call.get("arguments", {}) or {},
+                    }
+                }
+            )
+        if not parts:
+            return None
+        return {"role": "model", "parts": parts}
+
+    def _tool_response_content(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        name = str(message.get("name", "tool")).strip() or "tool"
+        content = str(message.get("content", "")).strip()
+        if not content:
+            return None
+        try:
+            response_payload = json.loads(content)
+        except json.JSONDecodeError:
+            response_payload = {"content": content}
+        return {
+            "role": "user",
+            "parts": [
+                {
+                    "functionResponse": {
+                        "name": name,
+                        "response": response_payload,
+                    }
+                }
+            ],
+        }
 
     def _normalize_message_text(self, message: dict[str, Any]) -> str:
         role = message.get("role", "user")
@@ -148,7 +198,52 @@ class GeminiProvider(ModelProvider):
             total_tokens=int(usage_data.get("totalTokenCount", 0)),
         )
 
-        return "".join(text_parts).strip(), tool_calls, usage
+        text = "".join(text_parts).strip()
+        recovered_calls, cleaned_text = self._recover_textual_tool_calls(text)
+        if recovered_calls:
+            tool_calls.extend(recovered_calls)
+            text = cleaned_text
+
+        return text, tool_calls, usage
+
+    def _recover_textual_tool_calls(self, text: str) -> tuple[list[ToolCall], str]:
+        if "Tool calls requested:" not in text:
+            return [], text
+
+        pattern = re.compile(r"Tool calls requested:\s*(\[[\s\S]*?\])\s*(```)?", re.IGNORECASE)
+        match = pattern.search(text)
+        if match is None:
+            return [], text
+
+        raw_payload = match.group(1).strip()
+        try:
+            parsed = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return [], text
+        if not isinstance(parsed, list):
+            return [], text
+
+        recovered: list[ToolCall] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            arguments = item.get("arguments", {}) or {}
+            if not name or not isinstance(arguments, dict):
+                continue
+            recovered.append(
+                ToolCall(
+                    id=str(item.get("id") or uuid4()),
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+        if not recovered:
+            return [], text
+
+        cleaned = (text[: match.start()] + text[match.end() :]).strip()
+        cleaned = cleaned.removesuffix("```").strip()
+        return recovered, cleaned
 
     def _chunk_text(self, text: str, size: int = 120) -> list[str]:
         return [text[index : index + size] for index in range(0, len(text), size)] or [text]

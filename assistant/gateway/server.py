@@ -17,8 +17,11 @@ from assistant.agent.queue import QueueMode
 from assistant.agent.session_manager import SessionManager
 from assistant.agent.system_prompt import SystemPromptBuilder
 from assistant.automation import (
+    AutomationEngine,
     AutomationScheduler,
+    AutomationStore,
     HeartbeatService,
+    NotificationDispatcher,
     StandingOrdersManager,
     render_webhook_message,
     verify_webhook_signature,
@@ -33,7 +36,7 @@ from assistant.gateway.device_registry import DeviceRegistry
 from assistant.gateway.protocol import ConnectFrame, HelloOkFrame, RequestFrame, ResponseFrame
 from assistant.gateway.router import GatewayRouter
 from assistant.hooks.runner import HookRunner
-from assistant.memory import MemoryManager
+from assistant.memory import MemoryAutoCaptureRunner, MemoryManager
 from assistant.models import get_provider
 from assistant.multi_agent import ACPClient, PresenceRegistry, SubAgentManager
 from assistant.oauth import OAuthFlowManager, OAuthTokenManager
@@ -43,6 +46,7 @@ from assistant.skills.watcher import SkillWatcher
 from assistant.tools.agent_send_tool import build_agent_send_tool
 from assistant.tools import create_default_tool_registry
 from assistant.utils import configure_logging, get_logger
+from assistant.users import UserProfileStore
 
 
 @dataclass(slots=True)
@@ -72,6 +76,9 @@ class GatewayServices:
     acp_client: ACPClient
     sandbox_runtime: SandboxRuntime
     logger: Any
+    user_profiles: UserProfileStore
+    automation_store: AutomationStore
+    automation_engine: AutomationEngine
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -86,6 +93,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         await device_registry.initialize()
         session_manager = SessionManager(runtime_config)
         memory_manager = MemoryManager(runtime_config)
+        user_profiles = UserProfileStore(runtime_config)
+        await user_profiles.initialize()
         skill_registry = SkillRegistry(runtime_config)
         skill_registry.start()
         skill_watcher = SkillWatcher(skill_registry)
@@ -111,6 +120,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             sandbox_runtime=sandbox_runtime,
             acp_client=acp_client,
         )
+        memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
             config=runtime_config,
@@ -120,6 +130,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             system_prompt_builder=prompt_builder,
             event_emitter=connection_manager.send_event,
             typing_emitter=connection_manager.send_typing,
+            memory_capture_runner=memory_capture_runner,
         )
         presence_registry.register("main", "main", capabilities=tool_registry.names())
         sub_agent_manager = SubAgentManager(
@@ -142,12 +153,28 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             presence_registry=presence_registry,
             oauth_flow_manager=oauth_flow_manager,
             tool_registry=tool_registry,
+            automation_engine=None,
+            user_profiles=user_profiles,
             started_at=started_at,
         )
-        channels = _build_channels(runtime_config, connection_manager, router)
+        channels = _build_channels(runtime_config, connection_manager, router, user_profiles)
         standing_orders = StandingOrdersManager(runtime_config.agent.workspace_dir)
-        automation_scheduler = AutomationScheduler(runtime_config, agent_loop) if runtime_config.automation.cron_jobs else None
-        heartbeat_service = HeartbeatService(runtime_config, agent_loop, standing_orders)
+        automation_store = AutomationStore(runtime_config)
+        await automation_store.initialize()
+        notification_dispatcher = NotificationDispatcher(runtime_config, automation_store, user_profiles, connection_manager)
+        automation_engine = AutomationEngine(
+            runtime_config,
+            agent_loop,
+            session_manager,
+            standing_orders,
+            user_profiles,
+            automation_store,
+            notification_dispatcher,
+        )
+        await automation_engine.initialize()
+        router.automation_engine = automation_engine
+        automation_scheduler = AutomationScheduler(runtime_config, automation_engine) if runtime_config.automation.cron_jobs else None
+        heartbeat_service = HeartbeatService(runtime_config, agent_loop, automation_engine)
         app.state.services = GatewayServices(
             config=runtime_config,
             connection_manager=connection_manager,
@@ -174,6 +201,9 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             acp_client=acp_client,
             sandbox_runtime=sandbox_runtime,
             logger=logger,
+            user_profiles=user_profiles,
+            automation_store=automation_store,
+            automation_engine=automation_engine,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()
@@ -250,6 +280,65 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         services: GatewayServices = app.state.services
         return await services.router.dashboard_payload(session_key)
 
+    @app.get("/api/notifications")
+    async def notifications(request: Request, limit: int = 20) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        notifications = await services.automation_engine.list_notifications(user_id)
+        return {"notifications": notifications[: max(1, min(limit, 100))]}
+
+    @app.get("/api/automation/runs")
+    async def automation_runs(request: Request, limit: int = 20) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        runs = await services.automation_engine.list_runs(user_id)
+        return {"runs": runs[: max(1, min(limit, 100))]}
+
+    @app.get("/api/automation/rules")
+    async def automation_rules(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        return {"rules": await services.automation_engine.list_rules(user_id)}
+
+    @app.post("/api/automation/rules/{name}/pause")
+    async def pause_automation_rule(name: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        await services.automation_engine.pause_rule(user_id, name)
+        return {"ok": True, "name": name, "paused": True}
+
+    @app.post("/api/automation/rules/{name}/resume")
+    async def resume_automation_rule(name: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        await services.automation_engine.resume_rule(user_id, name)
+        return {"ok": True, "name": name, "paused": False}
+
+    @app.post("/api/automation/runs/{run_id}/replay")
+    async def replay_automation_run(run_id: str) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        return {"ok": True, "result": await services.automation_engine.replay_run(run_id)}
+
+    @app.get("/api/approvals")
+    async def approvals(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        return {"approvals": await services.automation_engine.list_approvals(user_id)}
+
+    @app.post("/api/approvals/{approval_id}")
+    async def decide_approval(approval_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        payload = await request.json()
+        decision = str(payload.get("decision", "approved"))
+        await services.automation_engine.decide_approval(approval_id, decision)
+        return {"ok": True, "approval_id": approval_id, "decision": decision}
+
     @app.get("/api/skills")
     async def list_skills() -> dict[str, Any]:
         services: GatewayServices = app.state.services
@@ -260,6 +349,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                 "eligible": skill.eligible,
                 "enabled": skill.enabled,
                 "user_invocable": skill.user_invocable,
+                "natural_language_enabled": skill.natural_language_enabled,
+                "aliases": skill.aliases,
                 "path": str(skill.path),
             }
             for skill in services.skill_registry.list_all()
@@ -304,15 +395,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             return {"ok": False, "error": "Invalid signature."}
         payload = json.loads(body.decode("utf-8"))
         message = render_webhook_message(webhook.message_template, payload)
-        await services.router.route_user_message(
-            connection_id="",
-            request_id=f"webhook-{uuid4().hex}",
-            session_key="main",
-            message=message,
-            metadata={"source": "webhook", "name": name},
-            mode=QueueMode.FOLLOWUP,
-        )
-        return {"ok": True}
+        result = await services.automation_engine.handle_webhook(name, {**payload, "message": message}, message)
+        return {"ok": True, "result": result}
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -327,6 +411,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                 return
 
             connection = await services.connection_manager.connect(websocket, connect_frame.device_id)
+            user_id = await services.user_profiles.resolve_user_id(
+                "cli",
+                connect_frame.device_id,
+                {"channel": "cli", "device_id": connect_frame.device_id},
+            )
+            services.connection_manager.bind_connection(connection.connection_id, user_id=user_id, channel_name="cli")
             await services.device_registry.seen(connect_frame.device_id)
             await websocket.send_text(HelloOkFrame().model_dump_json())
 
@@ -365,6 +455,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         services = app.state.services
         device_id = get_webchat_device_id(websocket)
         connection = await services.connection_manager.connect(websocket, device_id)
+        user_id = await services.user_profiles.resolve_user_id(
+            "webchat",
+            device_id,
+            {"channel": "webchat", "device_id": device_id},
+        )
+        services.connection_manager.bind_connection(connection.connection_id, user_id=user_id, channel_name="webchat")
         await services.device_registry.seen(device_id)
         try:
             while True:
@@ -413,12 +509,26 @@ async def _process_websocket_request(
     return await services.router.handle_request(connection_id, request)
 
 
-def _build_channels(config: AppConfig, connection_manager: ConnectionManager, router: GatewayRouter) -> list[Any]:
+def _build_channels(
+    config: AppConfig,
+    connection_manager: ConnectionManager,
+    router: GatewayRouter,
+    user_profiles: UserProfileStore,
+) -> list[Any]:
     async def handle_channel_message(message: ChannelMessage) -> str:
+        user_id = await user_profiles.resolve_user_id(
+            message.channel,
+            message.sender_id,
+            {
+                "channel": message.channel,
+                "chat_id": message.metadata.get("chat_id", message.sender_id),
+            },
+        )
         route_id = connection_manager.register_channel_route(
             channel_name=message.channel,
             sender_id=message.sender_id,
             recipient_id=message.metadata.get("chat_id", message.sender_id),
+            user_id=user_id,
             metadata={"media_type": message.media_type, "media_path": message.media_path},
         )
         session_key = f"{message.channel}:{message.sender_id}"
@@ -433,6 +543,7 @@ def _build_channels(config: AppConfig, connection_manager: ConnectionManager, ro
                 "sender_id": message.sender_id,
                 "media_type": message.media_type,
                 "media_path": message.media_path,
+                "user_id": user_id,
             },
         )
         if not response.ok:

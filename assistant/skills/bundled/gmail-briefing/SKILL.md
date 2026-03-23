@@ -2,6 +2,18 @@
 name: gmail-briefing
 description: Creates a concise inbox briefing from the connected Gmail account.
 user_invocable: true
+natural_language_enabled: true
+aliases:
+  - inbox briefing
+  - email briefing
+activation_examples:
+  - give me an inbox briefing
+  - summarize my recent emails
+keywords:
+  - inbox
+  - email
+  - briefing
+priority: 4
 metadata:
   always: true
 ---

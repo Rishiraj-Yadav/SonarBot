@@ -7,6 +7,9 @@ type Skill = {
   description: string;
   enabled: boolean;
   eligible: boolean;
+  user_invocable: boolean;
+  natural_language_enabled: boolean;
+  aliases: string[];
 };
 
 export function SkillsManager() {
@@ -38,6 +41,19 @@ export function SkillsManager() {
               <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
                 {skill.eligible ? "Eligible" : "Unavailable in this environment"}
               </p>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                {skill.user_invocable ? (
+                  <span className="rounded-full bg-accent/10 px-3 py-1 text-accent">Slash</span>
+                ) : null}
+                {skill.natural_language_enabled ? (
+                  <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">Natural language</span>
+                ) : null}
+                {skill.aliases?.map((alias) => (
+                  <span key={alias} className="rounded-full bg-slate-100 px-3 py-1 text-slate-600">
+                    {alias}
+                  </span>
+                ))}
+              </div>
             </div>
             <button
               className={`rounded-full px-4 py-2 text-sm ${skill.enabled ? "bg-accent text-white" : "bg-slate-200 text-slate-700"}`}

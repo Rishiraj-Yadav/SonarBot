@@ -2,6 +2,18 @@
 name: github-pr-summary
 description: Summarizes a GitHub pull request, highlights risk, and explains changed files.
 user_invocable: true
+natural_language_enabled: true
+aliases:
+  - pr summary
+  - pull request summary
+activation_examples:
+  - summarize this pull request
+  - give me a pr summary
+keywords:
+  - pull request
+  - pr
+  - summary
+priority: 4
 metadata:
   always: true
 ---

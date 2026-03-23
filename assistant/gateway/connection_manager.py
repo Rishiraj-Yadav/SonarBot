@@ -19,6 +19,8 @@ class ConnectionContext:
     device_id: str
     websocket: WebSocket
     connected_at: str
+    channel_name: str = "ws"
+    user_id: str = ""
 
 
 @dataclass(slots=True)
@@ -27,6 +29,7 @@ class ChannelRoute:
     channel_name: str
     sender_id: str
     recipient_id: str
+    user_id: str
     metadata: dict[str, Any]
 
 
@@ -36,6 +39,8 @@ class ConnectionManager:
         self._channels: dict[str, Any] = {}
         self._channel_routes: dict[str, ChannelRoute] = {}
         self._sender_channels: dict[str, str] = {}
+        self._user_connections: dict[str, set[str]] = {}
+        self._user_routes: dict[str, set[str]] = {}
         self.rate_limit_per_minute = rate_limit_per_minute
         self._request_windows: dict[str, deque[float]] = {}
 
@@ -50,7 +55,13 @@ class ConnectionManager:
         return connection
 
     async def disconnect(self, connection_id: str) -> None:
-        self._connections.pop(connection_id, None)
+        context = self._connections.pop(connection_id, None)
+        if context is not None and context.user_id:
+            connection_ids = self._user_connections.get(context.user_id)
+            if connection_ids is not None:
+                connection_ids.discard(connection_id)
+                if not connection_ids:
+                    self._user_connections.pop(context.user_id, None)
 
     async def disconnect_websocket(self, websocket: WebSocket) -> None:
         for connection_id, context in list(self._connections.items()):
@@ -73,6 +84,7 @@ class ConnectionManager:
         channel_name: str,
         sender_id: str,
         recipient_id: str,
+        user_id: str,
         metadata: dict[str, Any] | None = None,
     ) -> str:
         route_id = uuid4().hex
@@ -81,10 +93,20 @@ class ConnectionManager:
             channel_name=channel_name,
             sender_id=sender_id,
             recipient_id=recipient_id,
+            user_id=user_id,
             metadata=metadata or {},
         )
         self._sender_channels[sender_id] = channel_name
+        self._user_routes.setdefault(user_id, set()).add(route_id)
         return route_id
+
+    def bind_connection(self, connection_id: str, *, user_id: str, channel_name: str) -> None:
+        context = self._connections.get(connection_id)
+        if context is None:
+            return
+        context.user_id = user_id
+        context.channel_name = channel_name
+        self._user_connections.setdefault(user_id, set()).add(connection_id)
 
     async def send_response(self, connection_id: str, response: ResponseFrame) -> None:
         context = self._connections.get(connection_id)
@@ -122,6 +144,43 @@ class ConnectionManager:
             return
         await channel.send_typing(route.recipient_id)
 
+    async def send_channel_message(self, channel_name: str, recipient_id: str, text: str) -> bool:
+        channel = self._channels.get(channel_name)
+        if channel is None:
+            return False
+        await channel.send_message(recipient_id, text)
+        return True
+
+    async def send_user_event(
+        self,
+        user_id: str,
+        event_name: str,
+        payload: dict[str, Any],
+        *,
+        channel_name: str | None = None,
+    ) -> int:
+        sent = 0
+        for connection_id in list(self._user_connections.get(user_id, set())):
+            context = self._connections.get(connection_id)
+            if context is None:
+                continue
+            if channel_name is not None and context.channel_name != channel_name:
+                continue
+            await self.send_event(connection_id, event_name, payload)
+            sent += 1
+        return sent
+
+    def active_user_connections(self, user_id: str, channel_name: str | None = None) -> list[str]:
+        connection_ids = []
+        for connection_id in self._user_connections.get(user_id, set()):
+            context = self._connections.get(connection_id)
+            if context is None:
+                continue
+            if channel_name is not None and context.channel_name != channel_name:
+                continue
+            connection_ids.append(connection_id)
+        return connection_ids
+
     def active_count(self) -> int:
         return len(self._connections)
 
@@ -141,3 +200,6 @@ class ConnectionManager:
             return False
         window.append(now)
         return True
+
+    def get_connection(self, connection_id: str) -> ConnectionContext | None:
+        return self._connections.get(connection_id)

@@ -31,10 +31,37 @@ vector_enabled = true
 temporal_decay_lambda = 0.02
 mmr_lambda = 0.7
 multimodal_enabled = true
+auto_capture_enabled = true
 
 [automation]
 heartbeat_interval_minutes = 15
 cron_jobs = []
+
+[automation.delivery]
+retry_attempts = 3
+retry_backoff_seconds = 30
+fallback_to_secondary = true
+
+[automation.approvals]
+enabled = true
+timeout_minutes = 60
+default_action = "deny"
+
+[automation.notifications]
+inbox_retention_days = 30
+default_severity = "info"
+
+[[automation.rules]]
+name = "daily-briefing"
+trigger = "cron"
+prompt_or_skill = "Good morning briefing"
+enabled = true
+action_policy = "notify_first"
+delivery_policy = "primary"
+cooldown_seconds = 0
+dedupe_window_seconds = 300
+quiet_hours_behavior = "queue"
+severity = "info"
 
 [tools]
 brave_api_key = ""
@@ -53,3 +80,13 @@ enabled = false
 image = "python:3.12-slim"
 cpu_limit = 0.5
 memory_limit_mb = 512
+
+[users]
+default_user_id = "default"
+primary_channel = "webchat"
+fallback_channels = ["telegram"]
+quiet_hours_start = ""
+quiet_hours_end = ""
+notification_level = "normal"
+automation_enabled = true
+auto_link_single_user = true

@@ -12,6 +12,10 @@ from uuid import uuid4
 from assistant.agent.session import create_message
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.gateway.protocol import AgentSendParams, RequestFrame, ResponseFrame
+from assistant.utils.logging import get_logger
+
+
+LOGGER = get_logger("skill_router")
 
 
 @dataclass(slots=True)
@@ -26,6 +30,8 @@ class GatewayRouter:
     presence_registry: Any
     oauth_flow_manager: Any
     tool_registry: Any
+    automation_engine: Any
+    user_profiles: Any
     started_at: datetime
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
@@ -34,11 +40,18 @@ class GatewayRouter:
 
         if request.method == "agent.send":
             params = AgentSendParams.model_validate(request.params)
+            connection = self.connection_manager.get_connection(connection_id)
+            metadata = {
+                "user_id": getattr(connection, "user_id", "") or self.config.users.default_user_id,
+                "channel": getattr(connection, "channel_name", "ws"),
+                "device_id": getattr(connection, "device_id", ""),
+            }
             return await self.route_user_message(
                 connection_id=connection_id,
                 request_id=request.id,
                 session_key=params.session_key,
                 message=params.message,
+                metadata=metadata,
             )
 
         return ResponseFrame(id=request.id, ok=False, error=f"Unknown method '{request.method}'.")
@@ -56,6 +69,7 @@ class GatewayRouter:
     ) -> ResponseFrame:
         metadata = dict(metadata or {})
         metadata.setdefault("trace_id", uuid4().hex)
+        metadata.setdefault("user_id", self.config.users.default_user_id)
         stripped = message.strip()
         system_suffix = self._augment_system_suffix_for_intent(stripped, system_suffix)
         if stripped.startswith("/"):
@@ -79,18 +93,43 @@ class GatewayRouter:
         if shortcut is not None:
             return shortcut
 
-        hook_event = await self.hook_runner.fire_event(
-            "message:received",
-            context={
-                "session_key": session_key,
-                "message": message,
-                "metadata": metadata,
-                "preview": message[:120],
-                "sender_id": metadata.get("sender_id"),
-                "channel": metadata.get("channel"),
-                "logs_dir": str(self.config.logs_dir),
-            },
-        )
+        skill_activation = await self._resolve_skill_intent(stripped)
+        if skill_activation is not None:
+            skill, activation_source = skill_activation
+            metadata["activated_skill"] = skill.name
+            metadata["skill_activation_source"] = activation_source
+            await self._fire_message_received(session_key, message, metadata)
+            skill_prompt = self.skill_registry.load_skill_prompt(skill.name)
+            combined_suffix = self._append_system_suffix(
+                system_suffix,
+                "## Active Skill",
+                skill_prompt,
+            )
+            self._log_skill_activation(skill.name, activation_source, metadata.get("trace_id", ""))
+            await self.agent_loop.enqueue(
+                AgentRequest(
+                    connection_id=connection_id,
+                    session_key=session_key,
+                    message=message,
+                    request_id=request_id,
+                    mode=mode,
+                    metadata=metadata,
+                    silent=silent,
+                    system_suffix=combined_suffix,
+                )
+            )
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": True,
+                    "session_key": session_key,
+                    "activated_skill": skill.name,
+                    "activation_source": activation_source,
+                },
+            )
+
+        await self._fire_message_received(session_key, message, metadata)
 
         await self.agent_loop.enqueue(
             AgentRequest(
@@ -144,6 +183,7 @@ class GatewayRouter:
 
         if command_name in {"new", "reset"}:
             previous = await self.session_manager.load_or_create(session_key)
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 f"command:{command_name}",
                 context={
@@ -154,6 +194,7 @@ class GatewayRouter:
                     "session_path": str(previous.storage_path),
                     "workspace_dir": str(self.config.agent.workspace_dir),
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             session = await self.session_manager.reset_session(session_key)
@@ -168,6 +209,7 @@ class GatewayRouter:
             )
 
         if command_name == "stop":
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 "command:stop",
                 context={
@@ -175,6 +217,7 @@ class GatewayRouter:
                     "command": command_name,
                     "arguments": arguments,
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             cancelled = await self.agent_loop.cancel_session(session_key)
@@ -194,6 +237,7 @@ class GatewayRouter:
             )
 
         if command_name == "memory":
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 "command:memory",
                 context={
@@ -201,6 +245,7 @@ class GatewayRouter:
                     "command": command_name,
                     "arguments": arguments,
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             memory_text = await self.memory_manager.read_long_term()
@@ -215,6 +260,7 @@ class GatewayRouter:
             )
 
         if command_name == "status":
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 "command:status",
                 context={
@@ -222,6 +268,7 @@ class GatewayRouter:
                     "command": command_name,
                     "arguments": arguments,
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             session_status = await self.session_manager.session_status(session_key)
@@ -238,6 +285,7 @@ class GatewayRouter:
             )
 
         if command_name == "skills":
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 "command:skills",
                 context={
@@ -245,11 +293,12 @@ class GatewayRouter:
                     "command": command_name,
                     "arguments": arguments,
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             enabled_skills = self.skill_registry.list_enabled()
             response_lines = [
-                f"- {skill.name}: {skill.description}" for skill in enabled_skills
+                self._format_skill_summary(skill) for skill in enabled_skills
             ] or ["No skills are currently enabled."]
             extra = self._flatten_hook_messages(hook_event.messages)
             response_text = "\n".join(response_lines)
@@ -261,6 +310,7 @@ class GatewayRouter:
                 payload={
                     "queued": False,
                     "skills": [skill.name for skill in enabled_skills],
+                    "skill_details": [self._skill_payload(skill) for skill in enabled_skills],
                     "session_key": session_key,
                     "command_response": response_text,
                 },
@@ -273,6 +323,7 @@ class GatewayRouter:
             return await self._start_oauth_flow(request_id, session_key, provider)
 
         if command_name in {"oauth-status", "oauth_status"}:
+            user_id = await self._resolve_user_id(connection_id, session_key)
             hook_event = await self.hook_runner.fire_event(
                 "command:oauth-status",
                 context={
@@ -280,6 +331,7 @@ class GatewayRouter:
                     "command": command_name,
                     "arguments": arguments,
                     "logs_dir": str(self.config.logs_dir),
+                    "user_id": user_id,
                 },
             )
             providers = await self.oauth_flow_manager.token_manager.list_connected()
@@ -298,6 +350,108 @@ class GatewayRouter:
                 id=request_id,
                 ok=True,
                 payload={"queued": False, "session_key": session_key, "command_response": response_text, "providers": providers},
+            )
+
+        if command_name == "notifications":
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            notifications = await self.automation_engine.list_notifications(user_id)
+            if notifications:
+                lines = [f"- {item['title']} ({item['source']}, {item['status']})" for item in notifications[:10]]
+                response_text = "Recent notifications:\n" + "\n".join(lines)
+            else:
+                response_text = "No automation notifications yet."
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text, "notifications": notifications},
+            )
+
+        if command_name in {"automation-runs", "automation_runs"}:
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            runs = await self.automation_engine.list_runs(user_id)
+            if runs:
+                lines = [f"- {item['rule_name']} -> {item['status']} ({item['created_at']})" for item in runs[:10]]
+                response_text = "Recent automation runs:\n" + "\n".join(lines)
+            else:
+                response_text = "No automation runs yet."
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text, "runs": runs},
+            )
+
+        if command_name in {"automation-rules", "automation_rules"}:
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            rules = await self.automation_engine.list_rules(user_id)
+            lines = [
+                f"- {item['name']} ({item['trigger']}): {'paused' if item['paused'] else 'active'}"
+                for item in rules
+            ] or ["No automation rules configured."]
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": "Automation rules:\n" + "\n".join(lines), "rules": rules},
+            )
+
+        if command_name == "pause-rule":
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            rule_name = arguments.strip()
+            if not rule_name:
+                return ResponseFrame(id=request_id, ok=False, error="Use /pause-rule <rule_name>.")
+            await self.automation_engine.pause_rule(user_id, rule_name)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": f"Paused rule '{rule_name}'."},
+            )
+
+        if command_name == "resume-rule":
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            rule_name = arguments.strip()
+            if not rule_name:
+                return ResponseFrame(id=request_id, ok=False, error="Use /resume-rule <rule_name>.")
+            await self.automation_engine.resume_rule(user_id, rule_name)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": f"Resumed rule '{rule_name}'."},
+            )
+
+        if command_name == "replay-run":
+            run_id = arguments.strip()
+            if not run_id:
+                return ResponseFrame(id=request_id, ok=False, error="Use /replay-run <run_id>.")
+            replay = await self.automation_engine.replay_run(run_id)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": json.dumps(replay, indent=2)},
+            )
+
+        if command_name == "approvals":
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            approvals = await self.automation_engine.list_approvals(user_id)
+            if approvals:
+                lines = [f"- {item['approval_id']}: {item['status']} ({item['action']})" for item in approvals[:10]]
+                response_text = "Approval queue:\n" + "\n".join(lines)
+            else:
+                response_text = "No pending approvals."
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text, "approvals": approvals},
+            )
+
+        if command_name in {"approve", "reject"}:
+            approval_id = arguments.strip()
+            if not approval_id:
+                return ResponseFrame(id=request_id, ok=False, error=f"Use /{command_name} <approval_id>.")
+            decision = "approved" if command_name == "approve" else "rejected"
+            await self.automation_engine.decide_approval(approval_id, decision)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": f"{decision.title()} approval '{approval_id}'."},
             )
 
         skill = self.skill_registry.find_user_invocable(command_name)
@@ -320,11 +474,16 @@ class GatewayRouter:
                     message=raw_command,
                     request_id=request_id,
                     mode=QueueMode.STEER,
-                    metadata={"skill_command": skill.name},
+                    metadata={"skill_command": skill.name, "activated_skill": skill.name, "skill_activation_source": "slash"},
                     system_suffix=f"## Active Skill\n{skill_prompt}",
                 )
             )
-            return ResponseFrame(id=request_id, ok=True, payload={"queued": True, "session_key": session_key, "skill": skill.name})
+            self._log_skill_activation(skill.name, "slash", "")
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": True, "session_key": session_key, "skill": skill.name, "activated_skill": skill.name},
+            )
 
         return ResponseFrame(id=request_id, ok=False, error=f"Unknown slash command '/{command_name}'.")
 
@@ -375,6 +534,93 @@ class GatewayRouter:
     def _looks_like_oauth_status_request(self, message: str) -> bool:
         lowered = message.lower().strip()
         return lowered in {"oauth status", "show oauth status", "show connected oauth providers"}
+
+    async def _resolve_skill_intent(self, message: str) -> tuple[Any, str] | None:
+        matches = self.skill_registry.match_natural_language(message)
+        if not matches:
+            return None
+
+        top = matches[0]
+        if top.exact:
+            return top.skill, "exact"
+
+        if top.score >= 6:
+            second_score = matches[1].score if len(matches) > 1 else -999
+            if top.score - second_score >= 3:
+                return top.skill, "heuristic"
+
+        plausible = [item for item in matches[:3] if item.score > 0]
+        if len(plausible) < 2:
+            return None
+
+        classified = await self._classify_skill_match(message, plausible)
+        if classified is None:
+            return None
+        return classified, "classifier"
+
+    async def _classify_skill_match(self, message: str, matches: list[Any]) -> Any | None:
+        has_tool = getattr(self.tool_registry, "has", None)
+        if callable(has_tool) and not has_tool("llm_task"):
+            return None
+
+        prompt_lines = [
+            "Choose the best SonarBot skill for the user's message.",
+            "Return strict JSON only: {\"skill\": \"<name-or-none>\", \"confidence\": <0.0-1.0>}.",
+            "Only choose a skill if the fit is strong. Otherwise return {\"skill\": \"none\", \"confidence\": 0}.",
+            f"User message: {message}",
+            "Candidate skills:",
+        ]
+        for item in matches:
+            skill = item.skill
+            prompt_lines.append(
+                json.dumps(
+                    {
+                        "name": skill.name,
+                        "description": skill.description,
+                        "aliases": skill.aliases,
+                        "activation_examples": skill.activation_examples,
+                        "keywords": skill.keywords,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        try:
+            result = await self.tool_registry.dispatch(
+                "llm_task",
+                {"prompt": "\n".join(prompt_lines), "model": "cheap"},
+            )
+        except Exception:
+            return None
+
+        content = str(result.get("content", "")).strip()
+        payload = self._parse_classifier_payload(content)
+        if not payload:
+            return None
+        selected_name = str(payload.get("skill", "none")).strip()
+        confidence = payload.get("confidence", 0)
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            return None
+        if confidence_value < 0.8 or selected_name.lower() == "none":
+            return None
+        for item in matches:
+            if item.skill.name == selected_name:
+                return item.skill
+        return None
+
+    def _parse_classifier_payload(self, content: str) -> dict[str, Any] | None:
+        if not content:
+            return None
+        candidate = content.strip()
+        fenced = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
+        if fenced is not None:
+            candidate = fenced.group(0)
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     async def _handle_tool_shortcut(
         self,
@@ -463,6 +709,52 @@ class GatewayRouter:
             return f"{existing}\n\n## Intent Hint\n" + "\n".join(hints)
         return "## Intent Hint\n" + "\n".join(hints)
 
+    async def _fire_message_received(self, session_key: str, message: str, metadata: dict[str, Any]) -> Any:
+        return await self.hook_runner.fire_event(
+            "message:received",
+            context={
+                "session_key": session_key,
+                "message": message,
+                "metadata": metadata,
+                "preview": message[:120],
+                "sender_id": metadata.get("sender_id"),
+                "channel": metadata.get("channel"),
+                "user_id": metadata.get("user_id"),
+                "logs_dir": str(self.config.logs_dir),
+            },
+        )
+
+    def _append_system_suffix(self, existing: str | None, heading: str, content: str) -> str:
+        parts = []
+        if existing:
+            parts.append(existing)
+        parts.append(f"{heading}\n{content}")
+        return "\n\n".join(part for part in parts if part)
+
+    def _skill_payload(self, skill: Any) -> dict[str, Any]:
+        return {
+            "name": skill.name,
+            "description": skill.description,
+            "user_invocable": skill.user_invocable,
+            "natural_language_enabled": skill.natural_language_enabled,
+            "aliases": skill.aliases,
+        }
+
+    def _format_skill_summary(self, skill: Any) -> str:
+        support = [
+            "slash" if skill.user_invocable else None,
+            "natural" if skill.natural_language_enabled else None,
+        ]
+        aliases = f" aliases: {', '.join(skill.aliases)}" if skill.aliases else ""
+        mode_text = ", ".join(item for item in support if item) or "context-only"
+        return f"- {skill.name}: {skill.description} [{mode_text}]{aliases}"
+
+    def _log_skill_activation(self, skill_name: str, source: str, trace_id: str) -> None:
+        try:
+            LOGGER.info("skill_activated", skill=skill_name, source=source, trace_id=trace_id)
+        except TypeError:
+            LOGGER.info("skill_activated skill=%s source=%s trace_id=%s", skill_name, source, trace_id)
+
     def _looks_like_latest_email_request(self, lowered: str) -> bool:
         has_email_word = "mail" in lowered or "email" in lowered
         has_latest_word = "last" in lowered or "latest" in lowered or "newest" in lowered
@@ -543,3 +835,14 @@ class GatewayRouter:
             session,
             create_message("assistant", assistant_message),
         )
+
+    async def _resolve_user_id(self, connection_id: str, session_key: str) -> str:
+        connection = self.connection_manager.get_connection(connection_id)
+        if connection is not None and connection.user_id:
+            return connection.user_id
+        if session_key.startswith("telegram:"):
+            sender_id = session_key.partition(":")[2]
+            return await self.user_profiles.resolve_user_id("telegram", sender_id, {"channel": "telegram", "chat_id": sender_id})
+        if session_key.startswith("webchat"):
+            return await self.user_profiles.resolve_user_id("webchat", "webchat-default", {"channel": "webchat"})
+        return await self.user_profiles.resolve_user_id("cli", "cli-local", {"channel": "cli"})

@@ -24,6 +24,7 @@ class AgentRequest:
     metadata: dict[str, Any] | None = None
     silent: bool = False
     system_suffix: str | None = None
+    result_future: asyncio.Future[dict[str, Any]] | None = None
 
 
 class AgentQueue:

@@ -144,6 +144,15 @@ export function ChatWindow() {
             );
           });
         }
+        if (frame.type === "event" && frame.event === "notification.created") {
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("sonarbot:notification", {
+                detail: (frame.payload as Record<string, unknown> | undefined) ?? {},
+              }),
+            );
+          }
+        }
         if (frame.type === "event" && frame.event === "agent.done") {
           setMessages((current) =>
             current.map((item) =>

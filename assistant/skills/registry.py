@@ -3,9 +3,33 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from assistant.skills.loader import SkillDefinition, load_skill_from_markdown
+
+
+@dataclass(slots=True)
+class SkillMatch:
+    skill: SkillDefinition
+    score: int
+    exact: bool = False
+    alias_hits: list[str] = field(default_factory=list)
+    example_hits: list[str] = field(default_factory=list)
+    keyword_hits: list[str] = field(default_factory=list)
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+def _contains_phrase(query: str, phrase: str) -> bool:
+    normalized_query = f" {_normalize_text(query)} "
+    normalized_phrase = _normalize_text(phrase)
+    if not normalized_phrase:
+        return False
+    return f" {normalized_phrase} " in normalized_query
 
 
 class SkillRegistry:
@@ -60,12 +84,67 @@ class SkillRegistry:
         return skill
 
     def find_user_invocable(self, command_name: str) -> SkillDefinition | None:
-        target = command_name.lower()
+        target = _normalize_text(command_name).replace(" ", "-")
         for skill in self.list_enabled():
-            normalized = skill.name.lower().replace(" ", "-")
-            if skill.user_invocable and normalized == target:
+            if not skill.user_invocable:
+                continue
+            aliases = [_normalize_text(alias).replace(" ", "-") for alias in skill.aliases]
+            if skill.command_name == target or target in aliases:
                 return skill
         return None
+
+    def list_natural_language_enabled(self) -> list[SkillDefinition]:
+        return [skill for skill in self.list_enabled() if skill.natural_language_enabled]
+
+    def match_natural_language(self, query: str) -> list[SkillMatch]:
+        matches: list[SkillMatch] = []
+        normalized_query = _normalize_text(query)
+        if not normalized_query:
+            return matches
+
+        for skill in self.list_natural_language_enabled():
+            exact_hits = [phrase for phrase in skill.match_phrases if _contains_phrase(normalized_query, phrase)]
+            if exact_hits:
+                matches.append(
+                    SkillMatch(
+                        skill=skill,
+                        score=100,
+                        exact=True,
+                        alias_hits=exact_hits,
+                    )
+                )
+                continue
+
+            example_hits = [
+                example for example in skill.activation_examples if _contains_phrase(normalized_query, example)
+            ]
+            keyword_hits = [
+                keyword for keyword in skill.keywords if _contains_phrase(normalized_query, keyword)
+            ]
+            alias_hits = [
+                alias for alias in skill.aliases if _contains_phrase(normalized_query, alias)
+            ]
+
+            score = 0
+            if alias_hits:
+                score += 6
+            if example_hits:
+                score += 4 * len(example_hits)
+            if keyword_hits:
+                score += min(6, 2 * len(keyword_hits))
+            if score <= 0:
+                continue
+            matches.append(
+                SkillMatch(
+                    skill=skill,
+                    score=score,
+                    alias_hits=alias_hits,
+                    example_hits=example_hits,
+                    keyword_hits=keyword_hits,
+                )
+            )
+
+        return sorted(matches, key=lambda item: (item.score, item.skill.priority, item.skill.name), reverse=True)
 
     def load_skill_prompt(self, name: str) -> str:
         skill = self.skills[name]
