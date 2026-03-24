@@ -513,6 +513,143 @@ class GatewayRouter:
                 )
             return ResponseFrame(id=request_id, ok=False, error="Unknown /cron subcommand. Use /cron help.")
 
+        if command_name == "browser":
+            if not self.tool_registry.has("browser_sessions_list"):
+                return ResponseFrame(id=request_id, ok=False, error="Browser automation is not configured.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._browser_help_text(),
+                    },
+                )
+            if subcommand in {"profiles", "sessions"}:
+                result = await self.tool_registry.dispatch("browser_sessions_list", {"user_id": user_id})
+                response_text = self._format_browser_profiles_response(result.get("sessions", []))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "state":
+                runtime = getattr(self.tool_registry, "browser_runtime", None)
+                state = runtime.current_state() if runtime is not None else {}
+                response_text = self._format_browser_state_response(state)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "tabs":
+                result = await self.tool_registry.dispatch("browser_tabs_list", {"user_id": user_id})
+                response_text = self._format_browser_tabs_response(result)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "downloads":
+                limit = self._parse_browser_limit(subargs, default=8)
+                result = await self.tool_registry.dispatch("browser_downloads_list", {"limit": limit, "user_id": user_id})
+                response_text = self._format_browser_downloads_response(result.get("downloads", []))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "logs":
+                limit = self._parse_browser_limit(subargs, default=8)
+                result = await self.tool_registry.dispatch("browser_logs", {"limit": limit, "user_id": user_id})
+                response_text = self._format_browser_logs_response(result.get("logs", []))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "open":
+                url = subargs.strip()
+                if not url:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser open <url>.")
+                result = await self.tool_registry.dispatch("browser_tab_open", {"url": url, "user_id": user_id})
+                response_text = (
+                    f"Opened a new browser tab.\n"
+                    f"Title: {result.get('title', '(unknown)')}\n"
+                    f"URL: {result.get('url', url)}\n"
+                    f"Tab id: {result.get('tab_id', 'unknown')}"
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "switch":
+                tab_id = subargs.strip()
+                if not tab_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser switch <tab_id>.")
+                result = await self.tool_registry.dispatch("browser_tab_switch", {"tab_id": tab_id, "user_id": user_id})
+                response_text = (
+                    f"Switched to tab {result.get('tab_id', tab_id)}.\n"
+                    f"Title: {result.get('title', '(unknown)')}\n"
+                    f"URL: {result.get('url', 'unknown')}"
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "close":
+                tab_id = subargs.strip()
+                if not tab_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser close <tab_id>.")
+                result = await self.tool_registry.dispatch("browser_tab_close", {"tab_id": tab_id, "user_id": user_id})
+                response_text = (
+                    f"Closed tab {tab_id}.\n"
+                    f"Current tab: {result.get('current_tab_id', 'none')}"
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "screenshot":
+                result = await self.tool_registry.dispatch("browser_screenshot", {"user_id": user_id})
+                response_text = (
+                    f"Captured a browser screenshot.\n"
+                    f"URL: {result.get('url', 'unknown')}\n"
+                    f"Tab id: {result.get('tab_id', 'unknown')}\n"
+                    f"Saved at: {result.get('path', 'unknown')}"
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "login":
+                site_name, profile_name = self._parse_browser_login_arguments(subargs)
+                if not site_name:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser login <site_name> [profile_name].")
+                result = await self.tool_registry.dispatch(
+                    "browser_login",
+                    {"site_name": site_name, "profile_name": profile_name or "default", "user_id": user_id},
+                )
+                response_text = (
+                    f"Saved browser profile '{result.get('profile_name', profile_name or 'default')}' for {result.get('site_name', site_name)}.\n"
+                    f"Status: {result.get('status', 'active')}\n"
+                    f"URL: {result.get('url', 'unknown')}"
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            return ResponseFrame(id=request_id, ok=False, error="Unknown /browser subcommand. Use /browser help.")
+
         if command_name == "pause-rule":
             user_id = await self._resolve_user_id(connection_id, session_key)
             rule_name = arguments.strip()
@@ -1159,6 +1296,16 @@ class GatewayRouter:
                 "read_host_file, write_host_file, and exec_shell with host=true. Do not claim you are limited to the workspace "
                 "when the request is about Desktop, Downloads, Documents, allowed drives such as R:/, or opening simple Windows apps."
             )
+        if any(
+            token in lowered
+            for token in ("browser", "tab", "login", "log in", "open site", "website", "leetcode", "gmail.com", "github.com")
+        ):
+            hints.append(
+                "Browser automation is available through browser_navigate, browser_click, browser_type, browser_login, "
+                "browser_tabs_list, browser_tab_open, browser_tab_switch, browser_tab_close, browser_upload, "
+                "browser_downloads_list, browser_logs, browser_extract_table, and browser_fill_form. "
+                "Use these browser tools instead of saying browser features are only available in WebChat."
+            )
         if not hints:
             return existing
         if existing:
@@ -1206,6 +1353,38 @@ class GatewayRouter:
             "/cron resume <cron_id>\n"
             "/cron delete <cron_id>"
         )
+
+    def _browser_help_text(self) -> str:
+        return (
+            "Browser commands:\n"
+            "/browser profiles\n"
+            "/browser state\n"
+            "/browser tabs\n"
+            "/browser open <url>\n"
+            "/browser switch <tab_id>\n"
+            "/browser close <tab_id>\n"
+            "/browser logs [limit]\n"
+            "/browser downloads [limit]\n"
+            "/browser screenshot\n"
+            "/browser login <site_name> [profile_name]"
+        )
+
+    def _parse_browser_limit(self, value: str, *, default: int = 8) -> int:
+        stripped = value.strip()
+        if not stripped:
+            return default
+        try:
+            return max(1, min(int(stripped), 50))
+        except ValueError:
+            return default
+
+    def _parse_browser_login_arguments(self, value: str) -> tuple[str, str | None]:
+        parts = [item for item in value.split() if item]
+        if not parts:
+            return "", None
+        if len(parts) == 1:
+            return parts[0], None
+        return parts[0], parts[1]
 
     def _parse_cron_add_arguments(self, arguments: str) -> tuple[str | None, str | None]:
         stripped = arguments.strip()
@@ -1836,6 +2015,77 @@ class GatewayRouter:
                 "Check /host-approvals if you want to review pending requests."
             )
         return f"I created {filename} in your {folder_name}."
+
+    def _format_browser_profiles_response(self, sessions: list[dict[str, Any]]) -> str:
+        if not sessions:
+            return "No saved browser profiles yet."
+        lines = ["Saved browser profiles:"]
+        for session in sessions[:10]:
+            lines.append(
+                f"- {session.get('site_name', 'site')}/{session.get('profile_name', 'default')} "
+                f"({session.get('status', 'unknown')})"
+            )
+        if len(sessions) > 10:
+            lines.append(f"...and {len(sessions) - 10} more.")
+        return "\n".join(lines)
+
+    def _format_browser_state_response(self, state: dict[str, Any]) -> str:
+        active_profile = state.get("active_profile")
+        active_tab = state.get("active_tab") or {}
+        status = "Browser idle" if not active_tab else "Browser active"
+        lines = [
+            status,
+            f"Headless: {'yes' if state.get('headless') else 'no'}",
+            f"Open tabs: {len(state.get('tabs', []))}",
+        ]
+        if active_profile:
+            lines.append(
+                f"Profile: {active_profile.get('site_name', 'site')}/{active_profile.get('profile_name', 'default')} "
+                f"({active_profile.get('status', 'unknown')})"
+            )
+        if active_tab:
+            lines.append(f"Current tab: {active_tab.get('title', '(untitled)')}")
+            lines.append(f"URL: {active_tab.get('url', 'unknown')}")
+            lines.append(f"Tab id: {active_tab.get('tab_id', 'unknown')}")
+        return "\n".join(lines)
+
+    def _format_browser_tabs_response(self, result: dict[str, Any]) -> str:
+        tabs = result.get("tabs", []) if isinstance(result, dict) else []
+        current_tab_id = result.get("current_tab_id") if isinstance(result, dict) else None
+        if not tabs:
+            return "No browser tabs are open right now."
+        lines = ["Open browser tabs:"]
+        for tab in tabs[:10]:
+            active = " [active]" if tab.get("tab_id") == current_tab_id else ""
+            lines.append(
+                f"- {tab.get('tab_id', 'unknown')}{active}: {tab.get('title', '(untitled)')} -> {tab.get('url', 'unknown')}"
+            )
+        if len(tabs) > 10:
+            lines.append(f"...and {len(tabs) - 10} more.")
+        return "\n".join(lines)
+
+    def _format_browser_logs_response(self, logs: list[dict[str, Any]]) -> str:
+        if not logs:
+            return "No recent browser logs yet."
+        lines = ["Recent browser logs:"]
+        for entry in logs[:10]:
+            category = entry.get("kind", entry.get("type", "log"))
+            message = str(entry.get("message", entry.get("url", ""))).strip() or "(no message)"
+            lines.append(f"- {category}: {message[:180]}")
+        if len(logs) > 10:
+            lines.append(f"...and {len(logs) - 10} more.")
+        return "\n".join(lines)
+
+    def _format_browser_downloads_response(self, downloads: list[dict[str, Any]]) -> str:
+        if not downloads:
+            return "No recent browser downloads yet."
+        lines = ["Recent browser downloads:"]
+        for item in downloads[:10]:
+            filename = item.get("filename") or Path(str(item.get("path", ""))).name or "download"
+            lines.append(f"- {filename} -> {item.get('path', 'unknown')}")
+        if len(downloads) > 10:
+            lines.append(f"...and {len(downloads) - 10} more.")
+        return "\n".join(lines)
 
     def _format_latest_email_response(self, result: dict[str, Any]) -> str:
         if not result.get("found"):

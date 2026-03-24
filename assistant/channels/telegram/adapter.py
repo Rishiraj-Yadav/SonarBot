@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ChatAction, ContentType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineKeyboardMarkup, Message, PhotoSize, Voice
 
 from assistant.channels.base import Channel, ChannelMessage
@@ -67,7 +68,7 @@ class TelegramChannel(Channel):
         await self.bot.session.close()
 
     async def send_message(self, recipient_id: str, text: str) -> None:
-        await self.bot.send_message(chat_id=int(recipient_id), text=text or "(no response)")
+        await self._send_text(int(recipient_id), text or "(no response)")
 
     async def send_typing(self, recipient_id: str) -> None:
         await self.bot.send_chat_action(chat_id=int(recipient_id), action=ChatAction.TYPING)
@@ -83,7 +84,7 @@ class TelegramChannel(Channel):
                 ]
             ]
         )
-        sent = await self.bot.send_message(chat_id=int(recipient_id), text=text, reply_markup=keyboard)
+        sent = await self._send_text(int(recipient_id), text, reply_markup=keyboard)
         self._host_approval_messages[approval_id] = sent
 
     async def finalize_host_approval(self, approval_id: str, approval: dict[str, Any]) -> None:
@@ -91,7 +92,7 @@ class TelegramChannel(Channel):
         if message is None:
             return
         try:
-            await message.edit_text(self._format_host_approval_text(approval), reply_markup=None)
+            await self._edit_text(message, self._format_host_approval_text(approval))
         except TypeError:
             await message.edit_text(self._format_host_approval_text(approval))
 
@@ -109,7 +110,7 @@ class TelegramChannel(Channel):
             await callback_query.answer(f"{normalized.title()} {approval_id}")
         if callback_query.message is not None:
             try:
-                await callback_query.message.edit_text(self._format_host_approval_text(approval), reply_markup=None)
+                await self._edit_text(callback_query.message, self._format_host_approval_text(approval))
             except TypeError:
                 await callback_query.message.edit_text(self._format_host_approval_text(approval))
         self._host_approval_messages[approval_id] = callback_query.message
@@ -151,13 +152,11 @@ class TelegramChannel(Channel):
             state.accumulated_text += payload.get("text", "")
             if state.response_message is None:
                 if state.source_message is not None:
-                    state.response_message = await state.source_message.answer(state.accumulated_text or "...")
+                    state.response_message = await self._reply_text(state.source_message, state.accumulated_text or "...")
                 else:
-                    state.response_message = await self.bot.send_message(
-                        chat_id=int(state.recipient_id), text=state.accumulated_text or "..."
-                    )
+                    state.response_message = await self._send_text(int(state.recipient_id), state.accumulated_text or "...")
             else:
-                await state.response_message.edit_text(state.accumulated_text or "...")
+                await self._edit_text(state.response_message, state.accumulated_text or "...")
             return
 
         if event_name == "agent.done":
@@ -239,3 +238,35 @@ class TelegramChannel(Channel):
             f"Fallback commands: /host-approve {approval.get('approval_id')} or /host-reject {approval.get('approval_id')}"
         )
         return "\n".join(lines)
+
+    async def _send_text(self, chat_id: int, text: str, reply_markup=None):
+        try:
+            return await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+        except TypeError:
+            return await self.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+    async def _reply_text(self, message: Message, text: str):
+        try:
+            return await message.answer(text, disable_web_page_preview=True)
+        except TypeError:
+            return await message.answer(text)
+
+    async def _edit_text(self, message: Message | Any, text: str):
+        try:
+            return await message.edit_text(text, reply_markup=None, disable_web_page_preview=True)
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return message
+            raise
+        except TypeError:
+            try:
+                return await message.edit_text(text, reply_markup=None)
+            except TelegramBadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    return message
+                raise

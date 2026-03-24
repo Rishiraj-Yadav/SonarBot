@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import httpx
 
 from assistant.agent.loop import AgentLoop
 from assistant.agent.queue import AgentRequest
@@ -25,7 +26,16 @@ class StubMemoryCaptureRunner:
                 "latest_user_message": latest_user_message,
                 "latest_assistant_message": latest_assistant_message,
             }
-        )
+        ) 
+
+
+class RaisingProvider:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def complete(self, messages, system, tools, stream=True):
+        raise self.exc
+        yield  # pragma: no cover
 
 
 @pytest.mark.asyncio
@@ -188,3 +198,39 @@ async def test_agent_loop_runs_memory_capture_after_completed_turn(app_config) -
     assert memory_capture_runner.calls
     assert memory_capture_runner.calls[0]["latest_user_message"] == "Remember that I prefer concise answers."
     assert memory_capture_runner.calls[0]["latest_assistant_message"] == "I'll remember that."
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_surfaces_friendly_model_error(app_config) -> None:
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(429, request=request)
+    provider = RaisingProvider(httpx.HTTPStatusError("rate limited", request=request, response=response))
+    prompt_builder = SystemPromptBuilder(app_config.agent.workspace_dir)
+    session_manager = SessionManager(app_config)
+    registry = ToolRegistry()
+
+    events: list[tuple[str, dict[str, object]]] = []
+    done_event = asyncio.Event()
+
+    async def emit(_connection_id, event_name, payload):
+        events.append((event_name, payload))
+        if event_name == "agent.done":
+            done_event.set()
+
+    loop = AgentLoop(
+        config=app_config,
+        model_provider=provider,
+        tool_registry=registry,
+        session_manager=session_manager,
+        system_prompt_builder=prompt_builder,
+        event_emitter=emit,
+    )
+    await prompt_builder.start()
+    await loop.start()
+    await loop.enqueue(AgentRequest(connection_id="conn-1", session_key="main", message="hello", request_id="req-err"))
+    await asyncio.wait_for(done_event.wait(), timeout=5)
+    await loop.stop()
+    await prompt_builder.stop()
+
+    chunks = [payload["text"] for event_name, payload in events if event_name == "agent.chunk"]
+    assert chunks == ["The model is temporarily rate-limited. Please wait a minute and try again."]

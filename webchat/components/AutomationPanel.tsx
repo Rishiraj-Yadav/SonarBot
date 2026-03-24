@@ -102,7 +102,9 @@ export function AutomationPanel() {
         status: detail.status ?? "delivered",
         created_at: detail.created_at ?? new Date().toISOString(),
       } satisfies NotificationItem;
-      setNotifications((current) => [created, ...current.filter((item) => item.notification_id !== created.notification_id)].slice(0, 8));
+      setNotifications((current) =>
+        [created, ...current.filter((item) => item.notification_id !== created.notification_id)].slice(0, 8),
+      );
       void load();
     };
 
@@ -121,19 +123,15 @@ export function AutomationPanel() {
     const path = rule.paused ? `/api/automation/rules/${rule.name}/resume` : `/api/automation/rules/${rule.name}/pause`;
     try {
       await fetch(`http://localhost:8765${path}`, { method: "POST" });
-      setRules((current) =>
-        current.map((item) =>
-          item.name === rule.name ? { ...item, paused: !item.paused } : item,
-        ),
-      );
+      setRules((current) => current.map((item) => (item.name === rule.name ? { ...item, paused: !item.paused } : item)));
     } catch {
       return;
     }
   }
 
   return (
-    <aside className="space-y-4">
-      <section className="rounded-[2rem] border border-white/80 bg-white/88 p-4 shadow-panel backdrop-blur">
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.18fr)_minmax(320px,0.82fr)]">
+      <section className="rounded-[2rem] border border-white/85 bg-white/90 p-5 shadow-panel backdrop-blur">
         <div className="border-b border-line/70 pb-4">
           <p className="text-xs uppercase tracking-[0.24em] text-accent">Automation Inbox</p>
           <h2 className="mt-2 font-display text-3xl text-ink">Recent notifications</h2>
@@ -141,7 +139,7 @@ export function AutomationPanel() {
             Background cron, heartbeat, and webhook runs land here even when they are primarily delivered elsewhere.
           </p>
         </div>
-        <div className="mt-4 space-y-3 max-h-[32rem] overflow-y-auto pr-1">
+        <div className="mt-4 space-y-3 max-h-[42rem] overflow-y-auto pr-1">
           {notifications.length === 0 ? (
             <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500">
               No automation notifications yet.
@@ -154,7 +152,7 @@ export function AutomationPanel() {
                   <div className="text-sm font-semibold text-ink">{item.title}</div>
                   <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
                     <span>{item.source}</span>
-                    <span>•</span>
+                    <span>|</span>
                     <span>{shortTime(item.created_at)}</span>
                   </div>
                 </div>
@@ -168,72 +166,70 @@ export function AutomationPanel() {
                 </div>
               </div>
               {bodyPreview(item.title, item.body) ? (
-                <p className="mt-3 line-clamp-4 text-sm leading-6 text-slate-600">
-                  {bodyPreview(item.title, item.body)}
-                </p>
+                <p className="mt-3 line-clamp-4 text-sm leading-6 text-slate-600">{bodyPreview(item.title, item.body)}</p>
               ) : null}
             </div>
           ))}
         </div>
       </section>
 
-      <section className="rounded-[2rem] border border-white/80 bg-white/88 p-4 shadow-panel backdrop-blur">
-        <div className="border-b border-line/70 pb-4">
-          <p className="text-xs uppercase tracking-[0.24em] text-accent">Automation Runs</p>
-          <h2 className="mt-2 font-display text-2xl text-ink">Background activity</h2>
-        </div>
-        <div className="mt-4 space-y-3 max-h-[20rem] overflow-y-auto pr-1">
-          {runs.length === 0 ? (
-            <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500">
-              No automation runs recorded yet.
-            </div>
-          ) : null}
-          {runs.map((run) => (
-            <div key={run.run_id} className="rounded-[1.35rem] border border-line/80 bg-white/95 p-4 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-ink">{run.rule_name}</div>
-                <div className="rounded-full bg-sand px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">
-                  {run.status}
+      <div className="space-y-4">
+        <section className="rounded-[2rem] border border-white/85 bg-white/90 p-5 shadow-panel backdrop-blur">
+          <div className="border-b border-line/70 pb-4">
+            <p className="text-xs uppercase tracking-[0.24em] text-accent">Automation Runs</p>
+            <h2 className="mt-2 font-display text-2xl text-ink">Background activity</h2>
+          </div>
+          <div className="mt-4 space-y-3 max-h-[20rem] overflow-y-auto pr-1">
+            {runs.length === 0 ? (
+              <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500">
+                No automation runs recorded yet.
+              </div>
+            ) : null}
+            {runs.map((run) => (
+              <div key={run.run_id} className="rounded-[1.35rem] border border-line/80 bg-white/95 p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium text-ink">{run.rule_name}</div>
+                  <div className="rounded-full bg-sand px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">
+                    {run.status}
+                  </div>
                 </div>
+                <div className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">{shortTime(run.created_at)}</div>
               </div>
-              <div className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
-                {shortTime(run.created_at)}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
 
-      <section className="rounded-[2rem] border border-white/80 bg-gradient-to-br from-white to-foam p-4 shadow-panel">
-        <div className="border-b border-line/70 pb-4">
-          <p className="text-xs uppercase tracking-[0.24em] text-accent">Rule Controls</p>
-          <h2 className="mt-2 font-display text-2xl text-ink">Live rule state</h2>
-        </div>
-        <div className="mt-4 space-y-3 max-h-[18rem] overflow-y-auto pr-1">
-          {rules.length === 0 ? (
-            <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-white/80 p-4 text-sm text-slate-500">
-              No automation rules are currently loaded.
-            </div>
-          ) : null}
-          {rules.map((rule) => (
-            <div key={rule.name} className="flex items-center justify-between gap-3 rounded-[1.35rem] border border-line/80 bg-white/95 p-4">
-              <div>
-                <div className="text-sm font-medium text-ink">{rule.name}</div>
-                <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{rule.trigger}</div>
+        <section className="rounded-[2rem] border border-white/85 bg-gradient-to-br from-white to-foam p-5 shadow-panel">
+          <div className="border-b border-line/70 pb-4">
+            <p className="text-xs uppercase tracking-[0.24em] text-accent">Rule Controls</p>
+            <h2 className="mt-2 font-display text-2xl text-ink">Live rule state</h2>
+          </div>
+          <div className="mt-4 space-y-3 max-h-[20rem] overflow-y-auto pr-1">
+            {rules.length === 0 ? (
+              <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-white/80 p-4 text-sm text-slate-500">
+                No automation rules are currently loaded.
               </div>
-              <button
-                type="button"
-                onClick={() => void toggleRule(rule)}
-                className={`rounded-full px-3 py-2 text-xs font-medium ${
-                  rule.paused ? "bg-emerald-100 text-emerald-700" : "bg-sand text-slate-700"
-                }`}
-              >
-                {rule.paused ? "Resume" : "Pause"}
-              </button>
-            </div>
-          ))}
-        </div>
-      </section>
-    </aside>
+            ) : null}
+            {rules.map((rule) => (
+              <div key={rule.name} className="flex items-center justify-between gap-3 rounded-[1.35rem] border border-line/80 bg-white/95 p-4">
+                <div>
+                  <div className="text-sm font-medium text-ink">{rule.name}</div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{rule.trigger}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void toggleRule(rule)}
+                  className={`rounded-full px-3 py-2 text-xs font-medium ${
+                    rule.paused ? "bg-emerald-100 text-emerald-700" : "bg-sand text-slate-700"
+                  }`}
+                >
+                  {rule.paused ? "Resume" : "Pause"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
   );
 }

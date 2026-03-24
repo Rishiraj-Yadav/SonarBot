@@ -100,8 +100,8 @@ export function HostAccessPanel() {
   }
 
   return (
-    <aside className="space-y-4">
-      <section className="rounded-[2rem] border border-white/80 bg-white/88 p-4 shadow-panel backdrop-blur">
+    <div className="grid gap-4 xl:grid-cols-2">
+      <section className="rounded-[2rem] border border-white/85 bg-white/90 p-5 shadow-panel backdrop-blur">
         <div className="border-b border-line/70 pb-4">
           <p className="text-xs uppercase tracking-[0.24em] text-accent">Host Access</p>
           <h2 className="mt-2 font-display text-3xl text-ink">Pending approvals</h2>
@@ -109,7 +109,7 @@ export function HostAccessPanel() {
             Risky host-system commands and file changes pause here until you approve or deny them.
           </p>
         </div>
-        <div className="mt-4 space-y-3 max-h-[20rem] overflow-y-auto pr-1">
+        <div className="mt-4 space-y-3 max-h-[36rem] overflow-y-auto pr-1">
           {approvals.length === 0 ? (
             <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500">
               No host approvals are waiting right now.
@@ -122,7 +122,7 @@ export function HostAccessPanel() {
                   <div className="text-sm font-semibold text-ink">{approval.action_kind}</div>
                   <div className="text-sm leading-6 text-slate-600">{approval.target_summary}</div>
                   <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">
-                    {approval.category} • {shortTime(approval.created_at)}
+                    {approval.category} | {shortTime(approval.created_at)}
                   </div>
                 </div>
                 <div className="rounded-full bg-sand px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">
@@ -152,12 +152,12 @@ export function HostAccessPanel() {
         </div>
       </section>
 
-      <section className="rounded-[2rem] border border-white/80 bg-gradient-to-br from-white to-foam p-4 shadow-panel">
+      <section className="rounded-[2rem] border border-white/85 bg-gradient-to-br from-white to-foam p-5 shadow-panel">
         <div className="border-b border-line/70 pb-4">
           <p className="text-xs uppercase tracking-[0.24em] text-accent">Audit Trail</p>
           <h2 className="mt-2 font-display text-2xl text-ink">Recent host actions</h2>
         </div>
-        <div className="mt-4 space-y-3 max-h-[18rem] overflow-y-auto pr-1">
+        <div className="mt-4 space-y-3 max-h-[36rem] overflow-y-auto pr-1">
           {entries.length === 0 ? (
             <div className="rounded-[1.35rem] border border-dashed border-line/80 bg-white/80 p-4 text-sm text-slate-500">
               No host actions have been recorded yet.
@@ -170,7 +170,7 @@ export function HostAccessPanel() {
                   <div className="text-sm font-medium text-ink">{entry.action_kind}</div>
                   <div className="mt-1 text-sm leading-6 text-slate-600">{entry.target}</div>
                   <div className="mt-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-                    {entry.approval_mode} • {shortTime(entry.timestamp)}
+                    {entry.approval_mode} | {shortTime(entry.timestamp)}
                   </div>
                 </div>
                 <div className="space-y-2 text-right">
@@ -192,6 +192,6 @@ export function HostAccessPanel() {
           ))}
         </div>
       </section>
-    </aside>
+    </div>
   );
 }

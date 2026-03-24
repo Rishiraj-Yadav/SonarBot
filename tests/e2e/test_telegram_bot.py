@@ -75,6 +75,10 @@ class FakeCallbackQuery:
         self.answered.append(text)
 
 
+class FakeNotModifiedError(Exception):
+    pass
+
+
 @pytest.mark.asyncio
 async def test_telegram_round_trip_streams_back_to_message(app_config) -> None:
     app_config.telegram.allowed_user_ids = [123]
@@ -170,3 +174,22 @@ async def test_telegram_buffers_immediate_command_responses(app_config) -> None:
 
     assert message.answers
     assert message.answers[0].text == "Known skills"
+
+
+@pytest.mark.asyncio
+async def test_telegram_ignores_not_modified_edit_errors(app_config, monkeypatch) -> None:
+    app_config.telegram.allowed_user_ids = [123]
+    app_config.telegram.bot_token = "test-token"
+
+    class NotModifiedMessage(FakeSentMessage):
+        async def edit_text(self, text: str, reply_markup=None, disable_web_page_preview=None):
+            raise FakeNotModifiedError("message is not modified")
+
+    monkeypatch.setattr("assistant.channels.telegram.adapter.TelegramBadRequest", FakeNotModifiedError)
+
+    channel = TelegramChannel(config=app_config, inbound_handler=lambda _message: None, bot=FakeBot())
+    message = NotModifiedMessage("already set")
+
+    result = await channel._edit_text(message, "already set")
+
+    assert result is message

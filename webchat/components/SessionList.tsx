@@ -14,7 +14,7 @@ export function SessionList({ messages }: Props) {
   const recentMessages = [...messages].slice(-12).reverse();
 
   return (
-    <aside className="rounded-[2rem] border border-white/80 bg-white/88 p-4 shadow-panel backdrop-blur xl:sticky xl:top-6">
+    <section className="rounded-[2rem] border border-white/85 bg-white/90 p-5 shadow-panel backdrop-blur">
       <div className="border-b border-line/70 pb-4">
         <p className="text-xs uppercase tracking-[0.24em] text-accent">Session Feed</p>
         <h2 className="mt-2 font-display text-3xl text-ink">Recent thread</h2>
@@ -23,9 +23,9 @@ export function SessionList({ messages }: Props) {
           conversation.
         </p>
       </div>
-      <div className="mt-4 space-y-3 overflow-y-auto xl:max-h-[70vh]">
+      <div className="mt-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
         {recentMessages.length === 0 ? (
-          <div className="rounded-[1.5rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500">
+          <div className="rounded-[1.5rem] border border-dashed border-line/80 bg-foam/70 p-4 text-sm text-slate-500 md:col-span-2 2xl:col-span-3">
             No history yet. Send a message to start the current WebChat thread.
           </div>
         ) : null}
@@ -45,6 +45,6 @@ export function SessionList({ messages }: Props) {
           </div>
         ))}
       </div>
-    </aside>
+    </section>
   );
 }

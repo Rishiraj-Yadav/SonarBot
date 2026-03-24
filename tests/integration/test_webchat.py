@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from assistant.gateway.server import create_app
 from assistant.models.base import ModelResponse
+from assistant.tools.browser_runtime import BrowserTabState, profile_key_for
 from tests.helpers import FakeProvider
 
 
@@ -76,3 +77,73 @@ def test_webchat_oauth_connect_is_returned_as_single_clean_response(app_config) 
 
             done = json.loads(websocket.receive_text())
             assert done["event"] == "agent.done"
+
+
+def test_webchat_browser_api_exposes_state_tabs_logs_downloads_and_profiles(app_config) -> None:
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app) as client:
+        services = app.state.services
+        runtime = services.browser_runtime
+        profile_key = profile_key_for("example.com", "work")
+        runtime.session_index_path.write_text(
+            json.dumps(
+                {
+                    profile_key: {
+                        "profile_key": profile_key,
+                        "site_name": "example.com",
+                        "profile_name": "work",
+                        "domain": "example.com",
+                        "storage_path": str(runtime.sessions_dir / "example-work.json"),
+                        "status": "active",
+                        "last_used_at": "2026-03-24T09:00:00+00:00",
+                    }
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        runtime.current_profile_key = profile_key
+        runtime.current_tab_id = "tab-1"
+        runtime.current_headless = False
+        runtime._tabs["tab-1"] = BrowserTabState(
+            tab_id="tab-1",
+            page=None,
+            created_at="2026-03-24T09:00:00+00:00",
+            title="Example",
+            url="https://example.com/work",
+        )
+        runtime._recent_logs.append(
+            {
+                "timestamp": "2026-03-24T09:05:00+00:00",
+                "kind": "console",
+                "level": "log",
+                "message": "ready",
+                "tab_id": "tab-1",
+                "url": "https://example.com/work",
+                "profile_key": profile_key,
+            }
+        )
+        runtime._recent_downloads.append(
+            {
+                "path": str(runtime.downloads_dir / "example.com" / "work" / "report.csv"),
+                "filename": "report.csv",
+                "profile_key": profile_key,
+                "created_at": "2026-03-24T09:06:00+00:00",
+                "size": 256,
+            }
+        )
+
+        state = client.get("/api/browser/state")
+        tabs = client.get("/api/browser/tabs")
+        logs = client.get("/api/browser/logs?limit=4")
+        downloads = client.get("/api/browser/downloads?limit=4")
+        profiles = client.get("/api/browser/profiles")
+
+        assert state.status_code == 200
+        assert state.json()["state"]["active_profile"]["profile_name"] == "work"
+        assert tabs.json()["tabs"][0]["title"] == "Example"
+        assert logs.json()["logs"][0]["message"] == "ready"
+        assert downloads.json()["downloads"][0]["filename"] == "report.csv"
+        assert profiles.json()["profiles"][0]["site_name"] == "example.com"

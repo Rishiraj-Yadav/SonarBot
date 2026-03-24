@@ -72,3 +72,35 @@ Tool calls requested: [{"id": "tool-1", "name": "pdf_extract", "arguments": {"pa
     assert tool_calls[0].arguments == {"path": "C:/tmp/doc.pdf"}
     assert "Tool calls requested" not in cleaned
     assert cleaned == "I will read the attached PDF file and summarize its content."
+
+
+def test_gemini_provider_sanitizes_dynamic_object_schemas_for_gemini() -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-test")
+
+    sanitized = provider._sanitize_schema(
+        {
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "Map selectors to values.",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 10,
+                },
+            },
+            "required": ["fields"],
+        }
+    )
+
+    assert sanitized["type"] == "object"
+    assert sanitized["required"] == ["fields"]
+    assert sanitized["properties"]["fields"]["type"] == "object"
+    assert "additionalProperties" not in sanitized["properties"]["fields"]
+    assert "Map selectors to values." in sanitized["properties"]["fields"]["description"]
+    assert "arbitrary string-keyed entries" in sanitized["properties"]["fields"]["description"]
+    assert "minimum" not in sanitized["properties"]["timeout_seconds"]
+    assert "default" not in sanitized["properties"]["timeout_seconds"]

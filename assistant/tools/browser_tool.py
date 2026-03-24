@@ -2,344 +2,276 @@
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
+from assistant.tools.browser_runtime import (
+    BrowserEventEmitter,
+    BrowserRuntime,
+    BrowserViewerChecker,
+    extract_table_from_html,
+    looks_like_login_url,
+    optional_string,
+    wait_for_manual_login,
+)
 from assistant.tools.registry import ToolDefinition
 
-try:  # pragma: no cover - optional dependency
-    from bs4 import BeautifulSoup
-except Exception:  # pragma: no cover - optional dependency
-    BeautifulSoup = None
 
-
-@dataclass(slots=True)
-class BrowserRuntime:
-    config: Any
-    playwright: Any | None = None
-    browser: Any | None = None
-    context: Any | None = None
-    page: Any | None = None
-    current_session_name: str | None = None
-    current_headless: bool | None = None
-    sessions_dir: Path = field(init=False)
-    session_index_path: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.sessions_dir = self.config.agent.workspace_dir / "browser_sessions"
-        self.session_index_path = self.sessions_dir / "index.json"
-
-    async def get_page(self, target_url: str | None = None):
-        if self.playwright is None:
-            try:
-                from playwright.async_api import async_playwright  # type: ignore
-            except Exception as exc:  # pragma: no cover - optional dependency
-                raise RuntimeError(
-                    "Playwright is not installed. Run `uv sync --extra dev` and `playwright install chromium`."
-                ) from exc
-            self.playwright = await async_playwright().start()
-
-        storage_state = None
-        desired_session = None
-        if target_url:
-            matched = self.match_session(target_url)
-            if matched is not None:
-                desired_session = matched["site_name"]
-                storage_state = matched["storage_path"]
-
-        desired_headless = self.config.tools.browser_headless
-        if (
-            self.page is None
-            or self.context is None
-            or self.current_session_name != desired_session
-            or self.current_headless != desired_headless
-        ):
-            await self._reset_context(storage_state=storage_state, headless=desired_headless)
-            self.current_session_name = desired_session
-            self.current_headless = desired_headless
-
-        return self.page
-
-    async def start_login(self, site_name: str, login_url: str):
-        if self.playwright is None:
-            await self.get_page()
-        await self._reset_context(storage_state=None, headless=False)
-        self.current_session_name = None
-        self.current_headless = False
-        assert self.page is not None
-        await self.page.goto(login_url, wait_until="domcontentloaded")
-        return self.page
-
-    async def save_login_session(self, site_name: str, login_url: str) -> dict[str, Any]:
-        if self.context is None or self.page is None:
-            raise RuntimeError("No active browser context is available for login.")
-        slug = _slugify(site_name)
-        state_path = self.sessions_dir / f"{slug}.json"
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        await self.context.storage_state(path=str(state_path))
-        final_url = self.page.url
-        domain = urlparse(final_url or login_url).netloc.lower()
-        index = self._load_index()
-        index[site_name] = {
-            "site_name": site_name,
-            "domain": domain,
-            "storage_path": str(state_path),
-            "login_url": login_url,
-            "last_used_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_index(index)
-        await self._reset_context(headless=self.config.tools.browser_headless)
-        self.current_session_name = None
-        self.current_headless = self.config.tools.browser_headless
-        return index[site_name]
-
-    def list_sessions(self) -> list[dict[str, Any]]:
-        sessions = list(self._load_index().values())
-        sessions.sort(key=lambda item: item.get("last_used_at", ""), reverse=True)
-        return sessions
-
-    def match_session(self, url: str) -> dict[str, Any] | None:
-        target_domain = urlparse(url).netloc.lower()
-        if not target_domain:
-            return None
-        for session in self._load_index().values():
-            session_domain = str(session.get("domain", "")).lower()
-            if session_domain and (
-                target_domain == session_domain
-                or target_domain.endswith(f".{session_domain}")
-                or session_domain.endswith(f".{target_domain}")
-            ):
-                return session
-        return None
-
-    def touch_session(self, site_name: str) -> None:
-        index = self._load_index()
-        if site_name not in index:
-            return
-        index[site_name]["last_used_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_index(index)
-
-    def expire_session(self, site_name: str) -> None:
-        index = self._load_index()
-        session = index.pop(site_name, None)
-        self._save_index(index)
-        if not session:
-            return
-        storage_path = Path(str(session.get("storage_path", "")))
-        storage_path.unlink(missing_ok=True)
-        if self.current_session_name == site_name:
-            self.current_session_name = None
-
-    async def close(self) -> None:
-        if self.context is not None:
-            await self.context.close()
-        if self.browser is not None:
-            await self.browser.close()
-        if self.playwright is not None:
-            await self.playwright.stop()
-        self.context = None
-        self.browser = None
-        self.playwright = None
-        self.page = None
-        self.current_session_name = None
-        self.current_headless = None
-
-    async def _reset_context(self, storage_state: str | None = None, headless: bool | None = None) -> None:
-        if self.browser is None:
-            assert self.playwright is not None
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.config.tools.browser_headless if headless is None else headless
-            )
-        elif headless is not None and self.current_headless is not None and self.current_headless != headless:
-            await self.browser.close()
-            assert self.playwright is not None
-            self.browser = await self.playwright.chromium.launch(headless=headless)
-
-        if self.context is not None:
-            await self.context.close()
-        context_kwargs = {}
-        if storage_state:
-            context_kwargs["storage_state"] = storage_state
-        self.context = await self.browser.new_context(**context_kwargs)
-        self.page = await self.context.new_page()
-
-    def _load_index(self) -> dict[str, dict[str, Any]]:
-        if not self.session_index_path.exists():
-            return {}
-        try:
-            payload = json.loads(self.session_index_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        return {str(key): dict(value) for key, value in payload.items() if isinstance(value, dict)}
-
-    def _save_index(self, index: dict[str, dict[str, Any]]) -> None:
-        self.session_index_path.parent.mkdir(parents=True, exist_ok=True)
-        self.session_index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def build_browser_tools(config) -> tuple[list[ToolDefinition], BrowserRuntime]:
-    runtime = BrowserRuntime(config=config)
-    screenshots_dir = config.agent.workspace_dir / "browser"
+def build_browser_tools(
+    config,
+    *,
+    event_emitter: BrowserEventEmitter | None = None,
+    viewer_checker: BrowserViewerChecker | None = None,
+) -> tuple[list[ToolDefinition], BrowserRuntime]:
+    runtime = BrowserRuntime(config=config, event_emitter=event_emitter, viewer_checker=viewer_checker)
 
     async def browser_navigate(payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload["url"])
-        matched_session = runtime.match_session(url)
-        page = await runtime.get_page(url)
-        await page.goto(url, wait_until="domcontentloaded")
-        title = await page.title()
-        html = await page.content()
+        profile_name = optional_string(payload.get("profile_name"))
+        user_id = optional_string(payload.get("user_id"))
+        tab_id = optional_string(payload.get("tab_id"))
+        timeout_seconds = int(payload.get("timeout_seconds", 30))
+        wait_for = optional_string(payload.get("wait_for"))
+        matched_profile = runtime.match_profile(url, profile_name=profile_name)
+        page = await runtime.get_page(target_url=url, profile_name=profile_name, tab_id=tab_id, user_id=user_id)
+        response = await page.goto(url, wait_until=runtime.wait_state_for_navigation(wait_for))
+        await runtime.post_action_wait(page, wait_for, timeout_seconds)
         current_url = page.url
-        if matched_session is not None:
-            site_name = str(matched_session["site_name"])
-            if _looks_like_login_url(current_url):
-                runtime.expire_session(site_name)
-                raise RuntimeError(
-                    f"Saved browser session for {site_name} expired after redirecting to a login page. "
-                    "Run browser_login again."
+        if matched_profile is not None:
+            site_name = str(matched_profile.get("site_name", "site"))
+            current_profile_name = str(matched_profile.get("profile_name", "default"))
+            status_code = getattr(response, "status", None)
+            if looks_like_login_url(current_url) or status_code in {401, 403}:
+                updated = runtime.mark_profile_status(
+                    site_name,
+                    current_profile_name,
+                    status="stale",
+                    last_error=f"Redirected to login or received {status_code} while opening {url}",
                 )
-            runtime.touch_session(site_name)
-        snapshot = _extract_visible_text(html)
-        return {"url": current_url, "title": title, "content": snapshot[:4000]}
+                if user_id and updated is not None:
+                    await runtime._emit_browser_event(user_id, "browser.session_expired", updated)
+                    await runtime._emit_state(user_id)
+                raise RuntimeError(
+                    f"Saved browser session for {site_name}/{current_profile_name} is stale. "
+                    "Run browser_login again with the same site and profile."
+                )
+            runtime.touch_session(site_name, current_profile_name)
+        assert runtime.current_tab_id is not None
+        await runtime._refresh_tab_state(runtime.current_tab_id, user_id)
+        current_profile = runtime._load_index().get(runtime.current_profile_key or "", None)
+        tab_state = runtime._tabs[runtime.current_tab_id]
+        return {
+            "url": current_url,
+            "title": tab_state.title,
+            "content": str(tab_state.dom_snapshot.get("text", ""))[:4000],
+            "tab_id": runtime.current_tab_id,
+            "profile_name": current_profile.get("profile_name") if current_profile else profile_name or "default",
+            "session_status": current_profile.get("status") if current_profile else "anonymous",
+            "dom_snapshot": tab_state.dom_snapshot,
+        }
 
     async def browser_click(payload: dict[str, Any]) -> dict[str, Any]:
         selector = str(payload["selector"])
-        page = await runtime.get_page()
-        await page.click(selector)
-        return {"clicked": selector, "url": page.url}
+        timeout_seconds = int(payload.get("timeout_seconds", 10))
+        wait_for = optional_string(payload.get("wait_for"))
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
+        try:
+            await locator.click(timeout=max(1000, timeout_seconds * 1000))
+        except Exception:
+            await page.wait_for_timeout(150)
+            locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
+            await locator.click(timeout=max(1000, timeout_seconds * 1000))
+        await runtime.post_action_wait(page, wait_for, timeout_seconds)
+        assert runtime.current_tab_id is not None
+        await runtime._refresh_tab_state(runtime.current_tab_id, user_id)
+        state = runtime._tabs[runtime.current_tab_id]
+        return {
+            "clicked": selector,
+            "selector_strategy": strategy,
+            "url": state.url,
+            "tab_id": runtime.current_tab_id,
+            "dom_snapshot": state.dom_snapshot,
+        }
 
     async def browser_type(payload: dict[str, Any]) -> dict[str, Any]:
         selector = str(payload["selector"])
         text = str(payload["text"])
-        page = await runtime.get_page()
-        await page.fill(selector, text)
-        return {"typed": selector, "length": len(text)}
+        timeout_seconds = int(payload.get("timeout_seconds", 10))
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
+        try:
+            await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
+        except Exception:
+            await page.wait_for_timeout(150)
+            locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
+            await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
+        assert runtime.current_tab_id is not None
+        await runtime._refresh_tab_state(runtime.current_tab_id, user_id)
+        state = runtime._tabs[runtime.current_tab_id]
+        return {
+            "typed": selector,
+            "length": len(text),
+            "selector_strategy": strategy,
+            "tab_id": runtime.current_tab_id,
+            "dom_snapshot": state.dom_snapshot,
+        }
 
-    async def browser_screenshot(_payload: dict[str, Any]) -> dict[str, Any]:
-        page = await runtime.get_page()
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        target = screenshots_dir / f"screenshot-{stamp}.png"
+    async def browser_screenshot(payload: dict[str, Any]) -> dict[str, Any]:
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        runtime.screenshots_dir.mkdir(parents=True, exist_ok=True)
+        target = runtime.screenshots_dir / f"screenshot-{runtime.current_tab_id or 'browser'}.png"
         await page.screenshot(path=str(target), full_page=True)
-        return {"path": str(target)}
+        assert runtime.current_tab_id is not None
+        await runtime._refresh_tab_state(runtime.current_tab_id, user_id)
+        return {"path": str(target), "tab_id": runtime.current_tab_id, "url": page.url}
 
     async def browser_login(payload: dict[str, Any]) -> dict[str, Any]:
         site_name = str(payload["site_name"]).strip()
+        profile_name = str(payload.get("profile_name", "default")).strip() or "default"
         login_url = str(payload.get("url") or f"https://{site_name}").strip()
         timeout_seconds = int(payload.get("timeout_seconds", 300))
-        page = await runtime.start_login(site_name, login_url)
-        await _wait_for_manual_login(page, login_url, timeout_seconds)
-        saved = await runtime.save_login_session(site_name, login_url)
-        return {
-            "site_name": saved["site_name"],
-            "domain": saved["domain"],
-            "storage_state": saved["storage_path"],
-            "last_used_at": saved["last_used_at"],
-        }
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.start_login(site_name, profile_name, login_url, user_id=user_id)
+        await wait_for_manual_login(page, login_url, timeout_seconds)
+        saved = await runtime.save_login_session(site_name, profile_name, login_url)
+        await runtime._reset_context(
+            storage_state=str(saved.get("storage_path", "")) or None,
+            headless=config.tools.browser_headless,
+            profile=saved,
+            user_id=user_id,
+        )
+        return saved
 
     async def browser_sessions_list(_payload: dict[str, Any]) -> dict[str, Any]:
         return {"sessions": runtime.list_sessions()}
+
+    async def browser_tabs_list(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {"tabs": runtime.list_tabs(), "current_tab_id": runtime.current_tab_id}
+
+    async def browser_tab_open(payload: dict[str, Any]) -> dict[str, Any]:
+        return await runtime.open_tab(
+            url=optional_string(payload.get("url")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=optional_string(payload.get("user_id")),
+            wait_for=optional_string(payload.get("wait_for")),
+            timeout_seconds=int(payload.get("timeout_seconds", 30)),
+        )
+
+    async def browser_tab_switch(payload: dict[str, Any]) -> dict[str, Any]:
+        return await runtime.switch_tab(str(payload["tab_id"]), user_id=optional_string(payload.get("user_id")))
+
+    async def browser_tab_close(payload: dict[str, Any]) -> dict[str, Any]:
+        return await runtime.close_tab(str(payload["tab_id"]), user_id=optional_string(payload.get("user_id")))
+
+    async def browser_upload(payload: dict[str, Any]) -> dict[str, Any]:
+        selector = str(payload["selector"])
+        path = await runtime.ensure_workspace_file(str(payload["path"]))
+        timeout_seconds = int(payload.get("timeout_seconds", 10))
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds, state="attached")
+        await locator.set_input_files(str(path), timeout=max(1000, timeout_seconds * 1000))
+        return {"selector": selector, "selector_strategy": strategy, "path": str(path), "uploaded": True}
+
+    async def browser_downloads_list(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"downloads": runtime.list_downloads(limit=int(payload.get("limit", 20)))}
+
+    async def browser_logs(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"logs": runtime.list_logs(limit=int(payload.get("limit", 50)))}
+
+    async def browser_extract_table(payload: dict[str, Any]) -> dict[str, Any]:
+        selector = optional_string(payload.get("selector"))
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        if selector:
+            locator, _ = await runtime.resolve_locator(page, selector, timeout_seconds=int(payload.get("timeout_seconds", 10)), state="attached")
+            html = await locator.evaluate("el => el.outerHTML")
+        else:
+            html = await page.content()
+        headers, rows = extract_table_from_html(html, max_rows=int(payload.get("max_rows", 25)))
+        return {"headers": headers, "rows": rows, "row_count": len(rows)}
+
+    async def browser_fill_form(payload: dict[str, Any]) -> dict[str, Any]:
+        raw_fields = payload.get("fields")
+        if not isinstance(raw_fields, dict) or not raw_fields:
+            raise RuntimeError("browser_fill_form requires a non-empty 'fields' object.")
+        timeout_seconds = int(payload.get("timeout_seconds", 10))
+        user_id = optional_string(payload.get("user_id"))
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+        )
+        filled: list[dict[str, Any]] = []
+        for selector, value in raw_fields.items():
+            locator, strategy = await runtime.resolve_locator(page, str(selector), timeout_seconds=timeout_seconds)
+            await locator.fill(str(value), timeout=max(1000, timeout_seconds * 1000))
+            filled.append({"selector": str(selector), "strategy": strategy})
+        return {"filled": filled, "count": len(filled), "tab_id": runtime.current_tab_id}
 
     tools = [
         ToolDefinition(
             name="browser_navigate",
             description="Open a URL in the shared browser and capture the visible page content.",
-            parameters={
-                "type": "object",
-                "properties": {"url": {"type": "string"}},
-                "required": ["url"],
-            },
+            parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}, "required": ["url"]},
             handler=browser_navigate,
         ),
         ToolDefinition(
             name="browser_click",
-            description="Click an element in the shared browser using a CSS selector.",
-            parameters={
-                "type": "object",
-                "properties": {"selector": {"type": "string"}},
-                "required": ["selector"],
-            },
+            description="Click an element in the shared browser using a resilient locator strategy.",
+            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}, "wait_for": {"type": "string"}}, "required": ["selector"]},
             handler=browser_click,
         ),
         ToolDefinition(
             name="browser_type",
-            description="Type text into an element in the shared browser using a CSS selector.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["selector", "text"],
-            },
+            description="Type text into an element in the shared browser using CSS, text, label, or role fallback locators.",
+            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "text"]},
             handler=browser_type,
         ),
         ToolDefinition(
             name="browser_screenshot",
             description="Take a screenshot of the current browser page and save it into the workspace.",
-            parameters={"type": "object", "properties": {}},
+            parameters={"type": "object", "properties": {"profile_name": {"type": "string"}, "tab_id": {"type": "string"}}},
             handler=browser_screenshot,
         ),
         ToolDefinition(
             name="browser_login",
-            description="Open a visible browser window, let the user log in manually, then save the session state.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "site_name": {"type": "string"},
-                    "url": {"type": "string"},
-                    "timeout_seconds": {"type": "integer", "minimum": 30, "default": 300},
-                },
-                "required": ["site_name"],
-            },
+            description="Open a visible browser window, let the user log in manually, then save the named session profile.",
+            parameters={"type": "object", "properties": {"site_name": {"type": "string"}, "profile_name": {"type": "string", "default": "default"}, "url": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 30, "default": 300}}, "required": ["site_name"]},
             handler=browser_login,
         ),
-        ToolDefinition(
-            name="browser_sessions_list",
-            description="List saved browser login sessions and the last time each was used.",
-            parameters={"type": "object", "properties": {}},
-            handler=browser_sessions_list,
-        ),
+        ToolDefinition(name="browser_sessions_list", description="List saved browser login profiles and the last time each was used.", parameters={"type": "object", "properties": {}}, handler=browser_sessions_list),
+        ToolDefinition(name="browser_tabs_list", description="List the currently open browser tabs in the active browser context.", parameters={"type": "object", "properties": {}}, handler=browser_tabs_list),
+        ToolDefinition(name="browser_tab_open", description="Open a new browser tab, optionally navigating to a URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}}, handler=browser_tab_open),
+        ToolDefinition(name="browser_tab_switch", description="Switch the active browser tab by tab id.", parameters={"type": "object", "properties": {"tab_id": {"type": "string"}}, "required": ["tab_id"]}, handler=browser_tab_switch),
+        ToolDefinition(name="browser_tab_close", description="Close a browser tab by tab id.", parameters={"type": "object", "properties": {"tab_id": {"type": "string"}}, "required": ["tab_id"]}, handler=browser_tab_close),
+        ToolDefinition(name="browser_upload", description="Upload a file from the workspace into the current browser page.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "path": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "path"]}, handler=browser_upload),
+        ToolDefinition(name="browser_downloads_list", description="List recent browser downloads saved into the workspace inbox.", parameters={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "default": 20}}}, handler=browser_downloads_list),
+        ToolDefinition(name="browser_logs", description="List recent browser console and network log entries.", parameters={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "default": 50}}}, handler=browser_logs),
+        ToolDefinition(name="browser_extract_table", description="Extract tabular data from the current page or a selected table element.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "max_rows": {"type": "integer", "minimum": 1, "default": 25}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}}, handler=browser_extract_table),
+        ToolDefinition(name="browser_fill_form", description="Fill multiple form fields in the current page using resilient locator fallbacks.", parameters={"type": "object", "properties": {"fields": {"type": "object", "additionalProperties": {"type": "string"}}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["fields"]}, handler=browser_fill_form),
     ]
     return tools, runtime
-
-
-def _extract_visible_text(html: str) -> str:
-    if BeautifulSoup is not None:
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        text = soup.get_text(" ", strip=True)
-        return re.sub(r"\s+", " ", text).strip()
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
-
-
-def _looks_like_login_url(url: str) -> bool:
-    lowered = url.lower()
-    return any(token in lowered for token in ("/login", "/signin", "/sign-in", "/auth", "account/login"))
-
-
-def _slugify(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-") or "session"
-
-
-async def _wait_for_manual_login(page: Any, login_url: str, timeout_seconds: int) -> None:
-    deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
-    starting_domain = urlparse(login_url).netloc.lower()
-    while datetime.now(timezone.utc).timestamp() < deadline:
-        await page.wait_for_timeout(2000)
-        current_url = page.url or ""
-        current_domain = urlparse(current_url).netloc.lower()
-        if current_url and not _looks_like_login_url(current_url) and (
-            current_domain == starting_domain
-            or current_domain.endswith(f".{starting_domain}")
-            or starting_domain.endswith(f".{current_domain}")
-        ):
-            return
-    raise RuntimeError("Timed out waiting for manual browser login to complete.")

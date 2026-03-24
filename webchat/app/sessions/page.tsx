@@ -1,4 +1,5 @@
 import { SessionList } from "../../components/SessionList";
+import { WorkspaceHero } from "../../components/WorkspaceHero";
 
 async function getHistory() {
   try {
@@ -17,10 +18,16 @@ export default async function SessionsPage() {
   const history = await getHistory();
   return (
     <main className="space-y-6">
-      <header>
-        <p className="text-xs uppercase tracking-[0.2em] text-accent">Archive</p>
-        <h1 className="text-4xl font-semibold">Session Viewer</h1>
-      </header>
+      <WorkspaceHero
+        eyebrow="Session archive"
+        title="Review the current thread with room to read."
+        description="This page stays focused on clean conversation history so you can scroll, inspect, and understand the active session without browser or automation panels competing for space."
+        badges={[
+          { label: "Source", value: "webchat_main history" },
+          { label: "Format", value: "User + assistant only" },
+          { label: "Purpose", value: "Review and context" },
+        ]}
+      />
       <SessionList messages={history} />
     </main>
   );

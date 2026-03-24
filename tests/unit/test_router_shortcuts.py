@@ -110,8 +110,32 @@ class DummyToolRegistry:
         self.llm_task_response = llm_task_response or {"content": json.dumps({"skill": "daily-briefing", "confidence": 0.91})}
         self.has_llm_task = has_llm_task
         self.host_tools_enabled = host_tools_enabled
+        self.browser_runtime = type(
+            "BrowserRuntimeStub",
+            (),
+            {
+                "current_state": lambda self: {
+                    "headless": False,
+                    "tabs": [{"tab_id": "tab-1", "title": "GitHub", "url": "https://github.com"}],
+                    "active_tab": {"tab_id": "tab-1", "title": "GitHub", "url": "https://github.com"},
+                    "active_profile": {"site_name": "github.com", "profile_name": "work", "status": "active"},
+                }
+            },
+        )()
 
     def has(self, tool_name: str) -> bool:
+        if tool_name in {
+            "browser_sessions_list",
+            "browser_tabs_list",
+            "browser_downloads_list",
+            "browser_logs",
+            "browser_tab_open",
+            "browser_tab_switch",
+            "browser_tab_close",
+            "browser_screenshot",
+            "browser_login",
+        }:
+            return True
         if self.host_tools_enabled and tool_name in {"list_host_dir", "search_host_files", "exec_shell", "write_host_file"}:
             return True
         return self.has_llm_task and tool_name == "llm_task"
@@ -221,6 +245,35 @@ class DummyToolRegistry:
                 "audit_id": "audit-2",
                 "host": True,
             }
+        if tool_name == "browser_sessions_list":
+            return {
+                "sessions": [
+                    {"site_name": "github.com", "profile_name": "work", "status": "active"},
+                    {"site_name": "leetcode.com", "profile_name": "personal", "status": "stale"},
+                ]
+            }
+        if tool_name == "browser_tabs_list":
+            return {
+                "current_tab_id": "tab-1",
+                "tabs": [
+                    {"tab_id": "tab-1", "title": "GitHub", "url": "https://github.com"},
+                    {"tab_id": "tab-2", "title": "LeetCode", "url": "https://leetcode.com"},
+                ],
+            }
+        if tool_name == "browser_downloads_list":
+            return {"downloads": [{"filename": "report.csv", "path": "workspace/inbox/browser_downloads/work/report.csv"}]}
+        if tool_name == "browser_logs":
+            return {"logs": [{"kind": "console", "message": "Loaded dashboard"}, {"kind": "request_failed", "message": "GET /api/test -> 500"}]}
+        if tool_name == "browser_tab_open":
+            return {"tab_id": "tab-3", "title": "Docs", "url": str(payload.get("url", ""))}
+        if tool_name == "browser_tab_switch":
+            return {"tab_id": payload["tab_id"], "title": "LeetCode", "url": "https://leetcode.com"}
+        if tool_name == "browser_tab_close":
+            return {"current_tab_id": "tab-1"}
+        if tool_name == "browser_screenshot":
+            return {"path": "workspace/browser/screenshot-tab-1.png", "tab_id": "tab-1", "url": "https://github.com"}
+        if tool_name == "browser_login":
+            return {"site_name": payload["site_name"], "profile_name": payload.get("profile_name", "default"), "status": "active", "url": f"https://{payload['site_name']}"}
         raise AssertionError(f"Unexpected tool: {tool_name}")
 
 
@@ -954,6 +1007,59 @@ async def test_router_host_approve_without_id_uses_single_pending_approval(app_c
     assert response.ok is True
     assert "Approved host approval 'approval-123'." in response.payload["command_response"]
     assert system_access_manager.decisions == [("approval-123", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_router_browser_commands_are_available_for_channel_use(app_config) -> None:
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    profiles = await router.route_user_message(
+        connection_id="conn-browser-1",
+        request_id="req-browser-1",
+        session_key="telegram:123",
+        message="/browser profiles",
+        metadata={"trace_id": "trace-browser-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    tabs = await router.route_user_message(
+        connection_id="conn-browser-2",
+        request_id="req-browser-2",
+        session_key="telegram:123",
+        message="/browser tabs",
+        metadata={"trace_id": "trace-browser-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    logs = await router.route_user_message(
+        connection_id="conn-browser-3",
+        request_id="req-browser-3",
+        session_key="telegram:123",
+        message="/browser logs 2",
+        metadata={"trace_id": "trace-browser-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert profiles.ok is True
+    assert "Saved browser profiles:" in profiles.payload["command_response"]
+    assert "github.com/work" in profiles.payload["command_response"]
+    assert tabs.ok is True
+    assert "Open browser tabs:" in tabs.payload["command_response"]
+    assert "tab-1 [active]" in tabs.payload["command_response"]
+    assert logs.ok is True
+    assert "Recent browser logs:" in logs.payload["command_response"]
 
 
 @pytest.mark.asyncio

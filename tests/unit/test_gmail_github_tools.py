@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -114,6 +115,72 @@ async def test_gmail_tools_search_read_and_send(monkeypatch) -> None:
     assert send_result["id"] == "sent-1"
 
     assert "required" not in tools["gmail_search"].parameters
+
+
+@pytest.mark.asyncio
+async def test_gmail_tools_convert_html_body_to_readable_text(monkeypatch) -> None:
+    html_email = "<!DOCTYPE html><html><head><title>Notice</title></head><body><h1>Maintenance</h1><p>Tonight at 11 PM</p></body></html>"
+    encoded_html = base64.urlsafe_b64encode(html_email.encode("utf-8")).decode("utf-8").rstrip("=")
+
+    def handler(method: str, url: str, kwargs: dict[str, Any]) -> FakeResponse:
+        if url.endswith("/threads"):
+            return FakeResponse({"threads": [{"id": "thread-html"}]})
+        if url.endswith("/threads/thread-html"):
+            params = kwargs.get("params", {})
+            if params.get("format") == "metadata":
+                return FakeResponse(
+                    {
+                        "historyId": "1",
+                        "snippet": "Maintenance tonight",
+                        "messages": [
+                            {
+                                "payload": {
+                                    "headers": [
+                                        {"name": "Subject", "value": "Maintenance notice"},
+                                        {"name": "From", "value": "ops@example.com"},
+                                        {"name": "Date", "value": "Mon, 01 Jan 2026 10:00:00 +0000"},
+                                    ]
+                                }
+                            }
+                        ],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "messages": [
+                        {
+                            "id": "msg-html",
+                            "threadId": "thread-html",
+                            "snippet": "Maintenance tonight",
+                            "payload": {
+                                "headers": [
+                                    {"name": "Subject", "value": "Maintenance notice"},
+                                    {"name": "From", "value": "ops@example.com"},
+                                ],
+                                "parts": [
+                                    {
+                                        "mimeType": "text/html",
+                                        "body": {"data": encoded_html},
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            )
+        raise AssertionError(f"Unexpected Gmail URL: {url}")
+
+    monkeypatch.setattr("assistant.tools.gmail_tool.httpx.AsyncClient", lambda timeout=30.0: FakeAsyncClient(handler))
+
+    token_manager = FakeTokenManager({"google": {"access_token": "google-token"}})
+    tools = {tool.name: tool for tool in build_gmail_tools(token_manager)}
+
+    latest_result = await tools["gmail_latest_email"].handler({})
+
+    assert latest_result["found"] is True
+    assert "<html" not in latest_result["body"].lower()
+    assert "Maintenance" in latest_result["body"]
+    assert "Tonight at 11 PM" in latest_result["body"]
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,7 @@ from assistant.system_access import SystemAccessManager
 from assistant.tools.agent_send_tool import build_agent_send_tool
 from assistant.tools import create_default_tool_registry
 from assistant.utils import configure_logging, get_logger
+from assistant.utils.user_facing_errors import sanitize_error_text
 from assistant.users import UserProfileStore
 
 
@@ -81,6 +82,7 @@ class GatewayServices:
     automation_store: AutomationStore
     automation_engine: AutomationEngine
     system_access_manager: SystemAccessManager
+    browser_runtime: Any
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -128,7 +130,15 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             sandbox_runtime=sandbox_runtime,
             acp_client=acp_client,
             system_access_manager=system_access_manager,
+            browser_event_emitter=lambda user_id, event_name, payload: connection_manager.send_user_event(
+                user_id,
+                event_name,
+                payload,
+                channel_name="webchat",
+            ),
+            browser_viewer_checker=lambda user_id: bool(connection_manager.active_user_connections(user_id, "webchat")),
         )
+        browser_runtime = getattr(tool_registry, "browser_runtime", None)
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
@@ -216,6 +226,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             automation_store=automation_store,
             automation_engine=automation_engine,
             system_access_manager=system_access_manager,
+            browser_runtime=browser_runtime,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()
@@ -430,6 +441,36 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         result = await services.system_access_manager.restore_backup(backup_id, user_id=user_id)
         return {"ok": True, "result": result}
 
+    @app.get("/api/browser/state")
+    async def browser_state() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        return {"state": runtime.current_state() if runtime is not None else {"active": False, "tabs": []}}
+
+    @app.get("/api/browser/tabs")
+    async def browser_tabs() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        return {"tabs": runtime.list_tabs() if runtime is not None else []}
+
+    @app.get("/api/browser/logs")
+    async def browser_logs(limit: int = 50) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        return {"logs": runtime.list_logs(limit=limit) if runtime is not None else []}
+
+    @app.get("/api/browser/downloads")
+    async def browser_downloads(limit: int = 50) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        return {"downloads": runtime.list_downloads(limit=limit) if runtime is not None else []}
+
+    @app.get("/api/browser/profiles")
+    async def browser_profiles() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        return {"profiles": runtime.list_sessions() if runtime is not None else []}
+
     @app.post("/webhooks/{name}")
     async def receive_webhook(name: str, request: Request) -> dict[str, Any]:
         services: GatewayServices = app.state.services
@@ -485,6 +526,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                     raw_request,
                 )
                 if response is not None:
+                    if not response.ok:
+                        response.error = sanitize_error_text(response.error or "Request rejected.")
                     await services.connection_manager.send_response(connection.connection_id, response)
                     await _emit_inline_command_response(services, connection.connection_id, response)
         except WebSocketDisconnect:
@@ -531,6 +574,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                     await services.connection_manager.send_response(connection.connection_id, response)
                     continue
                 response = await services.router.handle_request(connection.connection_id, request)
+                if not response.ok:
+                    response.error = sanitize_error_text(response.error or "Request rejected.")
                 await services.connection_manager.send_response(connection.connection_id, response)
                 await _emit_inline_command_response(services, connection.connection_id, response)
         except WebSocketDisconnect:
@@ -594,7 +639,11 @@ def _build_channels(
             },
         )
         if not response.ok:
-            await connection_manager.send_event(route_id, "agent.chunk", {"text": response.error or "Request rejected."})
+            await connection_manager.send_event(
+                route_id,
+                "agent.chunk",
+                {"text": sanitize_error_text(response.error or "Request rejected.")},
+            )
             await connection_manager.send_event(route_id, "agent.done", {"session_key": session_key})
         else:
             payload = response.payload or {}

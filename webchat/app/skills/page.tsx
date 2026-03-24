@@ -1,12 +1,19 @@
 import { SkillsManager } from "../../components/SkillsManager";
+import { WorkspaceHero } from "../../components/WorkspaceHero";
 
 export default function SkillsPage() {
   return (
     <main className="space-y-6">
-      <header>
-        <p className="text-xs uppercase tracking-[0.2em] text-accent">Capabilities</p>
-        <h1 className="text-4xl font-semibold">Skills</h1>
-      </header>
+      <WorkspaceHero
+        eyebrow="Skill control"
+        title="Manage workflows that can be invoked by slash or by intent."
+        description="Bundled and custom skills live here, with clear toggles and metadata so you can see what is available before asking SonarBot to use it."
+        badges={[
+          { label: "Triggers", value: "Slash + natural language" },
+          { label: "Scope", value: "Bundled + custom" },
+          { label: "Mode", value: "Per-skill toggles" },
+        ]}
+      />
       <SkillsManager />
     </main>
   );

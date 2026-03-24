@@ -1,3 +1,5 @@
+import { WorkspaceHero } from "../../components/WorkspaceHero";
+
 async function getDashboard() {
   try {
     const response = await fetch("http://localhost:8765/api/dashboard", { cache: "no-store" });
@@ -21,13 +23,19 @@ export default async function DashboardPage() {
 
   return (
     <main className="space-y-6">
-      <header>
-        <p className="text-xs uppercase tracking-[0.2em] text-accent">Overview</p>
-        <h1 className="text-4xl font-semibold">Dashboard</h1>
-      </header>
+      <WorkspaceHero
+        eyebrow="Overview"
+        title="High-level signals from the current SonarBot runtime."
+        description="Use this page for a lightweight status read across tokens, activity, skills, and uptime without opening a more detailed workspace."
+        badges={[
+          { label: "Focus", value: "Runtime health" },
+          { label: "Scope", value: "Session snapshot" },
+          { label: "View", value: "Compact metrics" },
+        ]}
+      />
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {cards.map((card) => (
-          <section key={card.label} className="rounded-3xl border border-line bg-white p-5 shadow-card">
+          <section key={card.label} className="rounded-[1.75rem] border border-white/85 bg-white/90 p-5 shadow-card">
             <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{card.label}</p>
             <p className="mt-3 text-3xl font-semibold">{card.value}</p>
           </section>

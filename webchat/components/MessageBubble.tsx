@@ -44,16 +44,29 @@ export function MessageBubble({ role, content }: Props) {
   const isAssistant = role === "assistant";
   return (
     <div
-      className={`max-w-[88%] rounded-[1.5rem] border px-4 py-3 shadow-card ${
+      className={`max-w-[90%] rounded-[1.65rem] border px-4 py-4 shadow-card ${
         isUser
-          ? "ml-auto border-accent/20 bg-accent text-white"
+          ? "ml-auto border-accent/15 bg-gradient-to-br from-accent to-[#17499f] text-white"
           : isAssistant
-            ? "border-white/80 bg-white/95 text-ink"
-            : "border-line bg-sand/70 text-ink"
+            ? "border-white/85 bg-white/96 text-ink"
+            : "border-line bg-sand/80 text-ink"
       }`}
     >
-      <div className="mb-1 text-[11px] uppercase tracking-[0.24em] opacity-70">{role}</div>
-      <div className="whitespace-pre-wrap text-sm leading-6">{renderLinkedContent(content)}</div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-[11px] uppercase tracking-[0.24em] opacity-70">{role}</div>
+        <div
+          className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.18em] ${
+            isUser
+              ? "bg-white/15 text-white"
+              : isAssistant
+                ? "bg-glow text-accent"
+                : "bg-white/60 text-slate-600"
+          }`}
+        >
+          {isUser ? "Prompt" : isAssistant ? "Reply" : "Event"}
+        </div>
+      </div>
+      <div className="whitespace-pre-wrap text-sm leading-7">{renderLinkedContent(content)}</div>
     </div>
   );
 }

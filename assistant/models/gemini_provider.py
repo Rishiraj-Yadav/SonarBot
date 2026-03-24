@@ -58,7 +58,15 @@ class GeminiProvider(ModelProvider):
     async def _perform_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(url, params={"key": self.api_key}, json=payload)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                self.logger.error(
+                    "gemini_http_error",
+                    status_code=response.status_code,
+                    response_text=response.text[:2000],
+                )
+                raise
         return response.json()
 
     def _build_payload(
@@ -85,13 +93,66 @@ class GeminiProvider(ModelProvider):
                         {
                             "name": tool["name"],
                             "description": tool["description"],
-                            "parameters": tool["parameters"],
+                            "parameters": self._sanitize_schema(tool["parameters"]),
                         }
                         for tool in tools
                     ]
                 }
             ]
         return payload
+
+    def _sanitize_schema(self, schema: Any) -> Any:
+        if isinstance(schema, list):
+            return [self._sanitize_schema(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+
+        description = str(schema.get("description", "")).strip()
+        schema_type = schema.get("type")
+        sanitized: dict[str, Any] = {}
+
+        if schema_type is not None:
+            sanitized["type"] = schema_type
+        if description:
+            sanitized["description"] = description
+
+        if "enum" in schema and isinstance(schema["enum"], list):
+            sanitized["enum"] = schema["enum"]
+        if "format" in schema and schema["format"]:
+            sanitized["format"] = schema["format"]
+        if "required" in schema and isinstance(schema["required"], list):
+            sanitized["required"] = schema["required"]
+
+        if "properties" in schema and isinstance(schema["properties"], dict):
+            sanitized["properties"] = {
+                key: self._sanitize_schema(value)
+                for key, value in schema["properties"].items()
+                if isinstance(key, str)
+            }
+
+        if "items" in schema:
+            sanitized["items"] = self._sanitize_schema(schema["items"])
+
+        additional_properties = schema.get("additionalProperties")
+        if schema_type == "object" and additional_properties and "properties" not in sanitized:
+            extra_description = self._describe_additional_properties(additional_properties)
+            if extra_description:
+                base = sanitized.get("description", "")
+                sanitized["description"] = (
+                    f"{base} {extra_description}".strip()
+                    if base
+                    else extra_description
+                )
+
+        return sanitized
+
+    def _describe_additional_properties(self, schema: Any) -> str:
+        if isinstance(schema, bool):
+            return "Accepts key-value pairs." if schema else ""
+        if not isinstance(schema, dict):
+            return ""
+        value_type = str(schema.get("type", "value")).strip() or "value"
+        return f"Accepts arbitrary string-keyed entries where each value is a {value_type}."
 
     def _message_to_content(self, message: dict[str, Any]) -> dict[str, Any] | None:
         role = message.get("role", "user")

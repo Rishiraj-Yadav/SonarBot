@@ -11,6 +11,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Phase 5 advanced polish: temporal memory decay, MMR reranking, multimodal memory indexing, browser login sessions, session snapshots, ACP client/tool, `assistant doctor`, expanded e2e/load/unit tests, deployment/config docs
 - [x] Phase 6 service integrations: Gmail search/read/send/draft tools, GitHub repo/issue/PR read tools, Gmail briefing skill, GitHub PR summary skill, OAuth token fallback for connected accounts
 - [x] Automation V2: unified user profiles, persisted automation runs, background cron/heartbeat/webhook execution, notification inbox, primary-channel delivery, rule pause/resume controls
+- [x] Browser Automation V2: named browser profiles, multi-tab Playwright runtime, downloads/log capture, table extraction, form fill helpers, and a live browser panel in WebChat
 
 ## What You Can Use Today
 
@@ -20,6 +21,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - persistent sessions with compaction and snapshots
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
+- advanced browser automation with named profiles, multi-tab control, uploads/downloads, logs, table extraction, and form autofill
 - host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
@@ -71,6 +73,22 @@ npm run dev
 ```
 
 Then open `http://localhost:3000`.
+
+## Browser Automation V2
+
+The browser subsystem now includes:
+
+- named saved profiles per site/account
+- multi-tab browsing tools
+- smarter locator fallback and wait handling
+- browser uploads and workspace-backed downloads
+- console/network log capture
+- table extraction and form autofill helpers
+- WebChat browser panel with live state, tabs, downloads, logs, and headed-browser screenshot streaming
+
+Browser downloads are stored under the workspace by default:
+
+- `workspace/inbox/browser_downloads`
 
 ## Screenshots
 

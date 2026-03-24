@@ -66,6 +66,11 @@ severity = "info"
 [tools]
 brave_api_key = ""
 browser_headless = true
+browser_profiles_subdir = "browser_sessions"
+browser_screenshots_subdir = "browser"
+browser_downloads_subdir = "inbox/browser_downloads"
+browser_log_retention = 200
+browser_screenshot_stream_interval_seconds = 3
 
 [oauth.google]
 client_id = ""

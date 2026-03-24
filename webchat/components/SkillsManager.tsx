@@ -31,14 +31,15 @@ export function SkillsManager() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="grid gap-4 lg:grid-cols-2">
       {skills.map((skill) => (
-        <div key={skill.name} className="rounded-3xl border border-line bg-white p-5 shadow-card">
+        <div key={skill.name} className="rounded-[1.8rem] border border-white/85 bg-white/92 p-5 shadow-card">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h3 className="text-lg font-semibold">{skill.name}</h3>
-              <p className="mt-2 text-sm text-slate-600">{skill.description}</p>
-              <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
+              <div className="text-[11px] uppercase tracking-[0.24em] text-accent">Skill</div>
+              <h3 className="mt-2 text-xl font-semibold text-ink">{skill.name}</h3>
+              <p className="mt-3 text-sm leading-6 text-slate-600">{skill.description}</p>
+              <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
                 {skill.eligible ? "Eligible" : "Unavailable in this environment"}
               </p>
               <div className="mt-3 flex flex-wrap gap-2 text-xs">

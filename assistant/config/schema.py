@@ -155,6 +155,11 @@ class AutomationConfig(BaseModel):
 class ToolsConfig(BaseModel):
     brave_api_key: str = ""
     browser_headless: bool = True
+    browser_profiles_subdir: str = "browser_sessions"
+    browser_screenshots_subdir: str = "browser"
+    browser_downloads_subdir: str = "inbox/browser_downloads"
+    browser_log_retention: int = 200
+    browser_screenshot_stream_interval_seconds: int = 3
 
 
 class SandboxConfig(BaseModel):

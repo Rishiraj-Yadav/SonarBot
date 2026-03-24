@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import re
 from email.message import EmailMessage
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup
 
 from assistant.tools.registry import ToolDefinition
 
@@ -248,12 +250,25 @@ def _extract_gmail_body(payload: dict[str, Any]) -> str:
     body = payload.get("body", {}) or {}
     data = body.get("data")
     if data:
-        return _decode_gmail_data(str(data))
+        decoded = _decode_gmail_data(str(data))
+        mime_type = str(payload.get("mimeType", ""))
+        return _normalize_gmail_body(decoded, mime_type=mime_type)
 
     for part in payload.get("parts", []) or []:
         mime_type = str(part.get("mimeType", ""))
         if mime_type == "text/plain":
-            return _decode_gmail_data(str((part.get("body", {}) or {}).get("data", "")))
+            return _normalize_gmail_body(
+                _decode_gmail_data(str((part.get("body", {}) or {}).get("data", ""))),
+                mime_type=mime_type,
+            )
+
+    for part in payload.get("parts", []) or []:
+        mime_type = str(part.get("mimeType", ""))
+        if mime_type == "text/html":
+            return _normalize_gmail_body(
+                _decode_gmail_data(str((part.get("body", {}) or {}).get("data", ""))),
+                mime_type=mime_type,
+            )
 
     for part in payload.get("parts", []) or []:
         nested = _extract_gmail_body(part)
@@ -270,6 +285,35 @@ def _decode_gmail_data(data: str) -> str:
         return base64.urlsafe_b64decode(data + padding).decode("utf-8", errors="replace")
     except Exception:
         return ""
+
+
+def _normalize_gmail_body(content: str, *, mime_type: str = "") -> str:
+    cleaned = content.strip()
+    if not cleaned:
+        return ""
+    normalized_mime = mime_type.lower()
+    if normalized_mime == "text/html" or _looks_like_html(cleaned):
+        cleaned = _html_to_text(cleaned)
+    cleaned = re.sub(r"\s+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _looks_like_html(content: str) -> bool:
+    lowered = content[:300].lower()
+    return "<html" in lowered or "<body" in lowered or "<div" in lowered or "<table" in lowered or "<!doctype" in lowered
+
+
+def _html_to_text(content: str) -> str:
+    try:
+        soup = BeautifulSoup(content, "html.parser")
+        for tag in soup(["script", "style", "head", "title", "meta"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", content)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _build_email_message(*, to: str, subject: str, body: str, cc: str = "", bcc: str = "") -> str:

@@ -26,6 +26,8 @@ def create_default_tool_registry(
     sandbox_runtime=None,
     acp_client=None,
     system_access_manager=None,
+    browser_event_emitter=None,
+    browser_viewer_checker=None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in build_file_tools(config.agent.workspace_dir):
@@ -44,9 +46,14 @@ def create_default_tool_registry(
     if memory_manager is not None:
         for tool in build_memory_tools(memory_manager):
             registry.register(tool)
-    browser_tools, browser_runtime = build_browser_tools(config)
+    browser_tools, browser_runtime = build_browser_tools(
+        config,
+        event_emitter=browser_event_emitter,
+        viewer_checker=browser_viewer_checker,
+    )
     for tool in browser_tools:
         registry.register(tool)
+    registry.browser_runtime = browser_runtime
     registry.register_cleanup(browser_runtime.close)
     for tool in build_pdf_tools(config):
         registry.register(tool)

@@ -13,6 +13,7 @@ from assistant.agent.queue import AgentQueue, AgentRequest
 from assistant.agent.session import create_message
 from assistant.agent.streaming import merge_text_chunks
 from assistant.models.base import ToolCall
+from assistant.utils.user_facing_errors import format_user_facing_exception
 
 EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 TypingEmitter = Callable[[str], Awaitable[None]]
@@ -163,7 +164,7 @@ class AgentLoop:
                     if response.usage is not None:
                         usage = response.usage
             except Exception as exc:  # pragma: no cover - defensive runtime path
-                error_text = f"[Model error] {exc}"
+                error_text = format_user_facing_exception(exc)
                 await self.session_manager.append_message(session, create_message("assistant", error_text))
                 if request.result_future is not None and not request.result_future.done():
                     request.result_future.set_result(

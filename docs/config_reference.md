@@ -98,6 +98,11 @@ cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing" }]
 
 - `brave_api_key`: string, optional
 - `browser_headless`: boolean, default `true`
+- `browser_profiles_subdir`: path-like string, default `browser_sessions`
+- `browser_screenshots_subdir`: path-like string, default `browser`
+- `browser_downloads_subdir`: path-like string, default `inbox/browser_downloads`
+- `browser_log_retention`: integer, default `200`
+- `browser_screenshot_stream_interval_seconds`: integer, default `3`
 
 ### `[oauth.google]`
 
