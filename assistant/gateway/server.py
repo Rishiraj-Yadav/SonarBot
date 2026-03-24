@@ -183,7 +183,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         )
         await automation_engine.initialize()
         router.automation_engine = automation_engine
-        automation_scheduler = AutomationScheduler(runtime_config, automation_engine) if runtime_config.automation.cron_jobs else None
+        automation_scheduler = AutomationScheduler(runtime_config, automation_engine)
+        automation_engine.set_scheduler(automation_scheduler)
         heartbeat_service = HeartbeatService(runtime_config, agent_loop, automation_engine)
         app.state.services = GatewayServices(
             config=runtime_config,

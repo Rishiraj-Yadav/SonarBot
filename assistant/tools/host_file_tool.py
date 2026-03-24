@@ -96,7 +96,7 @@ def build_host_file_tools(system_access_manager) -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="write_host_file",
-            description="Write a UTF-8 text file inside configured allowed host paths on the machine.",
+            description="Write a file inside configured allowed host paths on the machine. Text and code files are written as UTF-8 text, and .pdf/.doc/.docx are generated from the provided content.",
             parameters={
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},

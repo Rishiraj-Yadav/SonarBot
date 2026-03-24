@@ -125,6 +125,54 @@ async def test_restore_backup_recreates_previous_file_version(app_config, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_write_host_file_infers_document_formats_from_extension(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    home_root.mkdir(parents=True, exist_ok=True)
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.system_access.path_rules = [
+        {
+            "path": str(home_root),
+            "read": "auto_allow",
+            "write": "auto_allow",
+            "overwrite": "auto_allow",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    pdf_result = await manager.write_host_file(
+        path=str(home_root / "report.pdf"),
+        content="hello pdf",
+        session_key="main",
+        session_id="sess-doc-1",
+        user_id="default",
+    )
+    docx_result = await manager.write_host_file(
+        path=str(home_root / "report.docx"),
+        content="hello docx",
+        session_key="main",
+        session_id="sess-doc-2",
+        user_id="default",
+    )
+
+    pdf_bytes = (home_root / "report.pdf").read_bytes()
+    docx_bytes = (home_root / "report.docx").read_bytes()
+
+    assert pdf_result["file_format"] == "pdf"
+    assert docx_result["file_format"] == "docx"
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert docx_bytes.startswith(b"PK")
+
+
+@pytest.mark.asyncio
 async def test_search_host_files_prefers_named_directories_over_substring_noise(app_config, tmp_path: Path) -> None:
     home_root = tmp_path / "home"
     target_dir = home_root / "Documents" / "college" / "5sem"

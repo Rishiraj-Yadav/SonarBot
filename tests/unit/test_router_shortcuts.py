@@ -182,6 +182,15 @@ class DummyToolRegistry:
                     ],
                     "directories_only": bool(payload.get("directories_only")),
                 }
+            if query_compact == "spcc":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/"],
+                    "matches": [
+                        {"name": "SPCC", "path": "R:/6_semester/SPCC", "is_dir": True},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                }
             return {
                 "root": root,
                 "searched_roots": ["C:/Users/Ritesh/Documents", "R:/"] if root == "@allowed" else [root],
@@ -239,6 +248,44 @@ class DummyAutomationEngine:
 
     async def decide_approval(self, _approval_id: str, _decision: str) -> None:
         return None
+
+    def __init__(self) -> None:
+        self.dynamic_jobs: list[dict[str, object]] = []
+
+    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
+        job = {
+            "cron_id": "cron-user-1",
+            "user_id": user_id,
+            "schedule": schedule,
+            "message": message,
+            "paused": False,
+        }
+        self.dynamic_jobs = [job]
+        return job
+
+    async def list_dynamic_cron_jobs(self, _user_id: str) -> list[dict[str, object]]:
+        return list(self.dynamic_jobs)
+
+    async def pause_dynamic_cron_job(self, _user_id: str, cron_id: str) -> dict[str, object]:
+        for job in self.dynamic_jobs:
+            if job["cron_id"] == cron_id:
+                job["paused"] = True
+                return job
+        raise KeyError(f"Unknown cron job '{cron_id}'.")
+
+    async def resume_dynamic_cron_job(self, _user_id: str, cron_id: str) -> dict[str, object]:
+        for job in self.dynamic_jobs:
+            if job["cron_id"] == cron_id:
+                job["paused"] = False
+                return job
+        raise KeyError(f"Unknown cron job '{cron_id}'.")
+
+    async def delete_dynamic_cron_job(self, _user_id: str, cron_id: str) -> bool:
+        for index, job in enumerate(self.dynamic_jobs):
+            if job["cron_id"] == cron_id:
+                self.dynamic_jobs.pop(index)
+                return True
+        raise KeyError(f"Unknown cron job '{cron_id}'.")
 
 
 class DummyUserProfiles:
@@ -584,6 +631,39 @@ async def test_router_host_shortcut_searches_named_folder_on_r_drive(app_config)
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_opens_named_folder_and_lists_contents(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-2bb",
+        request_id="req-host-2bb",
+        session_key="telegram:123",
+        message="oepn spcc folder",
+        metadata={"trace_id": "trace-host-2bb", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "R:/6_semester/SPCC" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "list_host_dir"]
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_lists_folder_contents_when_user_asks_whats_inside(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(
@@ -688,6 +768,119 @@ async def test_router_host_shortcut_creates_desktop_note_when_filename_and_conte
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_recent_host_folder_context(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-folder-1",
+            "role": "assistant",
+            "content": "Here's what's inside the R:\\6_semester\\SPCC folder:\n- SPCC Experiment 5.pdf",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4b",
+        request_id="req-host-4b",
+        session_key="telegram:123",
+        message="Create a timepass.txt file there in which it is written hello world",
+        metadata={"trace_id": "trace-host-4b", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "created timepass.txt in your r:\\6_semester\\spcc" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "R:\\6_semester\\SPCC/timepass.txt"
+    assert tool_registry.calls[0][1]["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_named_folder_context(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4c",
+        request_id="req-host-4c",
+        session_key="telegram:123",
+        message="create a timepass.py file in the SPCC folder with content print('hello')",
+        metadata={"trace_id": "trace-host-4c", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "created timepass.py in your r:/6_semester/spcc" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[1][0] == "write_host_file"
+    assert tool_registry.calls[1][1]["path"] == "R:/6_semester/SPCC/timepass.py"
+    assert tool_registry.calls[1][1]["content"] == "print('hello')"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_pdf_file_when_extension_is_provided(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4d",
+        request_id="req-host-4d",
+        session_key="telegram:123",
+        message="create a report.pdf file in the SPCC folder with content hello world",
+        metadata={"trace_id": "trace-host-4d", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[1][0] == "write_host_file"
+    assert tool_registry.calls[1][1]["path"] == "R:/6_semester/SPCC/report.pdf"
+
+
+@pytest.mark.asyncio
 async def test_router_accepts_slash_commands_with_telegram_bot_suffix(app_config) -> None:
     router = GatewayRouter(
         config=app_config,
@@ -761,6 +954,193 @@ async def test_router_host_approve_without_id_uses_single_pending_approval(app_c
     assert response.ok is True
     assert "Approved host approval 'approval-123'." in response.payload["command_response"]
     assert system_access_manager.decisions == [("approval-123", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_router_cron_add_list_pause_resume_delete_flow(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    add_response = await router.route_user_message(
+        connection_id="conn-cron-1",
+        request_id="req-cron-1",
+        session_key="telegram:123",
+        message='/cron add "0 8 * * *" "Good morning briefing"',
+        metadata={"trace_id": "trace-cron-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert add_response.ok is True
+    assert "Created cron job 'cron-user-1'" in add_response.payload["command_response"]
+
+    list_response = await router.route_user_message(
+        connection_id="conn-cron-2",
+        request_id="req-cron-2",
+        session_key="telegram:123",
+        message="/cron list",
+        metadata={"trace_id": "trace-cron-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert list_response.ok is True
+    assert "cron-user-1: active | 0 8 * * * | Good morning briefing" in list_response.payload["command_response"]
+
+    pause_response = await router.route_user_message(
+        connection_id="conn-cron-3",
+        request_id="req-cron-3",
+        session_key="telegram:123",
+        message="/cron pause cron-user-1",
+        metadata={"trace_id": "trace-cron-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert pause_response.ok is True
+    assert "Paused cron job 'cron-user-1'." in pause_response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["paused"] is True
+
+    resume_response = await router.route_user_message(
+        connection_id="conn-cron-4",
+        request_id="req-cron-4",
+        session_key="telegram:123",
+        message="/cron resume cron-user-1",
+        metadata={"trace_id": "trace-cron-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert resume_response.ok is True
+    assert "Resumed cron job 'cron-user-1'." in resume_response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["paused"] is False
+
+    delete_response = await router.route_user_message(
+        connection_id="conn-cron-5",
+        request_id="req-cron-5",
+        session_key="telegram:123",
+        message="/cron delete cron-user-1",
+        metadata={"trace_id": "trace-cron-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert delete_response.ok is True
+    assert "Deleted cron job 'cron-user-1'." in delete_response.payload["command_response"]
+    assert automation_engine.dynamic_jobs == []
+
+
+@pytest.mark.asyncio
+async def test_router_cron_add_accepts_pipe_syntax(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-6",
+        request_id="req-cron-6",
+        session_key="telegram:123",
+        message="/cron add */10 * * * * | Cron test message",
+        metadata={"trace_id": "trace-cron-6", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "*/10 * * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Cron test message"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_dynamic_cron_from_daily_reminder_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-nl-1",
+        request_id="req-cron-nl-1",
+        session_key="telegram:123",
+        message="remind me every day at 8 am to go to college",
+        metadata={"trace_id": "trace-cron-nl-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created cron job 'cron-user-1' on 0 8 * * *." in response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "0 8 * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: go to college"
+    assert [message["role"] for message in session_manager.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_dynamic_cron_from_named_day_reminder_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-nl-2",
+        request_id="req-cron-nl-2",
+        session_key="telegram:123",
+        message="create a cron job to remind me every monday at 9:30 pm to submit attendance",
+        metadata={"trace_id": "trace-cron-nl-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "30 21 * * 1"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: submit attendance"
 
 
 @pytest.mark.asyncio

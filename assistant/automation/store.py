@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRun, Notification, utc_now_iso
+from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRun, DynamicCronJob, Notification, utc_now_iso
 
 
 class AutomationStore:
@@ -106,6 +106,19 @@ class AutomationStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     decided_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dynamic_cron_jobs (
+                    cron_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    schedule TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -543,3 +556,131 @@ class AutomationStore:
                         }
                     )
         return rows
+
+    async def create_dynamic_cron_job(self, job: DynamicCronJob) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO dynamic_cron_jobs (
+                    cron_id, user_id, schedule, message, paused, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.cron_id,
+                    job.user_id,
+                    job.schedule,
+                    job.message,
+                    int(job.paused),
+                    job.created_at,
+                    job.updated_at,
+                ),
+            )
+            await db.commit()
+
+    async def list_dynamic_cron_jobs(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT cron_id, schedule, message, paused, created_at, updated_at
+                FROM dynamic_cron_jobs
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ) as cursor:
+                async for row in cursor:
+                    rows.append(
+                        {
+                            "cron_id": row[0],
+                            "user_id": user_id,
+                            "schedule": row[1],
+                            "message": row[2],
+                            "paused": bool(row[3]),
+                            "created_at": row[4],
+                            "updated_at": row[5],
+                        }
+                    )
+        return rows
+
+    async def list_all_dynamic_cron_jobs(self, *, include_paused: bool = False, limit: int = 500) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        query = """
+                SELECT cron_id, user_id, schedule, message, paused, created_at, updated_at
+                FROM dynamic_cron_jobs
+            """
+        params: tuple[Any, ...]
+        if include_paused:
+            query += " ORDER BY created_at ASC LIMIT ?"
+            params = (limit,)
+        else:
+            query += " WHERE paused = 0 ORDER BY created_at ASC LIMIT ?"
+            params = (limit,)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, params) as cursor:
+                async for row in cursor:
+                    rows.append(
+                        {
+                            "cron_id": row[0],
+                            "user_id": row[1],
+                            "schedule": row[2],
+                            "message": row[3],
+                            "paused": bool(row[4]),
+                            "created_at": row[5],
+                            "updated_at": row[6],
+                        }
+                    )
+        return rows
+
+    async def get_dynamic_cron_job(self, user_id: str, cron_id: str) -> dict[str, Any] | None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT cron_id, schedule, message, paused, created_at, updated_at
+                FROM dynamic_cron_jobs
+                WHERE user_id = ? AND cron_id = ?
+                """,
+                (user_id, cron_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "cron_id": row[0],
+                "user_id": user_id,
+                "schedule": row[1],
+                "message": row[2],
+                "paused": bool(row[3]),
+                "created_at": row[4],
+                "updated_at": row[5],
+            }
+
+    async def set_dynamic_cron_job_paused(self, user_id: str, cron_id: str, paused: bool) -> dict[str, Any] | None:
+        await self.initialize()
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE dynamic_cron_jobs
+                SET paused = ?, updated_at = ?
+                WHERE user_id = ? AND cron_id = ?
+                """,
+                (int(paused), updated_at, user_id, cron_id),
+            )
+            await db.commit()
+        return await self.get_dynamic_cron_job(user_id, cron_id)
+
+    async def delete_dynamic_cron_job(self, user_id: str, cron_id: str) -> bool:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM dynamic_cron_jobs WHERE user_id = ? AND cron_id = ?",
+                (user_id, cron_id),
+            )
+            await db.commit()
+            return bool(cursor.rowcount)

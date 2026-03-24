@@ -82,3 +82,14 @@ class ApprovalRequest:
     payload: dict[str, Any]
     created_at: str = field(default_factory=utc_now_iso)
     decided_at: str = ""
+
+
+@dataclass(slots=True)
+class DynamicCronJob:
+    cron_id: str
+    user_id: str
+    schedule: str
+    message: str
+    paused: bool = False
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)

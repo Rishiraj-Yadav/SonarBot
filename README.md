@@ -24,6 +24,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
+- chat-managed cron jobs via `/cron add`, `/cron list`, `/cron pause`, `/cron resume`, and `/cron delete`
 - automation inbox and run history in WebChat
 - optional Docker sandbox execution
 

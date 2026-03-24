@@ -12,7 +12,15 @@ from uuid import uuid4
 
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.automation.delivery import NotificationDispatcher
-from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRule, AutomationRun, Notification, utc_now_iso
+from assistant.automation.models import (
+    ApprovalRequest,
+    AutomationEvent,
+    AutomationRule,
+    AutomationRun,
+    DynamicCronJob,
+    Notification,
+    utc_now_iso,
+)
 
 
 class AutomationEngine:
@@ -33,10 +41,14 @@ class AutomationEngine:
         self.user_profiles = user_profiles
         self.store = store
         self.dispatcher = dispatcher
+        self.scheduler = None
 
     async def initialize(self) -> None:
         await self.store.initialize()
         await self.user_profiles.initialize()
+
+    def set_scheduler(self, scheduler) -> None:
+        self.scheduler = scheduler
 
     async def handle_cron_job(self, rule_name: str, message: str, user_id: str | None = None) -> dict[str, Any]:
         target_user = user_id or self.config.users.default_user_id
@@ -117,11 +129,21 @@ class AutomationEngine:
 
     async def list_rules(self, user_id: str) -> list[dict[str, Any]]:
         state = await self.store.list_rule_state(user_id)
+        dynamic_jobs = await self.store.list_dynamic_cron_jobs(user_id)
         rules = [
             *[self._rule_to_payload(self._cron_rule(f"cron:{index}", job.message), state.get(f"cron:{index}", {})) for index, job in enumerate(self.config.automation.cron_jobs)],
             *[self._rule_to_payload(rule, state.get(rule.name, {})) for rule in self.config.automation.rules],
             *[self._rule_to_payload(rule, state.get(rule.name, {})) for rule in await self.standing_orders_manager.compile_rules()],
         ]
+        for job in dynamic_jobs:
+            dynamic_rule = self._dynamic_cron_rule(str(job["cron_id"]), str(job["message"]))
+            payload = self._rule_to_payload(dynamic_rule, state.get(dynamic_rule.name, {}))
+            payload["schedule"] = str(job["schedule"])
+            payload["message"] = str(job["message"])
+            payload["paused"] = bool(job["paused"])
+            payload["dynamic"] = True
+            payload["cron_id"] = str(job["cron_id"])
+            rules.append(payload)
         webhook_names = sorted(self.config.automation.webhooks.keys())
         for webhook_name in webhook_names:
             rule = self._webhook_rule(webhook_name, f"Webhook event from {webhook_name}")
@@ -140,10 +162,82 @@ class AutomationEngine:
         return rules
 
     async def pause_rule(self, user_id: str, rule_name: str) -> None:
+        if rule_name.startswith("dynamic-cron:"):
+            await self.pause_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, True)
 
     async def resume_rule(self, user_id: str, rule_name: str) -> None:
+        if rule_name.startswith("dynamic-cron:"):
+            await self.resume_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, False)
+
+    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, Any]:
+        normalized_schedule = self._validate_cron_schedule(schedule)
+        cleaned_message = message.strip()
+        if not cleaned_message:
+            raise ValueError("Cron job message cannot be empty.")
+        job = DynamicCronJob(
+            cron_id=uuid4().hex[:12],
+            user_id=user_id,
+            schedule=normalized_schedule,
+            message=cleaned_message,
+        )
+        await self.store.create_dynamic_cron_job(job)
+        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(job.cron_id), False)
+        if self.scheduler is not None:
+            await self.scheduler.register_dynamic_job(
+                {
+                    "cron_id": job.cron_id,
+                    "user_id": user_id,
+                    "schedule": job.schedule,
+                    "message": job.message,
+                    "paused": False,
+                }
+            )
+        return {
+            "cron_id": job.cron_id,
+            "user_id": job.user_id,
+            "schedule": job.schedule,
+            "message": job.message,
+            "paused": job.paused,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        }
+
+    async def list_dynamic_cron_jobs(self, user_id: str) -> list[dict[str, Any]]:
+        return await self.store.list_dynamic_cron_jobs(user_id)
+
+    async def list_all_dynamic_cron_jobs(self) -> list[dict[str, Any]]:
+        return await self.store.list_all_dynamic_cron_jobs(include_paused=False)
+
+    async def pause_dynamic_cron_job(self, user_id: str, cron_id: str) -> dict[str, Any]:
+        job = await self.store.set_dynamic_cron_job_paused(user_id, cron_id, True)
+        if job is None:
+            raise KeyError(f"Unknown cron job '{cron_id}'.")
+        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(cron_id), True)
+        if self.scheduler is not None:
+            await self.scheduler.pause_dynamic_job(cron_id)
+        return job
+
+    async def resume_dynamic_cron_job(self, user_id: str, cron_id: str) -> dict[str, Any]:
+        job = await self.store.set_dynamic_cron_job_paused(user_id, cron_id, False)
+        if job is None:
+            raise KeyError(f"Unknown cron job '{cron_id}'.")
+        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(cron_id), False)
+        if self.scheduler is not None:
+            await self.scheduler.resume_dynamic_job(job)
+        return job
+
+    async def delete_dynamic_cron_job(self, user_id: str, cron_id: str) -> bool:
+        deleted = await self.store.delete_dynamic_cron_job(user_id, cron_id)
+        if not deleted:
+            raise KeyError(f"Unknown cron job '{cron_id}'.")
+        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(cron_id), True)
+        if self.scheduler is not None:
+            await self.scheduler.remove_dynamic_job(cron_id)
+        return True
 
     async def replay_run(self, run_id: str) -> dict[str, Any]:
         run = await self.store.get_run(run_id)
@@ -154,6 +248,8 @@ class AutomationEngine:
             raise KeyError(f"Automation run '{run_id}' is missing its event payload.")
         rule_name = str(run["rule_name"])
         if rule_name.startswith("cron:"):
+            return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
+        if rule_name.startswith("dynamic-cron:"):
             return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
@@ -417,6 +513,9 @@ class AutomationEngine:
             severity="info",
         )
 
+    def _dynamic_cron_rule(self, cron_id: str, message: str) -> AutomationRule:
+        return self._cron_rule(self._dynamic_cron_rule_name(cron_id), message)
+
     def _webhook_rule(self, name: str, message: str) -> AutomationRule:
         return AutomationRule(
             name=f"webhook:{name}",
@@ -448,6 +547,9 @@ class AutomationEngine:
                 )
         return None
 
+    def _dynamic_cron_rule_name(self, cron_id: str) -> str:
+        return f"dynamic-cron:{cron_id}"
+
     def _rule_to_payload(self, rule: AutomationRule, state: dict[str, Any]) -> dict[str, Any]:
         return {
             "name": rule.name,
@@ -470,3 +572,15 @@ class AutomationEngine:
 
     def _slug(self, value: str) -> str:
         return re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-") or "automation"
+
+    def _validate_cron_schedule(self, schedule: str) -> str:
+        normalized = " ".join(schedule.split())
+        if len(normalized.split()) != 5:
+            raise ValueError("Cron schedule must have 5 fields, for example: 0 8 * * *")
+        try:
+            from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+            CronTrigger.from_crontab(normalized)
+        except Exception as exc:
+            raise ValueError(f"Invalid cron schedule '{schedule}'.") from exc
+        return normalized

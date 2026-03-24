@@ -40,6 +40,26 @@ class FakeConnectionManager:
         return ["webchat-connection"] if channel_name == "webchat" else []
 
 
+class FakeScheduler:
+    def __init__(self) -> None:
+        self.registered: list[dict[str, object]] = []
+        self.paused: list[str] = []
+        self.resumed: list[str] = []
+        self.removed: list[str] = []
+
+    async def register_dynamic_job(self, job: dict[str, object]) -> None:
+        self.registered.append(dict(job))
+
+    async def pause_dynamic_job(self, cron_id: str) -> None:
+        self.paused.append(cron_id)
+
+    async def resume_dynamic_job(self, job: dict[str, object]) -> None:
+        self.resumed.append(str(job["cron_id"]))
+
+    async def remove_dynamic_job(self, cron_id: str) -> None:
+        self.removed.append(cron_id)
+
+
 @pytest.mark.asyncio
 async def test_automation_engine_creates_notification_for_cron_run(app_config) -> None:
     session_manager = SessionManager(app_config)
@@ -127,3 +147,43 @@ async def test_automation_engine_does_not_hijack_cron_message_with_generic_rule(
     assert result["status"] == "completed"
     runs = await store.list_runs(app_config.users.default_user_id)
     assert runs[0]["rule_name"] == "cron:0"
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_manages_dynamic_cron_jobs(app_config) -> None:
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+    )
+    scheduler = FakeScheduler()
+    engine.set_scheduler(scheduler)
+
+    created = await engine.create_dynamic_cron_job(app_config.users.default_user_id, "0 8 * * *", "Study reminder")
+    listed = await engine.list_dynamic_cron_jobs(app_config.users.default_user_id)
+    rules = await engine.list_rules(app_config.users.default_user_id)
+    paused = await engine.pause_dynamic_cron_job(app_config.users.default_user_id, str(created["cron_id"]))
+    resumed = await engine.resume_dynamic_cron_job(app_config.users.default_user_id, str(created["cron_id"]))
+    deleted = await engine.delete_dynamic_cron_job(app_config.users.default_user_id, str(created["cron_id"]))
+
+    assert created["schedule"] == "0 8 * * *"
+    assert listed and listed[0]["cron_id"] == created["cron_id"]
+    assert any(item.get("dynamic") and item.get("cron_id") == created["cron_id"] for item in rules)
+    assert paused["paused"] is True
+    assert resumed["paused"] is False
+    assert deleted is True
+    assert scheduler.registered and scheduler.registered[0]["cron_id"] == created["cron_id"]
+    assert scheduler.paused == [str(created["cron_id"])]
+    assert scheduler.resumed == [str(created["cron_id"])]
+    assert scheduler.removed == [str(created["cron_id"])]

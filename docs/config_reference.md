@@ -50,6 +50,14 @@
 - `cron_jobs`: list of `{ schedule, message }`
 - `rules`: list of structured automation rules
 
+Static cron jobs live here in config. You can also create user-specific dynamic cron jobs from chat with:
+
+- `/cron add "0 8 * * *" "Good morning briefing"`
+- `/cron list`
+- `/cron pause <cron_id>`
+- `/cron resume <cron_id>`
+- `/cron delete <cron_id>`
+
 ### `[automation.delivery]`
 
 - `retry_attempts`: integer, default `3`

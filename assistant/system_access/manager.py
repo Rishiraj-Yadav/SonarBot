@@ -379,7 +379,7 @@ class SystemAccessManager:
         if exists and resolved.is_file():
             backup_id, _ = await self.runtime.backup_file(resolved, "write_host_file")
         started = time.perf_counter()
-        result = await self.runtime.write_text(resolved, content)
+        result = await self.runtime.write_content(resolved, content)
         duration_ms = int((time.perf_counter() - started) * 1000)
         audit_entry = HostAuditEntry(
             user_id=user_id,
@@ -401,6 +401,7 @@ class SystemAccessManager:
             "approval_mode": approval_mode,
             "audit_id": audit_entry.audit_id,
             "backup_id": backup_id,
+            "file_format": result.get("file_format", "text"),
         }
 
     async def copy_host_file(

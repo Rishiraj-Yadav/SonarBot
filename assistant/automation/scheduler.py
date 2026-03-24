@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 class AutomationScheduler:
     def __init__(self, config, automation_engine) -> None:
         self.config = config
@@ -17,13 +18,22 @@ class AutomationScheduler:
 
         self.scheduler = AsyncIOScheduler()
         for index, job in enumerate(self.config.automation.cron_jobs):
-            trigger = CronTrigger.from_crontab(job.schedule)
-            self.scheduler.add_job(
-                self.enqueue_cron_message,
-                trigger=trigger,
-                id=f"cron-{index}",
-                kwargs={"rule_name": f"cron:{index}", "message": job.message},
-                replace_existing=True,
+            self._add_job(
+                job_id=f"cron-{index}",
+                schedule=job.schedule,
+                rule_name=f"cron:{index}",
+                message=job.message,
+                user_id=None,
+            )
+        for job in await self.automation_engine.list_all_dynamic_cron_jobs():
+            if bool(job.get("paused")):
+                continue
+            self._add_job(
+                job_id=self._dynamic_job_id(str(job["cron_id"])),
+                schedule=str(job["schedule"]),
+                rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+                message=str(job["message"]),
+                user_id=str(job["user_id"]),
             )
         self.scheduler.start()
 
@@ -31,5 +41,67 @@ class AutomationScheduler:
         if self.scheduler is not None and self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
-    async def enqueue_cron_message(self, rule_name: str, message: str) -> None:
-        await self.automation_engine.handle_cron_job(rule_name, message)
+    async def enqueue_cron_message(self, rule_name: str, message: str, user_id: str | None = None) -> None:
+        await self.automation_engine.handle_cron_job(rule_name, message, user_id=user_id)
+
+    async def register_dynamic_job(self, job: dict[str, object]) -> None:
+        if self.scheduler is None:
+            return
+        self._add_job(
+            job_id=self._dynamic_job_id(str(job["cron_id"])),
+            schedule=str(job["schedule"]),
+            rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+            message=str(job["message"]),
+            user_id=str(job["user_id"]),
+        )
+
+    async def pause_dynamic_job(self, cron_id: str) -> None:
+        if self.scheduler is None:
+            return
+        job = self.scheduler.get_job(self._dynamic_job_id(cron_id))
+        if job is not None:
+            self.scheduler.remove_job(self._dynamic_job_id(cron_id))
+
+    async def resume_dynamic_job(self, job: dict[str, object]) -> None:
+        if self.scheduler is None or bool(job.get("paused")):
+            return
+        self._add_job(
+            job_id=self._dynamic_job_id(str(job["cron_id"])),
+            schedule=str(job["schedule"]),
+            rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+            message=str(job["message"]),
+            user_id=str(job["user_id"]),
+        )
+
+    async def remove_dynamic_job(self, cron_id: str) -> None:
+        if self.scheduler is None:
+            return
+        job = self.scheduler.get_job(self._dynamic_job_id(cron_id))
+        if job is not None:
+            self.scheduler.remove_job(self._dynamic_job_id(cron_id))
+
+    def _add_job(
+        self,
+        *,
+        job_id: str,
+        schedule: str,
+        rule_name: str,
+        message: str,
+        user_id: str | None,
+    ) -> None:
+        from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+        trigger = CronTrigger.from_crontab(schedule)
+        self.scheduler.add_job(
+            self.enqueue_cron_message,
+            trigger=trigger,
+            id=job_id,
+            kwargs={"rule_name": rule_name, "message": message, "user_id": user_id},
+            replace_existing=True,
+        )
+
+    def _dynamic_job_id(self, cron_id: str) -> str:
+        return f"dynamic-cron-{cron_id}"
+
+    def _dynamic_rule_name(self, cron_id: str) -> str:
+        return f"dynamic-cron:{cron_id}"

@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -394,6 +395,124 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": "Automation rules:\n" + "\n".join(lines), "rules": rules},
             )
 
+        if command_name == "cron":
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._cron_help_text(),
+                    },
+                )
+            if subcommand in {"add", "create"}:
+                schedule, cron_message = self._parse_cron_add_arguments(subargs)
+                if not schedule or not cron_message:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /cron add \"0 8 * * *\" \"Message\" or /cron add 0 8 * * * | Message.")
+                try:
+                    job = await self.automation_engine.create_dynamic_cron_job(user_id, schedule, cron_message)
+                except ValueError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": (
+                            f"Created cron job '{job['cron_id']}' on {job['schedule']}.\n"
+                            f"Message: {job['message']}"
+                        ),
+                        "cron_job": job,
+                    },
+                )
+            if subcommand in {"list", "ls"}:
+                dynamic_jobs = await self.automation_engine.list_dynamic_cron_jobs(user_id)
+                lines: list[str] = []
+                if dynamic_jobs:
+                    lines.append("Chat-created cron jobs:")
+                    lines.extend(
+                        f"- {item['cron_id']}: {'paused' if item['paused'] else 'active'} | {item['schedule']} | {item['message']}"
+                        for item in dynamic_jobs
+                    )
+                else:
+                    lines.append("Chat-created cron jobs: none")
+                if self.config.automation.cron_jobs:
+                    lines.append("")
+                    lines.append("Config cron jobs:")
+                    lines.extend(
+                        f"- config:{index}: active | {job.schedule} | {job.message}"
+                        for index, job in enumerate(self.config.automation.cron_jobs)
+                    )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": "\n".join(lines),
+                        "cron_jobs": dynamic_jobs,
+                    },
+                )
+            if subcommand == "pause":
+                cron_id = subargs.strip()
+                if not cron_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /cron pause <cron_id>.")
+                try:
+                    job = await self.automation_engine.pause_dynamic_cron_job(user_id, cron_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Paused cron job '{cron_id}'.",
+                        "cron_job": job,
+                    },
+                )
+            if subcommand == "resume":
+                cron_id = subargs.strip()
+                if not cron_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /cron resume <cron_id>.")
+                try:
+                    job = await self.automation_engine.resume_dynamic_cron_job(user_id, cron_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Resumed cron job '{cron_id}'.",
+                        "cron_job": job,
+                    },
+                )
+            if subcommand in {"delete", "remove", "rm"}:
+                cron_id = subargs.strip()
+                if not cron_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /cron delete <cron_id>.")
+                try:
+                    await self.automation_engine.delete_dynamic_cron_job(user_id, cron_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Deleted cron job '{cron_id}'.",
+                    },
+                )
+            return ResponseFrame(id=request_id, ok=False, error="Unknown /cron subcommand. Use /cron help.")
+
         if command_name == "pause-rule":
             user_id = await self._resolve_user_id(connection_id, session_key)
             rule_name = arguments.strip()
@@ -685,6 +804,16 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         lowered = message.lower().strip()
+        cron_shortcut = await self._handle_natural_language_cron_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if cron_shortcut is not None:
+            return cron_shortcut
+
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
@@ -747,6 +876,39 @@ class GatewayRouter:
 
         return None
 
+    async def _handle_natural_language_cron_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_natural_language_cron_request(original_message, lowered)
+        if parsed is None:
+            return None
+        schedule, cron_message = parsed
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        try:
+            job = await self.automation_engine.create_dynamic_cron_job(user_id, schedule, cron_message)
+        except ValueError as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = (
+            f"Created cron job '{job['cron_id']}' on {job['schedule']}.\n"
+            f"Message: {job['message']}"
+        )
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "cron_job": job,
+            },
+        )
+
     async def _handle_host_shortcut(
         self,
         request_id: str,
@@ -794,6 +956,46 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_host_directory_response(label, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        browse_term = self._extract_host_browse_folder_term(lowered)
+        if browse_term and folder_name is None:
+            try:
+                result = await self.tool_registry.dispatch(
+                    "search_host_files",
+                    {
+                        "root": explicit_root or "@allowed",
+                        "pattern": "*",
+                        "name_query": browse_term,
+                        "directories_only": True,
+                        "limit": 20,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            folder_match = self._pick_folder_match_for_contents(browse_term, result)
+            if folder_match is not None:
+                try:
+                    listing = await self.tool_registry.dispatch(
+                        "list_host_dir",
+                        {
+                            "path": folder_match["path"],
+                            "session_key": session_key,
+                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        },
+                    )
+                except Exception as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                response_text = self._format_host_folder_contents_response(folder_match, listing)
+            else:
+                response_text = self._format_host_search_response(browse_term, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -862,6 +1064,34 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_host_exec_response(app_name, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        contextual_host_write = await self._parse_contextual_host_file_creation_request(
+            session_key,
+            original_message,
+            metadata,
+        )
+        if contextual_host_write is not None:
+            target_dir, filename, content = contextual_host_write
+            try:
+                result = await self.tool_registry.dispatch(
+                    "write_host_file",
+                    {
+                        "path": f"{target_dir.rstrip('/\\')}/{filename}",
+                        "content": content,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_write_response(filename, target_dir, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -956,6 +1186,124 @@ class GatewayRouter:
             parts.append(existing)
         parts.append(f"{heading}\n{content}")
         return "\n\n".join(part for part in parts if part)
+
+    def _split_command_arguments(self, arguments: str) -> tuple[str, str]:
+        stripped = arguments.strip()
+        if not stripped:
+            return "", ""
+        parts = stripped.split(maxsplit=1)
+        command = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        return command, rest
+
+    def _cron_help_text(self) -> str:
+        return (
+            "Cron commands:\n"
+            "/cron add \"0 8 * * *\" \"Good morning briefing\"\n"
+            "/cron add 0 21 * * * | Nightly review reminder\n"
+            "/cron list\n"
+            "/cron pause <cron_id>\n"
+            "/cron resume <cron_id>\n"
+            "/cron delete <cron_id>"
+        )
+
+    def _parse_cron_add_arguments(self, arguments: str) -> tuple[str | None, str | None]:
+        stripped = arguments.strip()
+        quoted = re.match(r'^(?:"([^"]+)"|\'([^\']+)\')\s+(?:"([^"]+)"|\'([^\']+)\')$', stripped)
+        if quoted:
+            schedule = quoted.group(1) or quoted.group(2)
+            message = quoted.group(3) or quoted.group(4)
+            return self._normalize_cli_text(schedule), self._normalize_cli_text(message)
+        if "|" in stripped:
+            left, right = stripped.split("|", maxsplit=1)
+            return self._normalize_cli_text(left), self._normalize_cli_text(right)
+        parts = stripped.split()
+        if len(parts) >= 6:
+            schedule = " ".join(parts[:5])
+            message = " ".join(parts[5:])
+            return self._normalize_cli_text(schedule), self._normalize_cli_text(message)
+        return None, None
+
+    def _normalize_cli_text(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().strip("\"'")
+        return normalized or None
+
+    def _parse_natural_language_cron_request(self, message: str, lowered: str) -> tuple[str, str] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
+        patterns = (
+            r"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            r"^remind me every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            r"^every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            schedule = self._build_schedule_from_frequency_and_time(
+                str(match.group("frequency")),
+                str(match.group("time")),
+            )
+            reminder_message = self._normalize_reminder_message(match.group("message"))
+            if schedule and reminder_message:
+                return schedule, reminder_message
+        return None
+
+    def _build_schedule_from_frequency_and_time(self, frequency: str, time_text: str) -> str | None:
+        parsed_time = self._parse_reminder_time(time_text)
+        if parsed_time is None:
+            return None
+        hour, minute = parsed_time
+        day_map = {
+            "day": "*",
+            "weekday": "1-5",
+            "monday": "1",
+            "tuesday": "2",
+            "wednesday": "3",
+            "thursday": "4",
+            "friday": "5",
+            "saturday": "6",
+            "sunday": "0",
+        }
+        normalized_frequency = frequency.lower().rstrip("s")
+        day_of_week = day_map.get(normalized_frequency)
+        if day_of_week is None:
+            return None
+        return f"{minute} {hour} * * {day_of_week}"
+
+    def _parse_reminder_time(self, value: str) -> tuple[int, int] | None:
+        normalized = re.sub(r"\s+", " ", value.strip().lower())
+        twelve_hour = re.match(r"^(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)$", normalized)
+        if twelve_hour is not None:
+            hour = int(twelve_hour.group("hour"))
+            minute = int(twelve_hour.group("minute") or "0")
+            ampm = str(twelve_hour.group("ampm"))
+            if hour < 1 or hour > 12 or minute > 59:
+                return None
+            if ampm == "am":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+            return hour, minute
+        twenty_four_hour = re.match(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$", normalized)
+        if twenty_four_hour is not None:
+            hour = int(twenty_four_hour.group("hour"))
+            minute = int(twenty_four_hour.group("minute"))
+            if hour > 23 or minute > 59:
+                return None
+            return hour, minute
+        return None
+
+    def _normalize_reminder_message(self, value: str) -> str | None:
+        normalized = value.strip().strip("\"'")
+        normalized = re.sub(r"[.?!]+$", "", normalized).strip()
+        if not normalized:
+            return None
+        if not normalized.lower().startswith("reminder:"):
+            normalized = f"Reminder: {normalized}"
+        return normalized
 
     def _skill_payload(self, skill: Any) -> dict[str, Any]:
         return {
@@ -1081,6 +1429,20 @@ class GatewayRouter:
             return "R:/"
         return None
 
+    def _extract_host_browse_folder_term(self, lowered: str) -> str | None:
+        patterns = (
+            r"\b(?:open|oepn|show|list|browse)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+            r"\b(?:open|oepn|show|list|browse)\s+(?:the\s+)?folder\s+(.+)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            term = self._clean_host_search_term(match.group(1))
+            if term and term not in {"downloads", "desktop", "documents", "pictures", "music", "videos"}:
+                return term
+        return None
+
     def _describe_host_root(self, root: str) -> str:
         normalized = root.strip().replace("\\", "/").lower()
         if normalized == "r:/":
@@ -1163,6 +1525,247 @@ class GatewayRouter:
         if not filename.lower().endswith(".txt"):
             filename = f"{filename}.txt"
         return (filename, content) if filename and content else None
+
+    async def _parse_contextual_host_file_creation_request(
+        self,
+        session_key: str,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> tuple[str, str, str] | None:
+        lowered = message.lower()
+        filename, content = await self._parse_host_file_request_details(session_key, message)
+        if not filename or not content:
+            return None
+        explicit_root = self._extract_host_search_root(lowered)
+        target_dir = self._extract_explicit_host_directory(message)
+        if target_dir is None:
+            folder_reference = self._extract_named_folder_reference_for_write(lowered)
+            if folder_reference is not None:
+                target_dir = await self._resolve_host_directory_reference(
+                    session_key,
+                    folder_reference,
+                    explicit_root,
+                    metadata,
+                )
+            elif any(token in lowered for token in (" there", " here", "that folder", "this folder")):
+                target_dir = await self._resolve_recent_host_directory(
+                    session_key,
+                    explicit_root,
+                    metadata,
+                )
+        if target_dir is None:
+            return None
+        return target_dir, filename, content
+
+    async def _parse_host_file_request_details(self, session_key: str, message: str) -> tuple[str | None, str | None]:
+        lowered = message.lower()
+        content = self._extract_host_file_content(message)
+        filename = self._extract_explicit_filename(message)
+        extension_hint = self._extract_file_extension_hint(lowered)
+        if filename is None and extension_hint is not None and " file" in lowered:
+            filename = f"untitled.{extension_hint}"
+        if filename is None:
+            return None, None
+        filename = filename.strip().strip("\"'")
+        if "." not in Path(filename).name and extension_hint is not None:
+            filename = f"{filename}.{extension_hint}"
+        elif "." not in Path(filename).name:
+            filename = f"{filename}.txt"
+        if content is None and self._looks_like_save_here_request(lowered):
+            content = await self._resolve_recent_assistant_text(session_key)
+        return (filename or None, content or None)
+
+    def _clean_contextual_file_content(self, value: str) -> str:
+        content = value.strip().strip("\"'")
+        content = re.sub(
+            r"^(?:it|this|there)\s+(?:(?:is|was|should\s+be|will\s+be)\s+)?(?:written|saved|stored)\s+",
+            "",
+            content,
+            flags=re.IGNORECASE,
+        )
+        content = re.sub(r"^(?:it|this)\s+contains?\s+", "", content, flags=re.IGNORECASE)
+        content = re.sub(r"\s+(?:is|be|should\s+be)\s+written\.?$", "", content, flags=re.IGNORECASE)
+        return content.strip()
+
+    def _extract_explicit_host_directory(self, message: str) -> str | None:
+        match = re.search(r"\b(?:in|on)\s+([A-Za-z]:[\\/][^\n]+?)(?:\s+(?:with|containing|in\s+which)\b|$)", message)
+        if not match:
+            return None
+        path = match.group(1).strip().rstrip(".")
+        path = path.rstrip("\\/")
+        return path or None
+
+    def _extract_named_folder_reference_for_write(self, lowered: str) -> str | None:
+        patterns = (
+            r"\b(?:in|inside|into|to)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+            r"\b(?:save|create|make|write)\s+(?:a\s+)?file\s+(?:in|inside)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            term = self._clean_host_search_term(match.group(1))
+            if term and term not in {"that", "this", "there", "here"}:
+                return term
+        return None
+
+    def _extract_explicit_filename(self, message: str) -> str | None:
+        quoted = re.search(r"[\"']([^\"']+\.[A-Za-z0-9]{1,8})[\"']", message)
+        if quoted:
+            return quoted.group(1)
+        named = re.search(r"\b(?:called|named|as)\s+([A-Za-z0-9_.-]+(?:\.[A-Za-z0-9]{1,8})?)", message, flags=re.IGNORECASE)
+        if named:
+            return named.group(1)
+        generic = re.search(r"\b([A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})\b", message)
+        if generic:
+            return generic.group(1)
+        return None
+
+    def _extract_file_extension_hint(self, lowered: str) -> str | None:
+        extension_map = {
+            "txt": "txt",
+            "text": "txt",
+            "py": "py",
+            "python": "py",
+            "ts": "ts",
+            "typescript": "ts",
+            "js": "js",
+            "javascript": "js",
+            "java": "java",
+            "cpp": "cpp",
+            "c++": "cpp",
+            "c": "c",
+            "md": "md",
+            "markdown": "md",
+            "json": "json",
+            "html": "html",
+            "css": "css",
+            "xml": "xml",
+            "csv": "csv",
+            "pdf": "pdf",
+            "doc": "doc",
+            "docs": "doc",
+            "docx": "docx",
+        }
+        for token, extension in extension_map.items():
+            if re.search(rf"\b{re.escape(token)}\s+file\b", lowered):
+                return extension
+        return None
+
+    def _extract_host_file_content(self, message: str) -> str | None:
+        patterns = (
+            r"\bwith\s+content\s+(.+)$",
+            r"\bcontaining\s+(.+)$",
+            r"\bin\s+which\s+(.+)$",
+            r"\bwhere\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if not match:
+                continue
+            content = self._clean_contextual_file_content(match.group(1))
+            if content:
+                return content
+        return None
+
+    def _looks_like_save_here_request(self, lowered: str) -> bool:
+        return any(phrase in lowered for phrase in ("save it here", "save this here", "save it there", "save this there"))
+
+    async def _resolve_recent_host_directory(
+        self,
+        session_key: str,
+        explicit_root: str | None,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        history = await self.session_manager.session_history(session_key, limit=12)
+        patterns = (
+            r"inside the\s+([A-Za-z]:[\\/][^\n:]+?)\s+folder:",
+            r"folder at\s+([A-Za-z]:[\\/][^\n.]+)",
+            r"->\s*([A-Za-z]:[\\/][^\n]+)",
+        )
+        for item in reversed(history):
+            content = str(item.get("content", ""))
+            for pattern in patterns:
+                match = re.search(pattern, content, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                path = match.group(1).strip().rstrip(".")
+                if re.search(r"\.[A-Za-z0-9]{1,6}$", path):
+                    continue
+                return path.rstrip("\\/")
+            named_folder = re.search(r"inside the\s+(.+?)\s+(?:folder|directory):", content, flags=re.IGNORECASE)
+            if named_folder:
+                term = self._clean_host_search_term(named_folder.group(1))
+                if term:
+                    resolved = await self._resolve_host_directory_reference(session_key, term, explicit_root, metadata)
+                    if resolved is not None:
+                        return resolved
+        return None
+
+    async def _resolve_host_directory_reference(
+        self,
+        session_key: str,
+        folder_reference: str,
+        explicit_root: str | None,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        recent_path = await self._resolve_recent_host_directory_direct_path(session_key)
+        if recent_path and self._compact_search_name(Path(recent_path).name) == self._compact_search_name(folder_reference):
+            return recent_path
+        try:
+            result = await self.tool_registry.dispatch(
+                "search_host_files",
+                {
+                    "root": explicit_root or "@allowed",
+                    "pattern": "*",
+                    "name_query": folder_reference,
+                    "directories_only": True,
+                    "limit": 20,
+                    "session_key": session_key,
+                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                },
+            )
+        except Exception:
+            return None
+        folder_match = self._pick_folder_match_for_contents(folder_reference, result)
+        if folder_match is not None:
+            return str(folder_match.get("path", "")) or None
+        matches = [match for match in result.get("matches", []) if match.get("is_dir")]
+        if len(matches) == 1:
+            return str(matches[0].get("path", "")) or None
+        return None
+
+    async def _resolve_recent_host_directory_direct_path(self, session_key: str) -> str | None:
+        history = await self.session_manager.session_history(session_key, limit=12)
+        patterns = (
+            r"inside the\s+([A-Za-z]:[\\/][^\n:]+?)\s+folder:",
+            r"folder at\s+([A-Za-z]:[\\/][^\n.]+)",
+            r"->\s*([A-Za-z]:[\\/][^\n]+)",
+        )
+        for item in reversed(history):
+            content = str(item.get("content", ""))
+            for pattern in patterns:
+                match = re.search(pattern, content, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                path = match.group(1).strip().rstrip(".")
+                if re.search(r"\.[A-Za-z0-9]{1,6}$", path):
+                    continue
+                return path.rstrip("\\/")
+        return None
+
+    async def _resolve_recent_assistant_text(self, session_key: str) -> str | None:
+        history = await self.session_manager.session_history(session_key, limit=12)
+        for item in reversed(history):
+            if str(item.get("role", "")) != "assistant":
+                continue
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if content.lower().startswith("host action approval required"):
+                continue
+            return content
+        return None
 
     def _format_host_directory_response(self, folder_name: str, result: dict[str, Any]) -> str:
         entries = result.get("entries", []) if isinstance(result, dict) else []

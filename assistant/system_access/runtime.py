@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import io
 import os
 import re
 import shutil
+import zipfile
+from html import escape as html_escape
 from pathlib import Path
 from uuid import uuid4
 
@@ -134,6 +137,32 @@ class SystemAccessRuntime:
 
         await asyncio.to_thread(_write)
         return {"path": str(path), "bytes_written": len(content.encode("utf-8"))}
+
+    async def write_content(self, path: Path, content: str) -> dict[str, object]:
+        file_format = self._infer_write_format(path)
+
+        def _write() -> int:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if file_format == "text":
+                path.write_text(content, encoding="utf-8")
+                return len(content.encode("utf-8"))
+            if file_format == "pdf":
+                data = self._build_simple_pdf_bytes(content)
+                path.write_bytes(data)
+                return len(data)
+            if file_format == "docx":
+                data = self._build_simple_docx_bytes(content)
+                path.write_bytes(data)
+                return len(data)
+            if file_format == "doc":
+                data = self._build_simple_rtf_bytes(content)
+                path.write_bytes(data)
+                return len(data)
+            path.write_text(content, encoding="utf-8")
+            return len(content.encode("utf-8"))
+
+        bytes_written = await asyncio.to_thread(_write)
+        return {"path": str(path), "bytes_written": bytes_written, "file_format": file_format}
 
     async def delete_path(self, path: Path) -> dict[str, object]:
         def _delete() -> None:
@@ -412,3 +441,89 @@ class SystemAccessRuntime:
             if rule.path.exists():
                 return rule.path
         return self.home_root
+
+    def _infer_write_format(self, path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix == ".docx":
+            return "docx"
+        if suffix in {".doc", ".docs"}:
+            return "doc"
+        return "text"
+
+    def _build_simple_pdf_bytes(self, text: str) -> bytes:
+        lines = text.splitlines() or [text or ""]
+        commands = ["BT", "/F1 12 Tf", "72 770 Td"]
+        for index, line in enumerate(lines[:120]):
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            if index:
+                commands.append("0 -16 Td")
+            commands.append(f"({escaped}) Tj")
+        commands.append("ET")
+        stream = "\n".join(commands).encode("latin-1", errors="replace")
+        objects = [
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+            f"4 0 obj\n<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"\nendstream\nendobj\n",
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        ]
+        pdf = bytearray(b"%PDF-1.4\n")
+        offsets = [0]
+        for obj in objects:
+            offsets.append(len(pdf))
+            pdf.extend(obj)
+        xref_offset = len(pdf)
+        pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+        pdf.extend(b"0000000000 65535 f \n")
+        for offset in offsets[1:]:
+            pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+        pdf.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+        return bytes(pdf)
+
+    def _build_simple_rtf_bytes(self, text: str) -> bytes:
+        escaped = (
+            text.replace("\\", "\\\\")
+            .replace("{", "\\{")
+            .replace("}", "\\}")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .replace("\n", "\\par\n")
+        )
+        return ("{\\rtf1\\ansi\\deff0\n" + escaped + "\n}").encode("utf-8")
+
+    def _build_simple_docx_bytes(self, text: str) -> bytes:
+        paragraphs = text.splitlines() or [text or ""]
+        body = "".join(
+            f"<w:p><w:r><w:t xml:space=\"preserve\">{html_escape(paragraph)}</w:t></w:r></w:p>"
+            for paragraph in paragraphs
+        )
+        document_xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            f"<w:body>{body}<w:sectPr/></w:body></w:document>"
+        )
+        content_types = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+            "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+            "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+            "<Override PartName=\"/word/document.xml\" "
+            "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+            "</Types>"
+        )
+        relationships = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+            "<Relationship Id=\"rId1\" "
+            "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" "
+            "Target=\"word/document.xml\"/>"
+            "</Relationships>"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", content_types)
+            archive.writestr("_rels/.rels", relationships)
+            archive.writestr("word/document.xml", document_xml)
+        return buffer.getvalue()
