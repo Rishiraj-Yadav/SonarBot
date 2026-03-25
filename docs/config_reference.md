@@ -75,6 +75,23 @@ Static cron jobs live here in config. You can also create user-specific dynamic 
 - `inbox_retention_days`: integer, default `30`
 - `default_severity`: string, default `info`
 
+### `[context_engine]`
+
+- `enabled`: boolean, default `false`; turns on the proactive life-context engine
+- `interval_minutes`: integer, default `180`; how often the background engine runs
+- `recent_session_message_limit`: integer, default `6`; max messages loaded from a recent session
+- `session_count_limit`: integer, default `4`; max recent sessions considered per user
+- `gmail_thread_limit`: integer, default `5`; max recent Gmail threads inspected when Google is connected
+- `calendar_event_limit`: integer, default `6`; max upcoming calendar events inspected when Google is connected
+- `max_notifications_per_run`: integer, default `2`; delivery cap for proactive insights per run
+- `min_confidence`: float, default `0.82`; minimum model confidence required to notify
+- `min_urgency`: float, default `0.55`; minimum urgency required to notify
+- `dedupe_days`: integer, default `7`; suppress repeated insights within this time window
+- `snapshot_subdir`: path-like string, default `context_engine/life_state`
+- `insights_subdir`: path-like string, default `context_engine/insights`
+
+This subsystem is read-mostly. It builds a separate life-state snapshot instead of writing into `MEMORY.md`, and it delivers only high-confidence insights through the existing notification system while respecting quiet hours.
+
 ### `[[automation.rules]]`
 
 - `name`: string

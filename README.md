@@ -28,6 +28,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
 - chat-managed cron jobs via `/cron add`, `/cron list`, `/cron pause`, `/cron resume`, and `/cron delete`
 - automation inbox and run history in WebChat
+- proactive life context engine with snapshotting, cross-source insight scoring, and quiet-hours-aware notifications
 - optional Docker sandbox execution
 
 ## Quickstart In 5 Steps
@@ -89,6 +90,33 @@ The browser subsystem now includes:
 Browser downloads are stored under the workspace by default:
 
 - `workspace/inbox/browser_downloads`
+
+## Proactive Life Context Engine
+
+SonarBot now includes an optional background context engine that builds a separate life-state snapshot and only sends high-confidence proactive insights.
+
+What it reads:
+
+- markdown memory through the existing memory manager
+- recent session history across linked channels
+- Google Gmail and Calendar context when that account is connected
+- automation notifications and automation run history
+
+What it does:
+
+- builds a snapshot under `workspace/context_engine/life_state`
+- keeps dedupe history under `workspace/context_engine/insights`
+- asks the model for cross-source, high-signal insights
+- only sends notifications that clear configured confidence and urgency thresholds
+- respects the user's quiet hours and channel preferences through the existing notification system
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[context_engine]
+enabled = true
+interval_minutes = 180
+```
 
 ## Screenshots
 

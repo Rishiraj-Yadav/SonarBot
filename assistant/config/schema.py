@@ -152,6 +152,21 @@ class AutomationConfig(BaseModel):
     notifications: AutomationNotificationsConfig = Field(default_factory=AutomationNotificationsConfig)
 
 
+class ContextEngineConfig(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = 180
+    recent_session_message_limit: int = 6
+    session_count_limit: int = 4
+    gmail_thread_limit: int = 5
+    calendar_event_limit: int = 6
+    max_notifications_per_run: int = 2
+    min_confidence: float = 0.82
+    min_urgency: float = 0.55
+    dedupe_days: int = 7
+    snapshot_subdir: str = "context_engine/life_state"
+    insights_subdir: str = "context_engine/insights"
+
+
 class ToolsConfig(BaseModel):
     brave_api_key: str = ""
     browser_headless: bool = True
@@ -252,6 +267,7 @@ class AppConfig(BaseModel):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     automation: AutomationConfig = Field(default_factory=AutomationConfig)
+    context_engine: ContextEngineConfig = Field(default_factory=ContextEngineConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
@@ -329,6 +345,8 @@ class AppConfig(BaseModel):
         (self.agent.workspace_dir / "inbox").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "skills").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "hooks").mkdir(parents=True, exist_ok=True)
+        (self.agent.workspace_dir / self.context_engine.snapshot_subdir).mkdir(parents=True, exist_ok=True)
+        (self.agent.workspace_dir / self.context_engine.insights_subdir).mkdir(parents=True, exist_ok=True)
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
         self.system_access.home_root.mkdir(parents=True, exist_ok=True)
         self.system_access.audit_log_path.parent.mkdir(parents=True, exist_ok=True)

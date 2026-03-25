@@ -217,6 +217,21 @@ class UserProfileStore:
                 return item
         return None
 
+    async def list_user_ids(self) -> list[str]:
+        await self.initialize()
+        rows: list[str] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT user_id
+                FROM user_profiles
+                ORDER BY user_id
+                """
+            ) as cursor:
+                async for (user_id,) in cursor:
+                    rows.append(str(user_id))
+        return rows
+
     async def set_primary_channel(self, user_id: str, channel_name: str) -> None:
         await self.initialize()
         async with aiosqlite.connect(self.db_path) as db:

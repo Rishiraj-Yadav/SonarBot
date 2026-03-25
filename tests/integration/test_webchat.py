@@ -147,3 +147,17 @@ def test_webchat_browser_api_exposes_state_tabs_logs_downloads_and_profiles(app_
         assert logs.json()["logs"][0]["message"] == "ready"
         assert downloads.json()["downloads"][0]["filename"] == "report.csv"
         assert profiles.json()["profiles"][0]["site_name"] == "example.com"
+
+
+def test_webchat_context_engine_api_exposes_engine_status(app_config) -> None:
+    app_config.context_engine.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app) as client:
+        response = client.get("/api/context-engine/state")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["engine"]["enabled"] is True
+        assert "snapshot_dir" in payload["engine"]

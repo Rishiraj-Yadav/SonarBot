@@ -30,6 +30,7 @@ from assistant.channels.base import ChannelMessage
 from assistant.channels.telegram.adapter import TelegramChannel
 from assistant.channels.webchat import get_webchat_device_id
 from assistant.config import AppConfig, load_config
+from assistant.context_engine import ContextEngine
 from assistant.gateway.auth import authenticate_token
 from assistant.gateway.connection_manager import ConnectionManager
 from assistant.gateway.device_registry import DeviceRegistry
@@ -81,6 +82,7 @@ class GatewayServices:
     user_profiles: UserProfileStore
     automation_store: AutomationStore
     automation_engine: AutomationEngine
+    context_engine: ContextEngine
     system_access_manager: SystemAccessManager
     browser_runtime: Any
 
@@ -192,6 +194,16 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             notification_dispatcher,
         )
         await automation_engine.initialize()
+        context_engine = ContextEngine(
+            runtime_config,
+            model_provider=provider,
+            memory_manager=memory_manager,
+            session_manager=session_manager,
+            oauth_token_manager=oauth_token_manager,
+            automation_store=automation_store,
+            notification_dispatcher=notification_dispatcher,
+            user_profiles=user_profiles,
+        )
         router.automation_engine = automation_engine
         automation_scheduler = AutomationScheduler(runtime_config, automation_engine)
         automation_engine.set_scheduler(automation_scheduler)
@@ -225,6 +237,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles=user_profiles,
             automation_store=automation_store,
             automation_engine=automation_engine,
+            context_engine=context_engine,
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
         )
@@ -238,6 +251,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         for channel in channels:
             connection_manager.register_channel(channel)
             await channel.start()
+        await context_engine.start()
         await _run_startup_hooks(app.state.services)
         try:
             yield
@@ -249,6 +263,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             await heartbeat_service.stop()
             if automation_scheduler is not None:
                 await automation_scheduler.stop()
+            await context_engine.stop()
             await agent_loop.stop()
             await tool_registry.close()
             await prompt_builder.stop()
@@ -405,7 +420,26 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                 "heartbeat_interval_minutes": services.config.automation.heartbeat_interval_minutes,
                 "cron_jobs": [job.model_dump() for job in services.config.automation.cron_jobs],
             },
+            "context_engine": {
+                "enabled": services.config.context_engine.enabled,
+                "interval_minutes": services.config.context_engine.interval_minutes,
+            },
         }
+
+    @app.get("/api/context-engine/state")
+    async def context_engine_state(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        return {
+            "engine": services.context_engine.status(),
+            "snapshot": await services.context_engine.latest_snapshot(user_id),
+        }
+
+    @app.post("/api/context-engine/run")
+    async def context_engine_run() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        return {"ok": True, "result": await services.context_engine.run_once()}
 
     @app.get("/api/system-access/approvals")
     async def system_access_approvals(request: Request, limit: int = 20) -> dict[str, Any]:

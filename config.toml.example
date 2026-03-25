@@ -51,6 +51,20 @@ default_action = "deny"
 inbox_retention_days = 30
 default_severity = "info"
 
+[context_engine]
+enabled = false
+interval_minutes = 180
+recent_session_message_limit = 6
+session_count_limit = 4
+gmail_thread_limit = 5
+calendar_event_limit = 6
+max_notifications_per_run = 2
+min_confidence = 0.82
+min_urgency = 0.55
+dedupe_days = 7
+snapshot_subdir = "context_engine/life_state"
+insights_subdir = "context_engine/insights"
+
 [[automation.rules]]
 name = "daily-briefing"
 trigger = "cron"
