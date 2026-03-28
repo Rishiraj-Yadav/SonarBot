@@ -12,7 +12,7 @@
 ### `[agent]`
 
 - `workspace_dir`: path, required
-- `model`: string, default `gemini-2.0-flash`
+- `model`: string, default `gemini-2.5-pro`
 - `max_tokens`: integer, default `2048`
 - `context_window`: integer, default `32768`
 - `max_sessions_per_key`: integer, default `20`

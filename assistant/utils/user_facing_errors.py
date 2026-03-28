@@ -43,6 +43,10 @@ def sanitize_error_text(text: str, *, fallback: str = "Something went wrong whil
 
     lower = normalized.lower()
     status_match = re.search(r"\b(4\d\d|5\d\d)\b", normalized)
+    if "reported as leaked" in lower and "api key" in lower:
+        return "The configured Gemini API key was revoked as leaked. Update llm.gemini_api_key and restart SonarBot."
+    if "gemini rejected the configured api key" in lower:
+        return "Gemini rejected the configured API key. Update llm.gemini_api_key and restart SonarBot."
     if any(
         marker in lower
         for marker in (

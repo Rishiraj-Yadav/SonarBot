@@ -58,9 +58,14 @@ chroma/
 
 # Generated workspace artifacts
 workspace/inbox/
+workspace/hooks/
 workspace/browser/
 workspace/sandbox/
 workspace/memory/
+workspace/browser/
+# workspace/browser_sessions/
+workspace/context_engine/
+
 
 # WebChat / Node / Next.js
 webchat/node_modules/

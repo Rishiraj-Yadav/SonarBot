@@ -50,7 +50,8 @@ def _load_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     with path.open("rb") as handle:
-        return tomllib.load(handle)
+        raw = handle.read()
+    return tomllib.loads(raw.decode("utf-8-sig"))
 
 
 def load_config(config_path: Path | None = None, dotenv_path: Path | None = None) -> AppConfig:

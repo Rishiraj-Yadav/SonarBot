@@ -1064,6 +1064,68 @@ async def test_router_browser_commands_are_available_for_channel_use(app_config)
 
 
 @pytest.mark.asyncio
+async def test_router_browser_macros_respect_disabled_flag(app_config) -> None:
+    app_config.browser_workflows.macro_shortcuts_enabled = False
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-browser-macro-disabled",
+        request_id="req-browser-macro-disabled",
+        session_key="telegram:123",
+        message="/browser macros",
+        metadata={"trace_id": "trace-browser-macro-disabled", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is False
+    assert "disabled" in response.error.lower()
+
+
+def test_router_compose_browser_workflow_response_dedupes_progress(app_config) -> None:
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+    result = type(
+        "WorkflowResultStub",
+        (),
+        {
+            "progress_lines": ["Opened YouTube."],
+            "response_text": "Opened YouTube in tab-1.",
+        },
+    )()
+
+    response = router._compose_browser_workflow_response(result)
+
+    assert response == "Opened YouTube in tab-1."
+
+
+@pytest.mark.asyncio
 async def test_router_cron_add_list_pause_resume_delete_flow(app_config) -> None:
     automation_engine = DummyAutomationEngine()
     router = GatewayRouter(

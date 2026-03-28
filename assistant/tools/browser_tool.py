@@ -250,6 +250,50 @@ def build_browser_tools(
     async def browser_logs(payload: dict[str, Any]) -> dict[str, Any]:
         return {"logs": runtime.list_logs(limit=int(payload.get("limit", 50)))}
 
+    async def browser_scroll(payload: dict[str, Any]) -> dict[str, Any]:
+        user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+            headless=headless,
+        )
+        direction = str(payload.get("direction", "down")).strip().lower()
+        pixels = int(payload.get("pixels", 600))
+        to_bottom = bool(payload.get("to_bottom", False))
+        to_top = bool(payload.get("to_top", False))
+        result = await runtime.scroll_page(
+            page,
+            direction=direction,
+            pixels=pixels,
+            to_bottom=to_bottom,
+            to_top=to_top,
+        )
+        return {"tab_id": runtime.current_tab_id, **result}
+
+    async def browser_media_control(payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action", "play")).strip().lower()
+        seek_seconds = int(payload.get("seek_seconds", 10))
+        user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
+        page = await runtime.get_page(
+            tab_id=optional_string(payload.get("tab_id")),
+            profile_name=optional_string(payload.get("profile_name")),
+            user_id=user_id,
+            headless=headless,
+        )
+        result = await runtime.media_control(page, action, seek_seconds=seek_seconds)
+        return {"tab_id": runtime.current_tab_id, **result}
+
+    async def browser_session_health_check(payload: dict[str, Any]) -> dict[str, Any]:
+        site_name = str(payload.get("site_name", "")).strip()
+        if not site_name:
+            raise RuntimeError("browser_session_health_check requires 'site_name'.")
+        profile_name = str(payload.get("profile_name", "default")).strip() or "default"
+        user_id = optional_string(payload.get("user_id"))
+        return await runtime.session_health_check(site_name, profile_name, user_id=user_id)
+
     async def browser_extract_table(payload: dict[str, Any]) -> dict[str, Any]:
         selector = optional_string(payload.get("selector"))
         user_id = optional_string(payload.get("user_id"))
@@ -329,5 +373,55 @@ def build_browser_tools(
         ToolDefinition(name="browser_logs", description="List recent browser console and network log entries.", parameters={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "default": 50}}}, handler=browser_logs),
         ToolDefinition(name="browser_extract_table", description="Extract tabular data from the current page or a selected table element.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "max_rows": {"type": "integer", "minimum": 1, "default": 25}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}}, handler=browser_extract_table),
         ToolDefinition(name="browser_fill_form", description="Fill multiple form fields in the current page using resilient locator fallbacks.", parameters={"type": "object", "properties": {"fields": {"type": "object", "additionalProperties": {"type": "string"}}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["fields"]}, handler=browser_fill_form),
+        ToolDefinition(
+            name="browser_scroll",
+            description="Scroll the current browser page up, down, to the top, or to the bottom.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["up", "down"], "default": "down"},
+                    "pixels": {"type": "integer", "minimum": 50, "default": 600},
+                    "to_top": {"type": "boolean", "default": False},
+                    "to_bottom": {"type": "boolean", "default": False},
+                    "tab_id": {"type": "string"},
+                    "profile_name": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["headless", "headed"]},
+                },
+            },
+            handler=browser_scroll,
+        ),
+        ToolDefinition(
+            name="browser_media_control",
+            description="Control an HTML5 video or audio element on the current page (play, pause, mute, unmute, seek, back, fullscreen).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["play", "pause", "mute", "unmute", "seek", "back", "fullscreen"],
+                        "default": "play",
+                    },
+                    "seek_seconds": {"type": "integer", "minimum": 1, "default": 10},
+                    "tab_id": {"type": "string"},
+                    "profile_name": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["headless", "headed"]},
+                },
+                "required": ["action"],
+            },
+            handler=browser_media_control,
+        ),
+        ToolDefinition(
+            name="browser_session_health_check",
+            description="Proactively verify that a saved browser login session is still authenticated by visiting the site.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "site_name": {"type": "string"},
+                    "profile_name": {"type": "string", "default": "default"},
+                },
+                "required": ["site_name"],
+            },
+            handler=browser_session_health_check,
+        ),
     ]
     return tools, runtime

@@ -183,6 +183,45 @@ def test_browser_runtime_hides_mismatched_active_profile_and_dedupes_tabs(app_co
     assert state["tabs"][0]["tab_id"] == "tab-4"
 
 
+def test_browser_runtime_current_state_prefers_mode_with_real_active_tab(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+    runtime._activate_mode("headed")
+    runtime.current_tab_id = None
+    runtime.current_headless = False
+    runtime._mode_states["headless"].current_tab_id = "tab-2"
+    runtime._mode_states["headless"].tabs["tab-2"] = BrowserTabState(
+        tab_id="tab-2",
+        page=None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        title="LeetCode",
+        url="https://leetcode.com/problemset/",
+    )
+
+    state = runtime.current_state()
+
+    assert state["current_mode"] == "headless"
+    assert state["current_tab_id"] == "tab-2"
+    assert state["active_tab"]["title"] == "LeetCode"
+
+
+def test_browser_runtime_matches_short_site_name_against_full_host(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+    runtime._activate_mode("headed")
+    runtime.current_tab_id = "tab-7"
+    runtime._tabs["tab-7"] = BrowserTabState(
+        tab_id="tab-7",
+        page=None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        title="YouTube",
+        url="https://www.youtube.com/watch?v=abc123",
+    )
+
+    match = runtime.find_matching_tab(site_name="youtube")
+
+    assert match is not None
+    assert match["tab_id"] == "tab-7"
+
+
 def test_browser_runtime_filters_noisy_logs_and_redacts_urls(app_config) -> None:
     _tools, runtime = build_browser_tools(app_config)
     runtime._recent_logs.extend(
@@ -220,6 +259,32 @@ def test_browser_runtime_filters_noisy_logs_and_redacts_urls(app_config) -> None
     assert ";jsessionid=" not in logs[0]["message"]
     assert "?token=" not in logs[0]["message"]
     assert ";jsessionid=" not in logs[0]["url"]
+
+
+class _WaitPage:
+    def __init__(self, *, fail_on: str | None = None) -> None:
+        self.fail_on = fail_on
+        self.calls: list[tuple[str, int]] = []
+        self.timeouts: list[int] = []
+
+    async def wait_for_load_state(self, state: str, timeout: int) -> None:
+        self.calls.append((state, timeout))
+        if self.fail_on == state:
+            raise RuntimeError(f"{state} timeout")
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        self.timeouts.append(timeout)
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_post_action_wait_tolerates_networkidle_timeout(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+    page = _WaitPage(fail_on="networkidle")
+
+    await runtime.post_action_wait(page, "networkidle", 30)
+
+    assert page.calls == [("networkidle", 30000)]
+    assert page.timeouts == [400]
 
 
 class _BlockingPage:

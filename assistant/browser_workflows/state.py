@@ -15,6 +15,7 @@ def empty_browser_task_state() -> dict[str, Any]:
         "active_task": {},
         "pending_confirmation": {},
         "pending_login": {},
+        "pending_disambiguation": {},
         "next_task_mode_override": "",
     }
 
@@ -67,6 +68,7 @@ def browser_task_state_update(
     active_task: dict[str, Any] | None = None,
     pending_confirmation: dict[str, Any] | None = None,
     pending_login: dict[str, Any] | None = None,
+    pending_disambiguation: dict[str, Any] | None = None,
     next_task_mode_override: str | None = None,
 ) -> dict[str, Any]:
     state = empty_browser_task_state()
@@ -76,6 +78,8 @@ def browser_task_state_update(
         state["pending_confirmation"] = deepcopy(pending_confirmation)
     if pending_login:
         state["pending_login"] = deepcopy(pending_login)
+    if pending_disambiguation:
+        state["pending_disambiguation"] = deepcopy(pending_disambiguation)
     if next_task_mode_override:
         state["next_task_mode_override"] = str(next_task_mode_override).strip().lower()
     return {

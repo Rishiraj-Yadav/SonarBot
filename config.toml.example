@@ -6,7 +6,7 @@ rate_limit_per_minute = 20
 
 [agent]
 workspace_dir = "workspace"
-model = "gemini-2.0-flash"
+model = "gemini-2.5-pro"
 max_tokens = 2048
 context_window = 32768
 max_sessions_per_key = 20

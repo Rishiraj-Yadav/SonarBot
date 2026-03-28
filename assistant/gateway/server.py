@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -143,7 +144,15 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_viewer_checker=lambda user_id: bool(connection_manager.active_user_connections(user_id, "webchat")),
         )
         browser_runtime = getattr(tool_registry, "browser_runtime", None)
-        browser_workflow_engine = BrowserWorkflowEngine(runtime_config, tool_registry)
+        # Build a chunk_emitter so the engine can stream live progress to the WebChat UI
+        async def _browser_chunk_emitter(conn_id: str, event_name: str, payload: dict) -> None:
+            if conn_id:
+                await connection_manager.send_event(conn_id, event_name, payload)
+        browser_workflow_engine = BrowserWorkflowEngine(
+            runtime_config,
+            tool_registry,
+            chunk_emitter=_browser_chunk_emitter,
+        )
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
@@ -246,6 +255,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_runtime=browser_runtime,
             browser_workflow_engine=browser_workflow_engine,
         )
+        browser_health_task: asyncio.Task[None] | None = None
         await session_manager.start_pruning_task()
         await prompt_builder.start()
         await skill_watcher.start()
@@ -257,10 +267,32 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             connection_manager.register_channel(channel)
             await channel.start()
         await context_engine.start()
+        if browser_runtime is not None:
+            async def _run_browser_health_checks() -> None:
+                try:
+                    sessions = list(browser_runtime.list_sessions())
+                    checks = []
+                    for session in sessions:
+                        if str(session.get("status", "active")).lower() != "active":
+                            continue
+                        site_name = str(session.get("site_name", "")).strip()
+                        profile_name = str(session.get("profile_name", "default")).strip() or "default"
+                        if not site_name:
+                            continue
+                        checks.append(browser_runtime.session_health_check(site_name, profile_name))
+                    if checks:
+                        await asyncio.gather(*checks, return_exceptions=True)
+                except Exception:
+                    return
+
+            browser_health_task = asyncio.create_task(_run_browser_health_checks())
         await _run_startup_hooks(app.state.services)
         try:
             yield
         finally:
+            if browser_health_task is not None and not browser_health_task.done():
+                browser_health_task.cancel()
+                await asyncio.gather(browser_health_task, return_exceptions=True)
             await agent_loop.wait_for_idle(timeout=30)
             await connection_manager.close_all()
             for channel in channels:
@@ -509,6 +541,44 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         services: GatewayServices = app.state.services
         runtime = services.browser_runtime
         return {"profiles": runtime.list_sessions() if runtime is not None else []}
+
+    @app.get("/api/browser/live-screenshot")
+    async def browser_live_screenshot() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        if runtime is None:
+            return {"screenshot": None}
+        try:
+            payload = await runtime.latest_screenshot_payload()
+        except Exception:
+            payload = None
+        return {"screenshot": payload}
+
+    @app.post("/webchat/browser/click")
+    async def webchat_browser_click(request: Request) -> dict[str, Any]:
+        """Click-passthrough from the browser screenshot panel in WebChat."""
+        services: GatewayServices = app.state.services
+        runtime = services.browser_runtime
+        if runtime is None:
+            return {"ok": False, "error": "Browser runtime not available."}
+        body = await request.json()
+        tab_id = str(body.get("tab_id", "")).strip() or None
+        x = body.get("x")
+        y = body.get("y")
+        selector = str(body.get("selector", "")).strip() or None
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        try:
+            if selector:
+                result = await runtime.click_selector(selector, tab_id=tab_id, user_id=user_id)
+            elif x is not None and y is not None:
+                result = await runtime.click_coordinate(int(x), int(y), tab_id=tab_id, user_id=user_id)
+            else:
+                return {"ok": False, "error": "Provide 'selector' or 'x'+'y' coordinates."}
+            await runtime.refresh_active_tab(user_id)
+            return {"ok": True, "result": result, "tab_id": runtime.current_tab_id}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     @app.post("/webhooks/{name}")
     async def receive_webhook(name: str, request: Request) -> dict[str, Any]:

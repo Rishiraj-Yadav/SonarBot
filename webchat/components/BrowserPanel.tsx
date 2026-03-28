@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type MouseEvent, useEffect, useRef, useState } from "react";
 
 import { fetchJson } from "../lib/gateway_client";
 
@@ -58,6 +58,14 @@ type BrowserWorkflow = {
   message?: string;
 };
 
+type BrowserScreenshot = {
+  image_data_url?: string;
+  tab_id?: string;
+  url?: string;
+  title?: string;
+  mode?: string;
+};
+
 function shortTime(value: string) {
   if (!value) {
     return "";
@@ -77,27 +85,69 @@ export function BrowserPanel() {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [screenshot, setScreenshot] = useState("");
   const [workflow, setWorkflow] = useState<BrowserWorkflow | null>(null);
+  const screenshotRef = useRef<HTMLImageElement | null>(null);
+
+  const fetchBrowserData = async () => {
+    const [stateData, tabsData, logsData, downloadsData, profilesData, screenshotData] = await Promise.all([
+      fetchJson<{ state: BrowserState }>("/api/browser/state"),
+      fetchJson<{ tabs: BrowserTab[] }>("/api/browser/tabs"),
+      fetchJson<{ logs: BrowserLog[] }>("/api/browser/logs?limit=8"),
+      fetchJson<{ downloads: BrowserDownload[] }>("/api/browser/downloads?limit=8"),
+      fetchJson<{ profiles: BrowserProfile[] }>("/api/browser/profiles"),
+      fetchJson<{ screenshot: BrowserScreenshot | null }>("/api/browser/live-screenshot"),
+    ]);
+    return { stateData, tabsData, logsData, downloadsData, profilesData, screenshotData };
+  };
+
+  const applyBrowserData = (data: Awaited<ReturnType<typeof fetchBrowserData>>) => {
+    const { stateData, tabsData, logsData, downloadsData, profilesData, screenshotData } = data;
+    setState(stateData.state ?? null);
+    setTabs(tabsData.tabs ?? []);
+    setLogs(logsData.logs ?? []);
+    setDownloads(downloadsData.downloads ?? []);
+    setProfiles(profilesData.profiles ?? []);
+    if (screenshotData.screenshot?.image_data_url) {
+      setScreenshot(screenshotData.screenshot.image_data_url);
+    }
+  };
+
+  const handleScreenshotClick = async (event: MouseEvent<HTMLImageElement>) => {
+    const element = screenshotRef.current;
+    if (!element || !state?.current_tab_id) {
+      return;
+    }
+    const bounds = element.getBoundingClientRect();
+    if (!bounds.width || !bounds.height || !element.naturalWidth || !element.naturalHeight) {
+      return;
+    }
+    const x = Math.round(((event.clientX - bounds.left) / bounds.width) * element.naturalWidth);
+    const y = Math.round(((event.clientY - bounds.top) / bounds.height) * element.naturalHeight);
+    try {
+      const response = await fetch("http://localhost:8765/webchat/browser/click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ x, y, tab_id: state.current_tab_id }),
+      });
+      if (!response.ok) {
+        return;
+      }
+      applyBrowserData(await fetchBrowserData());
+    } catch {
+      return;
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
 
     const load = async () => {
       try {
-        const [stateData, tabsData, logsData, downloadsData, profilesData] = await Promise.all([
-          fetchJson<{ state: BrowserState }>("/api/browser/state"),
-          fetchJson<{ tabs: BrowserTab[] }>("/api/browser/tabs"),
-          fetchJson<{ logs: BrowserLog[] }>("/api/browser/logs?limit=8"),
-          fetchJson<{ downloads: BrowserDownload[] }>("/api/browser/downloads?limit=8"),
-          fetchJson<{ profiles: BrowserProfile[] }>("/api/browser/profiles"),
-        ]);
+        const data = await fetchBrowserData();
         if (!mounted) {
           return;
         }
-        setState(stateData.state ?? null);
-        setTabs(tabsData.tabs ?? []);
-        setLogs(logsData.logs ?? []);
-        setDownloads(downloadsData.downloads ?? []);
-        setProfiles(profilesData.profiles ?? []);
+        applyBrowserData(data);
       } catch {
         return;
       }
@@ -229,7 +279,13 @@ export function BrowserPanel() {
           </div>
           <div className="overflow-hidden rounded-[1.35rem] border border-line/80 bg-slate-950">
             {screenshot ? (
-              <img src={screenshot} alt="Live browser" className="h-64 w-full object-cover" />
+              <img
+                ref={screenshotRef}
+                src={screenshot}
+                alt="Live browser"
+                className="h-64 w-full cursor-crosshair object-cover"
+                onClick={handleScreenshotClick}
+              />
             ) : (
               <div className="flex h-64 items-center justify-center text-sm text-slate-300">No live screenshot yet.</div>
             )}

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 
 from fastapi.testclient import TestClient
 
 from assistant.gateway.server import create_app
 from assistant.models.base import ModelResponse
-from assistant.tools.browser_runtime import BrowserTabState, profile_key_for
+from assistant.tools.browser_runtime import BrowserRuntime, BrowserTabState, profile_key_for
 from tests.helpers import FakeProvider
 
 
@@ -161,3 +162,94 @@ def test_webchat_context_engine_api_exposes_engine_status(app_config) -> None:
         payload = response.json()
         assert payload["engine"]["enabled"] is True
         assert "snapshot_dir" in payload["engine"]
+
+
+def test_webchat_browser_click_endpoint_invokes_runtime(app_config, monkeypatch) -> None:
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    called: dict[str, object] = {}
+
+    async def fake_click_coordinate(self, x: int, y: int, *, tab_id: str | None = None, user_id: str | None = None):
+        called["click"] = {"x": x, "y": y, "tab_id": tab_id, "user_id": user_id}
+        return {"clicked": True}
+
+    async def fake_refresh_active_tab(self, user_id: str | None = None):
+        called["refresh_user_id"] = user_id
+
+    monkeypatch.setattr(BrowserRuntime, "click_coordinate", fake_click_coordinate)
+    monkeypatch.setattr(BrowserRuntime, "refresh_active_tab", fake_refresh_active_tab)
+
+    with TestClient(app) as client:
+        runtime = app.state.services.browser_runtime
+        runtime.current_tab_id = "tab-9"
+
+        response = client.post("/webchat/browser/click", json={"x": 42, "y": 84, "tab_id": "tab-9"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert called["click"] == {"x": 42, "y": 84, "tab_id": "tab-9", "user_id": "default"}
+        assert called["refresh_user_id"] == "default"
+
+
+def test_webchat_browser_live_screenshot_endpoint_returns_payload(app_config, monkeypatch) -> None:
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    async def fake_latest_screenshot_payload(self):
+        return {
+            "tab_id": "tab-3",
+            "url": "https://leetcode.com/problemset/",
+            "title": "LeetCode",
+            "mode": "headless",
+            "image_data_url": "data:image/jpeg;base64,abc123",
+        }
+
+    monkeypatch.setattr(BrowserRuntime, "latest_screenshot_payload", fake_latest_screenshot_payload)
+
+    with TestClient(app) as client:
+        response = client.get("/api/browser/live-screenshot")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["screenshot"]["tab_id"] == "tab-3"
+        assert payload["screenshot"]["image_data_url"] == "data:image/jpeg;base64,abc123"
+
+
+def test_startup_browser_session_health_check_is_best_effort(app_config, monkeypatch) -> None:
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    index_path = app_config.agent.workspace_dir / app_config.tools.browser_profiles_subdir / "index.json"
+    profile_key = profile_key_for("example.com", "work")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps(
+            {
+                profile_key: {
+                    "profile_key": profile_key,
+                    "site_name": "example.com",
+                    "profile_name": "work",
+                    "domain": "example.com",
+                    "storage_path": str(app_config.agent.workspace_dir / app_config.tools.browser_profiles_subdir / "example-work.json"),
+                    "status": "active",
+                    "last_used_at": "2026-03-24T09:00:00+00:00",
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    seen: list[tuple[str, str]] = []
+
+    async def fake_session_health_check(self, site_name: str, profile_name: str = "default", user_id: str | None = None):
+        seen.append((site_name, profile_name))
+        return {"site_name": site_name, "profile_name": profile_name, "status": "active"}
+
+    monkeypatch.setattr(BrowserRuntime, "session_health_check", fake_session_health_check)
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app):
+        time.sleep(0.1)
+
+    assert ("example.com", "work") in seen

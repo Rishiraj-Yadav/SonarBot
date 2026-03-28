@@ -21,3 +21,12 @@ def test_sanitize_error_text_hides_raw_provider_error() -> None:
     )
 
     assert sanitize_error_text(raw) == "The model request could not be completed right now. Please try again."
+
+
+def test_sanitize_error_text_maps_leaked_gemini_key_to_actionable_message() -> None:
+    raw = (
+        "Gemini rejected the configured API key because it was reported as leaked. "
+        "Replace llm.gemini_api_key in C:\\Users\\Ritesh\\.assistant\\config.toml and restart SonarBot."
+    )
+
+    assert sanitize_error_text(raw) == "The configured Gemini API key was revoked as leaked. Update llm.gemini_api_key and restart SonarBot."

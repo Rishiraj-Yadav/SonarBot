@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import re
 
 import pytest
 
@@ -99,6 +100,9 @@ class FakeBrowserRuntime:
     async def press_key(self, _page, key: str, **_kwargs) -> None:
         if key.lower() == "enter":
             return None
+
+    async def wait_for_url_match(self, _page, pattern: str, *, timeout_seconds: int = 10) -> bool:
+        return re.search(pattern, self.page.url, flags=re.IGNORECASE) is not None
 
     async def extract_search_results(self, _page, **_kwargs) -> list[dict[str, object]]:
         return list(self.results)
@@ -460,6 +464,47 @@ async def test_browser_workflow_nlp_matches_youtube_latest_request(app_config) -
 
 
 @pytest.mark.asyncio
+async def test_browser_workflow_nlp_matches_youtube_followup_on_active_site(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.page.url = "https://www.youtube.com"
+    runtime._set_active_tab("tab-1", "https://www.youtube.com", "headed", title="YouTube")
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "now search mr beast video and play it",
+        runtime_state=runtime.current_state(),
+        previous_state={
+            "active_task": {
+                "recipe_name": "site_open_exact_url_or_path",
+                "site_name": "youtube",
+                "target_url": "https://www.youtube.com",
+                "execution_mode": "headed",
+                "awaiting_followup": "site_action",
+            }
+        },
+    )
+
+    assert match is not None
+    assert match.recipe_name == "youtube_search_play"
+    assert match.query == "mr beast video"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_tolerates_none_active_tab_in_runtime_state(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "pause the video",
+        runtime_state={"active_tab": None, "tabs": [], "current_mode": "headless", "headless": True},
+        previous_state={},
+        force=True,
+    )
+
+    assert match is None
+
+
+@pytest.mark.asyncio
 async def test_browser_workflow_nlp_applies_execution_override(app_config) -> None:
     runtime = FakeBrowserRuntime()
     nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
@@ -527,6 +572,40 @@ async def test_browser_workflow_engine_runs_google_search_open(app_config) -> No
 
 
 @pytest.mark.asyncio
+async def test_browser_workflow_engine_keeps_headed_mode_for_same_site_followup(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [
+        {"title": "Trapped On An Island Until I Build A Boat", "href": "https://www.youtube.com/watch?v=abc123"},
+    ]
+    runtime.page.url = "https://www.youtube.com"
+    runtime.current_headless = False
+    runtime.current_mode_value = "headed"
+    runtime._set_active_tab("tab-1", "https://www.youtube.com", "headed", title="YouTube")
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    result = await engine.maybe_run(
+        "now search mr beast video and play it",
+        user_id="default",
+        session_key="telegram:123",
+        channel="telegram",
+        previous_state={
+            "active_task": {
+                "recipe_name": "site_open_exact_url_or_path",
+                "site_name": "youtube",
+                "target_url": "https://www.youtube.com",
+                "execution_mode": "headed",
+                "awaiting_followup": "site_action",
+            }
+        },
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert runtime.requested_headless[-1] is False
+    assert runtime.page.url == "https://www.youtube.com/watch?v=abc123"
+
+
+@pytest.mark.asyncio
 async def test_browser_workflow_engine_blocks_login_favoring_site_without_profile(app_config) -> None:
     runtime = FakeBrowserRuntime()
     engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
@@ -590,17 +669,34 @@ async def test_browser_workflow_engine_can_open_github_issue_composer(app_config
     runtime = FakeBrowserRuntime()
     engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
 
-    result = await engine.maybe_run(
+    preview = await engine.maybe_run(
         "open issue on the SonarBot repo",
         user_id="default",
         session_key="telegram:123",
         channel="telegram",
     )
 
-    assert result is not None
-    assert result.status == "blocked"
-    assert "issue composer" in result.response_text.lower()
-    assert result.state_update["browser_task_state"]["pending_confirmation"]["action_type"] == "submit"
+    assert preview is not None
+    assert preview.status == "needs_followup"
+    assert "Plan preview" in preview.response_text
+
+    confirmed = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="browser_continue_last_task",
+            confidence=0.99,
+            site_name="github",
+            action="confirm",
+            details={"task_state": preview.state_update["browser_task_state"]},
+        ),
+        user_id="default",
+        session_key="telegram:123",
+        channel="telegram",
+        previous_state=preview.state_update["browser_task_state"],
+    )
+
+    assert confirmed.status == "blocked"
+    assert "issue composer" in confirmed.response_text.lower()
+    assert confirmed.state_update["browser_task_state"]["pending_confirmation"]["action_type"] == "submit"
     assert runtime.current_mode_value == "headed"
 
 
@@ -621,6 +717,197 @@ async def test_browser_workflow_engine_inspects_github_repo_via_api(app_config) 
     assert result.status == "completed"
     assert "Rishiraj-Yadav/SonarBot" in result.response_text
     assert "Open pull requests: 0" in result.response_text
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_returns_disambiguation_for_mid_confidence_llm_match(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(
+        app_config,
+        FakeToolRegistry(
+            runtime,
+            llm_task_response={
+                "recipe_name": "page_read_summarize",
+                "confidence": 0.7,
+                "site_name": "example.com",
+                "query": "example.com/docs",
+                "action": "summarize",
+            },
+        ),
+    )
+
+    result = await engine.maybe_run(
+        "summarize that website",
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+    )
+
+    assert result is not None
+    assert result.status == "needs_followup"
+    assert "Did you mean" in result.response_text
+    assert result.state_update["browser_task_state"]["pending_disambiguation"]["recipe_name"] == "page_read_summarize"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_confirmed_disambiguation_executes_instead_of_looping(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [{"title": "News result", "href": "https://news.example.com/usa-vs-iran"}]
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+    previous_state = {
+        "pending_disambiguation": {
+            "recipe_name": "google_search_open",
+            "site_name": "google",
+            "query": "news about the usa vs iran",
+            "action": "open_result",
+            "open_first_result": False,
+            "details": {"needs_disambiguation": True, "target_url": "https://google.com"},
+        }
+    }
+
+    result = await engine.maybe_run(
+        "yes",
+        user_id="default",
+        session_key="telegram:123",
+        channel="telegram",
+        previous_state=previous_state,
+    )
+
+    assert result is not None
+    assert result.status == "completed"
+    assert "Opened Google" in result.response_text
+    assert runtime.page.url == "https://news.example.com/usa-vs-iran"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_lowers_threshold_for_short_followup_with_active_task(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(
+        app_config,
+        FakeToolRegistry(
+            runtime,
+            llm_task_response={
+                "recipe_name": "google_search_open",
+                "confidence": 0.65,
+                "site_name": "google",
+                "query": "SonarBot GitHub",
+                "action": "open_result",
+                "open_first_result": True,
+            },
+        ),
+    )
+
+    match = await engine.match_message(
+        "that one",
+        previous_state={
+            "active_task": {
+                "recipe_name": "google_search_open",
+                "site_name": "google",
+                "query": "SonarBot GitHub",
+                "awaiting_followup": "site_action",
+            }
+        },
+        force=True,
+    )
+
+    assert match is not None
+    assert match.recipe_name == "google_search_open"
+    assert match.action != "disambiguate"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_streams_live_chunks_for_steps(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [{"title": "SonarBot GitHub", "href": "https://github.com/example/sonarbot"}]
+    chunk_events: list[tuple[str, str, dict[str, object]]] = []
+
+    async def chunk_emitter(connection_id: str, event_name: str, payload: dict[str, object]) -> None:
+        chunk_events.append((connection_id, event_name, payload))
+
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime), chunk_emitter=chunk_emitter)
+
+    result = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="google_search_open",
+            confidence=0.95,
+            site_name="google",
+            query="SonarBot GitHub",
+            action="open_result",
+            open_first_result=True,
+            details={},
+        ),
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+        connection_id="route-1",
+    )
+
+    assert result.status == "completed"
+    assert any(event_name == "agent.chunk" for _, event_name, _ in chunk_events)
+    assert any(payload["text"].startswith("🔄 ") for _, _, payload in chunk_events)
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_email_compose_requires_plan_preview_before_execution(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    preview = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="email_compose_send",
+            confidence=0.95,
+            site_name="gmail",
+            query="Quarterly update",
+            details={"to": "test@example.com", "subject": "Quarterly update", "body": "Hello there"},
+        ),
+        user_id="default",
+        session_key="telegram:123",
+        channel="telegram",
+        previous_state={},
+    )
+
+    assert preview.status == "needs_followup"
+    assert "Plan preview" in preview.response_text
+
+    confirmed = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="browser_continue_last_task",
+            confidence=0.99,
+            site_name="gmail",
+            action="confirm",
+            details={"task_state": preview.state_update["browser_task_state"]},
+        ),
+        user_id="default",
+        session_key="telegram:123",
+        channel="telegram",
+        previous_state=preview.state_update["browser_task_state"],
+    )
+
+    assert confirmed.status == "blocked"
+    assert runtime.current_mode_value == "headed"
+    assert confirmed.state_update["browser_task_state"]["pending_confirmation"]["action_type"] == "send"
+
+
+@pytest.mark.asyncio
+async def test_multi_tab_research_asks_for_explicit_urls(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    result = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="multi_tab_research",
+            confidence=0.9,
+            query="compare the top options",
+            details={},
+        ),
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+        previous_state={},
+    )
+
+    assert result.status == "needs_followup"
+    assert "Tell me the URLs" in result.response_text
 
 
 @pytest.mark.asyncio
@@ -702,6 +989,14 @@ async def test_browser_workflow_continue_switches_back_to_matching_site_for_pend
     assert "login still looks incomplete" in result.response_text.lower()
     assert runtime.current_tab_id == "tab-4"
     assert runtime.current_mode_value == "headed"
+
+
+def test_browser_workflow_engine_treats_site_aliases_as_same_site(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    assert engine._sites_match("leetcode.com", "leetcode") is True
+    assert engine._sites_match("https://leetcode.com/problems/", "leetcode") is True
 
 
 @pytest.mark.asyncio

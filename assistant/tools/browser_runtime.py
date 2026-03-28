@@ -165,6 +165,25 @@ class BrowserRuntime:
         state = self._state_for_mode(mode)
         return state.context is not None and bool(state.tabs)
 
+    def _preferred_mode(self) -> str:
+        self._snapshot_active_mode()
+        active_state = self._mode_states[self._active_mode]
+        if active_state.current_tab_id and active_state.current_tab_id in active_state.tabs:
+            return self._active_mode
+        for candidate in ("headed", "headless"):
+            state = self._mode_states[candidate]
+            if state.current_tab_id and state.current_tab_id in state.tabs:
+                return candidate
+        for candidate in ("headed", "headless"):
+            state = self._mode_states[candidate]
+            if state.tabs:
+                return candidate
+        return self._active_mode
+
+    def _preferred_state(self) -> tuple[str, BrowserModeState]:
+        mode = self._preferred_mode()
+        return mode, self._mode_states[mode]
+
     def _normalized_tab_url(self, url: str | None) -> str:
         if not url:
             return ""
@@ -190,6 +209,10 @@ class BrowserRuntime:
                 or site_host.endswith(f".{tab_host}")
             ):
                 return True
+            if tab_host and "." not in site_host:
+                tab_parts = [part for part in tab_host.split(".") if part and part != "www"]
+                if site_host in tab_parts:
+                    return True
         return False
 
     def find_matching_tab(
@@ -515,6 +538,8 @@ class BrowserRuntime:
 
     def list_tabs(self) -> list[dict[str, Any]]:
         self._snapshot_active_mode()
+        preferred_mode, preferred_state = self._preferred_state()
+        preferred_tab_id = preferred_state.current_tab_id if preferred_state.current_tab_id in preferred_state.tabs else None
         deduped: dict[str, dict[str, Any]] = {}
         for mode in ("headless", "headed"):
             state = self._mode_states[mode]
@@ -533,6 +558,11 @@ class BrowserRuntime:
                 if not existing_active and str(payload.get("mode", "")) == "headed" and str(existing.get("mode", "")) != "headed":
                     deduped[dedupe_key] = payload
         tabs = list(deduped.values())
+        if tabs and not any(bool(item.get("active")) for item in tabs) and preferred_tab_id:
+            for item in tabs:
+                if str(item.get("tab_id", "")) == preferred_tab_id and str(item.get("mode", "")) == preferred_mode:
+                    item["active"] = True
+                    break
         tabs.sort(key=lambda item: (not bool(item.get("active")), str(item.get("created_at", ""))), reverse=False)
         return tabs
 
@@ -565,17 +595,17 @@ class BrowserRuntime:
 
     def current_state(self) -> dict[str, Any]:
         self._snapshot_active_mode()
-        active_state = self._active_state()
+        active_mode, active_state = self._preferred_state()
         active_tab = (
-            self.tab_payload(active_state.current_tab_id, mode=self._active_mode)
+            self.tab_payload(active_state.current_tab_id, mode=active_mode)
             if active_state.current_tab_id and active_state.current_tab_id in active_state.tabs
             else None
         )
         profile = self._profile_for_active_tab(active_state, active_tab)
         return {
             "active": any(state.context is not None for state in self._mode_states.values()),
-            "headless": self._active_mode == "headless",
-            "current_mode": self._active_mode,
+            "headless": active_mode == "headless",
+            "current_mode": active_mode,
             "active_profile": profile,
             "current_tab_id": active_state.current_tab_id,
             "active_tab": active_tab,
@@ -648,12 +678,28 @@ class BrowserRuntime:
         headed_state = self._state_for_mode("headed")
         if headed_state.current_tab_id is None or headed_state.current_tab_id not in headed_state.tabs:
             return None
-        page = headed_state.tabs[headed_state.current_tab_id].page
-        screenshot_bytes = await page.screenshot(type="jpeg", quality=65)
+        return await self._tab_screenshot_payload("headed", headed_state.current_tab_id)
+
+    async def latest_screenshot_payload(self) -> dict[str, Any] | None:
+        mode, state = self._preferred_state()
+        if state.current_tab_id and state.current_tab_id in state.tabs:
+            return await self._tab_screenshot_payload(mode, state.current_tab_id)
+        if state.tabs:
+            first_tab_id = next(iter(state.tabs))
+            return await self._tab_screenshot_payload(mode, first_tab_id)
+        return None
+
+    async def _tab_screenshot_payload(self, mode: str, tab_id: str) -> dict[str, Any] | None:
+        state = self._state_for_mode(mode)
+        tab = state.tabs.get(tab_id)
+        if tab is None:
+            return None
+        screenshot_bytes = await tab.page.screenshot(type="jpeg", quality=65)
         return {
-            "tab_id": headed_state.current_tab_id,
-            "url": headed_state.tabs[headed_state.current_tab_id].url,
-            "title": headed_state.tabs[headed_state.current_tab_id].title,
+            "tab_id": tab.tab_id,
+            "url": tab.url,
+            "title": tab.title,
+            "mode": mode,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image_data_url": "data:image/jpeg;base64," + base64.b64encode(screenshot_bytes).decode("ascii"),
         }
@@ -664,21 +710,22 @@ class BrowserRuntime:
         snapshot: dict[str, Any] = {
             "url": page.url,
             "title": title,
-            "text": extract_visible_text(html)[:1600],
+            "text": extract_visible_text(html)[:4000],
             "buttons": [],
             "links": [],
             "inputs": [],
+            "headings": [],
         }
         if BeautifulSoup is not None:
             soup = BeautifulSoup(html, "html.parser")
-            snapshot["buttons"] = [item.get_text(" ", strip=True) for item in soup.find_all("button")[:8] if item.get_text(" ", strip=True)]
+            snapshot["buttons"] = [item.get_text(" ", strip=True) for item in soup.find_all("button")[:12] if item.get_text(" ", strip=True)]
             snapshot["links"] = [
                 item.get_text(" ", strip=True) or item.get("href", "")
-                for item in soup.find_all("a")[:8]
+                for item in soup.find_all("a")[:12]
                 if (item.get_text(" ", strip=True) or item.get("href", ""))
             ]
             inputs: list[str] = []
-            for item in soup.find_all(["input", "textarea", "select"])[:8]:
+            for item in soup.find_all(["input", "textarea", "select"])[:12]:
                 inputs.append(
                     item.get("aria-label")
                     or item.get("placeholder")
@@ -687,7 +734,376 @@ class BrowserRuntime:
                     or item.name
                 )
             snapshot["inputs"] = [value for value in inputs if value]
+            snapshot["headings"] = [
+                h.get_text(" ", strip=True)
+                for h in soup.find_all(["h1", "h2", "h3"])[:10]
+                if h.get_text(" ", strip=True)
+            ]
         return snapshot
+
+    async def page_summarize_rich(self, page: Any) -> dict[str, Any]:
+        """Return a rich structured summary of the current page for LLM consumption."""
+        title = await page.title()
+        html = await page.content()
+        full_text = extract_visible_text(html)
+        summary: dict[str, Any] = {
+            "url": page.url,
+            "title": title,
+            "text": full_text[:4000],
+            "word_count": len(full_text.split()),
+            "headings": [],
+            "links": [],
+            "inputs": [],
+            "buttons": [],
+            "images_count": 0,
+        }
+        if BeautifulSoup is not None:
+            soup = BeautifulSoup(html, "html.parser")
+            summary["headings"] = [
+                {"tag": h.name, "text": h.get_text(" ", strip=True)}
+                for h in soup.find_all(["h1", "h2", "h3"])[:15]
+                if h.get_text(" ", strip=True)
+            ]
+            summary["links"] = [
+                {"text": a.get_text(" ", strip=True) or a.get("href", ""), "href": a.get("href", "")}
+                for a in soup.find_all("a")[:20]
+                if a.get("href") and not str(a.get("href", "")).startswith("javascript:")
+            ]
+            inputs_raw = []
+            for item in soup.find_all(["input", "textarea", "select"])[:12]:
+                label = (
+                    item.get("aria-label")
+                    or item.get("placeholder")
+                    or item.get("name")
+                    or item.get("id")
+                    or item.name
+                )
+                if label:
+                    inputs_raw.append({"tag": item.name, "label": label, "type": item.get("type", "")})
+            summary["inputs"] = inputs_raw
+            summary["buttons"] = [
+                b.get_text(" ", strip=True)
+                for b in soup.find_all("button")[:15]
+                if b.get_text(" ", strip=True)
+            ]
+            summary["images_count"] = len(soup.find_all("img"))
+        return summary
+
+    async def auto_dismiss_consent(
+        self,
+        page: Any,
+        *,
+        site_name: str | None = None,
+        timeout_ms: int = 2000,
+    ) -> bool:
+        """Try to auto-click known consent/cookie accept buttons. Returns True if dismissed."""
+        from assistant.browser_workflows.site_adapters import get_site_adapter
+        adapter = get_site_adapter(site_name)
+        consent_selectors: list[str] = []
+        if adapter is not None and adapter.consent_accept_selectors:
+            consent_selectors.extend(adapter.consent_accept_selectors)
+        # Generic fallback selectors
+        consent_selectors.extend([
+            "button[aria-label*='Accept all' i]",
+            "button[aria-label*='Accept cookies' i]",
+            "button[aria-label*='Allow all' i]",
+            "button:has-text('Accept all')",
+            "button:has-text('Accept All')",
+            "button:has-text('Allow all')",
+            "button:has-text('Accept Cookies')",
+            "button:has-text('I agree')",
+            "button:has-text('I Accept')",
+            "button:has-text('Got it')",
+            "button.accept",
+            "button.js-accept",
+        ])
+        for selector in consent_selectors:
+            try:
+                locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                await locator.click(timeout=timeout_ms)
+                await page.wait_for_timeout(400)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def scroll_page(
+        self,
+        page: Any,
+        *,
+        direction: str = "down",
+        pixels: int = 600,
+        to_bottom: bool = False,
+        to_top: bool = False,
+    ) -> dict[str, Any]:
+        """Scroll the page by pixels or to top/bottom. Returns new scroll position."""
+        try:
+            if to_bottom:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            elif to_top:
+                await page.evaluate("window.scrollTo(0, 0)")
+            elif direction.lower() in {"up", "u"}:
+                await page.evaluate(f"window.scrollBy(0, -{pixels})")
+            else:
+                await page.evaluate(f"window.scrollBy(0, {pixels})")
+            await page.wait_for_timeout(300)
+            scroll_y = await page.evaluate("window.scrollY")
+            page_height = await page.evaluate("document.body.scrollHeight")
+            return {"scroll_y": scroll_y, "page_height": page_height, "at_bottom": scroll_y + 900 >= page_height}
+        except Exception as exc:
+            return {"error": str(exc), "scroll_y": 0}
+
+    async def media_control(
+        self,
+        page: Any,
+        action: str,
+        *,
+        seek_seconds: int = 0,
+    ) -> dict[str, Any]:
+        """Control an HTML5 video/audio element via JavaScript evaluation."""
+        action = action.strip().lower()
+        result: dict[str, Any] = {"action": action, "ok": False}
+        try:
+            if action == "play":
+                await page.evaluate("() => { const v = document.querySelector('video, audio'); if(v) v.play(); }")
+                result["ok"] = True
+            elif action == "pause":
+                await page.evaluate("() => { const v = document.querySelector('video, audio'); if(v) v.pause(); }")
+                result["ok"] = True
+            elif action == "mute":
+                await page.evaluate("() => { const v = document.querySelector('video, audio'); if(v) v.muted = true; }")
+                result["ok"] = True
+            elif action == "unmute":
+                await page.evaluate("() => { const v = document.querySelector('video, audio'); if(v) v.muted = false; }")
+                result["ok"] = True
+            elif action in {"seek", "forward", "skip"}:
+                await page.evaluate(f"() => {{ const v = document.querySelector('video, audio'); if(v) v.currentTime += {seek_seconds}; }}")
+                result["ok"] = True
+            elif action == "back":
+                await page.evaluate(f"() => {{ const v = document.querySelector('video, audio'); if(v) v.currentTime = Math.max(0, v.currentTime - {seek_seconds}); }}")
+                result["ok"] = True
+            elif action in {"fullscreen", "fullscreen_toggle"}:
+                await page.evaluate("() => { const v = document.querySelector('video'); if(v) { if(document.fullscreenElement) document.exitFullscreen(); else v.requestFullscreen(); } }")
+                result["ok"] = True
+            # Read state
+            state = await page.evaluate("""
+                () => {
+                    const v = document.querySelector('video, audio');
+                    if (!v) return null;
+                    return {
+                        paused: v.paused,
+                        muted: v.muted,
+                        currentTime: v.currentTime,
+                        duration: v.duration,
+                        volume: v.volume,
+                    };
+                }
+            """)
+            if state:
+                result["media_state"] = state
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
+    async def mouse_click_at(
+        self,
+        page: Any,
+        x: float,
+        y: float,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Click at pixel coordinates (x, y) — used by WebChat click-passthrough."""
+        try:
+            await page.mouse.click(x, y)
+            await page.wait_for_timeout(300)
+            await self._refresh_tab_state(self.current_tab_id or "", user_id)
+            return {"ok": True, "x": x, "y": y, "url": page.url}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def click_coordinate(
+        self,
+        x: float,
+        y: float,
+        *,
+        tab_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        target_tab_id = str(tab_id or self.current_tab_id or "").strip()
+        if target_tab_id:
+            await self.switch_tab(target_tab_id, user_id=user_id)
+        active_tab_id = str(self.current_tab_id or "").strip()
+        if not active_tab_id or active_tab_id not in self._tabs:
+            raise RuntimeError("No active browser tab is available to click.")
+        state = self._tabs[active_tab_id]
+        return await self.mouse_click_at(state.page, x, y, user_id=user_id)
+
+    async def click_selector(
+        self,
+        selector: str,
+        *,
+        tab_id: str | None = None,
+        user_id: str | None = None,
+        timeout_seconds: int = 8,
+    ) -> dict[str, Any]:
+        target_tab_id = str(tab_id or self.current_tab_id or "").strip()
+        if target_tab_id:
+            await self.switch_tab(target_tab_id, user_id=user_id)
+        active_tab_id = str(self.current_tab_id or "").strip()
+        if not active_tab_id or active_tab_id not in self._tabs:
+            raise RuntimeError("No active browser tab is available to click.")
+        state = self._tabs[active_tab_id]
+        locator, strategy = await self.resolve_locator(state.page, selector, timeout_seconds=timeout_seconds)
+        await locator.click(timeout=max(1000, int(timeout_seconds * 1000)))
+        await state.page.wait_for_timeout(300)
+        await self._refresh_tab_state(active_tab_id, user_id or self.current_user_id)
+        return {
+            "ok": True,
+            "selector": selector,
+            "strategy": strategy,
+            "tab_id": active_tab_id,
+            "url": state.page.url,
+        }
+
+    async def session_health_check(
+        self,
+        site_name: str,
+        profile_name: str = "default",
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Proactively check whether a saved browser profile is still authenticated."""
+        from assistant.browser_workflows.site_adapters import get_site_adapter
+        adapter = get_site_adapter(site_name)
+        auth_url = (adapter.auth_check_url if adapter else "") or ""
+        index = self._load_index()
+        from assistant.tools.browser_runtime import profile_key_for
+        key = profile_key_for(site_name, self._normalize_profile_name(profile_name))
+        session = index.get(key)
+        if session is None:
+            return {"site_name": site_name, "status": "no_session", "healthy": False}
+        if not auth_url:
+            return {"site_name": site_name, "status": "no_check_url", "healthy": None, "session": session}
+        try:
+            page = await self.get_page(
+                auth_url,
+                profile_name=profile_name,
+                user_id=user_id,
+                headless=True,
+            )
+            await page.goto(auth_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+            current_url = str(getattr(page, "url", "") or "")
+            is_login_page = looks_like_login_url(current_url)
+            if is_login_page:
+                self.mark_profile_status(site_name, profile_name, status="expired", last_error="auth_check_failed")
+                return {"site_name": site_name, "status": "expired", "healthy": False, "url": current_url}
+            self.touch_session(site_name, profile_name)
+            return {"site_name": site_name, "status": "active", "healthy": True, "url": current_url}
+        except Exception as exc:
+            return {"site_name": site_name, "status": "error", "healthy": None, "error": str(exc)}
+
+    async def vision_detect_blocking_state(
+        self,
+        page: Any,
+        model_provider: Any,
+    ) -> dict[str, Any] | None:
+        """Use Gemini Vision on a screenshot to detect blocker states missed by text analysis."""
+        if model_provider is None:
+            return None
+        try:
+            screenshot_bytes = await page.screenshot(type="jpeg", quality=70)
+            import base64
+            image_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
+            prompt = (
+                "Analyze this browser screenshot. Is the page blocked by one of these:\n"
+                "1. login / sign-in form\n2. CAPTCHA / reCAPTCHA\n3. cookie consent banner\n"
+                "4. security challenge\n5. age verification wall\n6. paywall\n"
+                "Reply with ONLY a JSON object like: "
+                '{"blocked": true, "kind": "login", "message": "..."}\n'
+                "or {\"blocked\": false} if the page is usable."
+            )
+            # Use the model provider's vision capability
+            if hasattr(model_provider, "complete_with_image"):
+                response = await model_provider.complete_with_image(
+                    prompt, image_b64=image_b64, image_mime="image/jpeg"
+                )
+            else:
+                # Fallback: build a messages list with inline image part
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                        ],
+                    }
+                ]
+                response = await model_provider.complete(messages=messages, tools=[])
+            text = str(getattr(response, "text", "") or "").strip()
+            # Parse JSON from response
+            import json as _json
+            match = re.search(r"\{[^}]+\}", text, re.DOTALL)
+            if match:
+                data = _json.loads(match.group())
+                if data.get("blocked"):
+                    return {
+                        "kind": str(data.get("kind", "unknown")),
+                        "message": str(data.get("message", "Vision-detected blocker on page.")),
+                        "url": page.url,
+                        "source": "vision",
+                    }
+        except Exception:
+            pass  # Vision check is best-effort; never block the workflow
+        return None
+
+    async def retry_with_screenshot_hint(
+        self,
+        page: Any,
+        original_error: str,
+        model_provider: Any,
+        *,
+        timeout_seconds: int = 8,
+    ) -> tuple[Any, str] | None:
+        """After a selector failure, take a screenshot, ask LLM for a better selector, retry once."""
+        if model_provider is None:
+            return None
+        try:
+            screenshot_bytes = await page.screenshot(type="jpeg", quality=65)
+            import base64, json as _json
+            image_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
+            prompt = (
+                f"A browser automation tried to find an element but failed: '{original_error}'.\n"
+                "Look at this screenshot and suggest the BEST CSS selector (or text) to find the "
+                "interactive element that should be clicked or typed into.\n"
+                "Reply with ONLY a JSON object: {\"selector\": \"your_css_selector_here\", \"strategy\": \"css\"}"
+            )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    ],
+                }
+            ]
+            response = await model_provider.complete(messages=messages, tools=[])
+            text = str(getattr(response, "text", "") or "").strip()
+            match = re.search(r'\{[^}]+\}', text, re.DOTALL)
+            if not match:
+                return None
+            data = _json.loads(match.group())
+            suggested = str(data.get("selector", "")).strip()
+            if not suggested:
+                return None
+            # Try the suggested selector
+            locator = page.locator(suggested).first
+            await locator.wait_for(state="visible", timeout=max(1000, timeout_seconds * 1000))
+            return locator, f"vision_hint:{suggested}"
+        except Exception:
+            return None
 
     async def resolve_locator(self, page: Any, selector: str, *, timeout_seconds: int = 10, state: str = "visible"):
         timeout_ms = max(1000, int(timeout_seconds * 1000))
@@ -885,22 +1301,52 @@ class BrowserRuntime:
         return filtered
 
     async def _extract_youtube_results(self, page: Any, *, max_results: int) -> list[dict[str, Any]]:
-        raw_items = await page.evaluate(
-            """(maxItems) => {
-                const nodes = Array.from(document.querySelectorAll(
-                  'a#video-title, ytd-video-renderer a#video-title, a#video-title-link, ytd-rich-item-renderer a#video-title-link, ytd-rich-grid-media a#video-title-link'
-                ));
-                return nodes.slice(0, maxItems * 4).map((node, index) => {
-                    const title = (node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
-                    const href = node.href || '';
-                    const renderer = node.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-rich-grid-media');
-                    const metaNode = renderer ? renderer.querySelector('#metadata-line') : null;
-                    const meta = (metaNode?.innerText || '').replace(/\\s+/g, ' ').trim();
-                    return { index, title, href, snippet: meta };
-                }).filter((item) => item.title && item.href && item.href.includes('/watch'));
-            }""",
-            max(1, min(max_results, 20)),
+        selector = (
+            "a#video-title, ytd-video-renderer a#video-title, a#video-title-link, "
+            "ytd-rich-item-renderer a#video-title-link, ytd-rich-grid-media a#video-title-link"
         )
+
+        async def _collect() -> list[dict[str, Any]]:
+            return list(
+                await page.evaluate(
+                    """(maxItems) => {
+                        const nodes = Array.from(document.querySelectorAll(
+                          'a#video-title, ytd-video-renderer a#video-title, a#video-title-link, ytd-rich-item-renderer a#video-title-link, ytd-rich-grid-media a#video-title-link'
+                        ));
+                        return nodes.slice(0, maxItems * 6).map((node, index) => {
+                            const title = (node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                            const href = node.href || '';
+                            const renderer = node.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-rich-grid-media');
+                            const metaNode = renderer ? renderer.querySelector('#metadata-line') : null;
+                            const channelNode = renderer ? renderer.querySelector('#channel-name, ytd-channel-name') : null;
+                            const meta = (metaNode?.innerText || '').replace(/\\s+/g, ' ').trim();
+                            const channel = (channelNode?.innerText || '').replace(/\\s+/g, ' ').trim();
+                            return { index, title, href, snippet: meta, channel };
+                        }).filter((item) => item.title && item.href && item.href.includes('/watch'));
+                    }""",
+                    max(1, min(max_results, 20)),
+                )
+                or []
+            )
+
+        try:
+            await page.wait_for_selector(selector, timeout=6000)
+        except Exception:
+            try:
+                await self.scroll_page(page, direction="down", pixels=900)
+                await page.wait_for_timeout(500)
+                await page.wait_for_selector(selector, timeout=4000)
+            except Exception:
+                pass
+
+        raw_items = await _collect()
+        if not raw_items:
+            try:
+                await self.scroll_page(page, direction="down", pixels=1200)
+                await page.wait_for_timeout(600)
+            except Exception:
+                pass
+            raw_items = await _collect()
         results: list[dict[str, Any]] = []
         for item in raw_items or []:
             title = str(item.get("title", "")).strip()
@@ -917,6 +1363,7 @@ class BrowserRuntime:
                         "compact_title": compact_text(title),
                         "youtube_watch": True,
                         "freshness": 1 if re.search(r"\\b(?:minute|hour|day|week|month|year)s?\\b", str(item.get("snippet", "")), flags=re.IGNORECASE) else 0,
+                        "channel": str(item.get("channel", "")).strip(),
                     },
                 }
             )
@@ -1008,9 +1455,11 @@ class BrowserRuntime:
             title = str(item.get("title", ""))
             snippet = str(item.get("snippet", ""))
             href = str(item.get("href", ""))
+            channel = str(item.get("ranking_hints", {}).get("channel", ""))
             compact_title = compact_text(title)
             compact_snippet = compact_text(snippet)
             compact_href = compact_text(href)
+            compact_channel = compact_text(channel)
             title_tokens = {token for token in re.split(r"[^a-z0-9]+", title.lower()) if token}
             overlap = len(query_tokens & title_tokens)
             score = float(overlap * 12)
@@ -1018,6 +1467,8 @@ class BrowserRuntime:
                 score += 120
             elif compact_query and compact_query in compact_title:
                 score += 70
+            elif compact_query and compact_query in compact_channel:
+                score += 48
             elif compact_query and compact_query in compact_snippet:
                 score += 32
             elif compact_query and compact_query in compact_href:
@@ -1424,6 +1875,19 @@ class BrowserRuntime:
         target_user = user_id or state.current_user_id or self.current_user_id
         if target_user:
             await self._emit_browser_event(target_user, "browser.download", entry)
+            # Proactive notification: emit a high-priority download.complete event
+            # so the chat UI and channels can surface the file to the user immediately.
+            await self._emit_browser_event(
+                target_user,
+                "browser.download.complete",
+                {
+                    "filename": target.name,
+                    "path": str(target),
+                    "size": entry["size"],
+                    "url": entry["url"],
+                    "message": f"\U0001F4E5 Download complete: **{target.name}** ({entry['size']} bytes) saved to browser downloads.",
+                },
+            )
             await self._emit_state(target_user)
 
     async def _refresh_tab_state(self, tab_id: str, user_id: str | None = None) -> None:
@@ -1545,7 +2009,21 @@ class BrowserRuntime:
         timeout_ms = max(1000, int(timeout_seconds * 1000))
         normalized = (wait_for or "").strip().lower()
         if normalized in {"load", "domcontentloaded", "networkidle"}:
-            await page.wait_for_load_state(normalized, timeout=timeout_ms)
+            try:
+                await page.wait_for_load_state(normalized, timeout=timeout_ms)
+            except Exception:
+                # Modern apps often keep background network requests alive indefinitely,
+                # so networkidle/load can be too strict for otherwise usable pages.
+                if normalized == "networkidle":
+                    await page.wait_for_timeout(400)
+                    return
+                if normalized == "load":
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=max(1000, timeout_ms // 2))
+                    except Exception:
+                        await page.wait_for_timeout(250)
+                    return
+                raise
             return
         if normalized == "stable":
             await page.wait_for_timeout(300)

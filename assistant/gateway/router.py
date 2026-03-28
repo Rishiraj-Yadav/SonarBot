@@ -704,6 +704,99 @@ class GatewayRouter:
                     ok=True,
                     payload={"queued": False, "session_key": session_key, "command_response": response_text},
                 )
+            # ── Macro subcommands ─────────────────────────────────────────────────
+            if subcommand == "macros":
+                if not getattr(self.config.browser_workflows, "macro_shortcuts_enabled", True):
+                    return ResponseFrame(id=request_id, ok=False, error="Browser macros are disabled in the current configuration.")
+                try:
+                    from assistant.browser_workflows.browser_macros import BrowserMacroStore
+                    store = BrowserMacroStore(self.config.agent.workspace_dir)
+                    macros = store.list_macros()
+                    if not macros:
+                        response_text = "No browser macros saved yet.\nUse /browser save <alias> <command> to create one."
+                    else:
+                        lines = ["Saved browser macros:"]
+                        for alias, cmd in macros.items():
+                            lines.append(f"  /browser run {alias}  →  {cmd}")
+                        response_text = "\n".join(lines)
+                except Exception as exc:
+                    response_text = f"Could not load macros: {exc}"
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "save":
+                if not getattr(self.config.browser_workflows, "macro_shortcuts_enabled", True):
+                    return ResponseFrame(id=request_id, ok=False, error="Browser macros are disabled in the current configuration.")
+                # /browser save <alias> <command>
+                save_parts = subargs.split(maxsplit=1)
+                if len(save_parts) < 2:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser save <alias> <command>.")
+                macro_alias = save_parts[0].strip().lower()
+                macro_cmd = save_parts[1].strip()
+                if not macro_alias or not macro_cmd:
+                    return ResponseFrame(id=request_id, ok=False, error="Alias and command must not be empty.")
+                try:
+                    from assistant.browser_workflows.browser_macros import BrowserMacroStore
+                    store = BrowserMacroStore(self.config.agent.workspace_dir)
+                    store.save_macro(macro_alias, macro_cmd)
+                    response_text = f"✅ Saved macro '{macro_alias}'.\nRun it with: /browser run {macro_alias}"
+                except Exception as exc:
+                    response_text = f"Could not save macro: {exc}"
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if subcommand == "run":
+                if not getattr(self.config.browser_workflows, "macro_shortcuts_enabled", True):
+                    return ResponseFrame(id=request_id, ok=False, error="Browser macros are disabled in the current configuration.")
+                # /browser run <alias>
+                alias = subargs.strip().lower()
+                if not alias:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser run <alias>.")
+                try:
+                    from assistant.browser_workflows.browser_macros import BrowserMacroStore
+                    store = BrowserMacroStore(self.config.agent.workspace_dir)
+                    macro_cmd = store.get_macro(alias)
+                except Exception as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=f"Could not load macro: {exc}")
+                if macro_cmd is None:
+                    return ResponseFrame(id=request_id, ok=False, error=f"No macro named '{alias}'. Use /browser macros to list all.")
+                workflow_response = await self._handle_browser_workflow(
+                    connection_id=connection_id,
+                    request_id=request_id,
+                    session_key=session_key,
+                    message=macro_cmd,
+                    metadata={"user_id": user_id, "channel": "slash", "trace_id": uuid4().hex},
+                    force=True,
+                )
+                if workflow_response is not None:
+                    return workflow_response
+                return ResponseFrame(
+                    id=request_id,
+                    ok=False,
+                    error=f"Macro '{alias}' ran ('{macro_cmd}') but no matching browser workflow was found.",
+                )
+            if subcommand in {"delete-macro", "delete_macro", "remove-macro"}:
+                if not getattr(self.config.browser_workflows, "macro_shortcuts_enabled", True):
+                    return ResponseFrame(id=request_id, ok=False, error="Browser macros are disabled in the current configuration.")
+                alias = subargs.strip().lower()
+                if not alias:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser delete-macro <alias>.")
+                try:
+                    from assistant.browser_workflows.browser_macros import BrowserMacroStore
+                    store = BrowserMacroStore(self.config.agent.workspace_dir)
+                    deleted = store.delete_macro(alias)
+                except Exception as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=f"Could not delete macro: {exc}")
+                response_text = f"Deleted macro '{alias}'." if deleted else f"No macro named '{alias}' found."
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
             return ResponseFrame(id=request_id, ok=False, error="Unknown /browser subcommand. Use /browser help.")
 
         if command_name == "pause-rule":
@@ -940,6 +1033,7 @@ class GatewayRouter:
         user_id = str(metadata.get("user_id") or await self._resolve_user_id(connection_id, session_key))
         channel = str(metadata.get("channel", "ws"))
         task_state = await self._get_browser_task_state(session_key)
+        pending_disambiguation = dict(task_state.get("pending_disambiguation") or {})
         standalone_override = self.browser_workflow_engine.nlp.standalone_execution_override(message)
         if standalone_override is not None:
             await self._update_session_metadata(
@@ -948,6 +1042,7 @@ class GatewayRouter:
                     active_task=active_browser_task(task_state),
                     pending_confirmation=dict(task_state.get("pending_confirmation") or {}),
                     pending_login=dict(task_state.get("pending_login") or {}),
+                    pending_disambiguation=pending_disambiguation,
                     next_task_mode_override=standalone_override,
                 ),
             )
@@ -962,6 +1057,23 @@ class GatewayRouter:
                 ok=True,
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
+        if pending_disambiguation and self._looks_like_disambiguation_cancel(message):
+            await self._update_session_metadata(
+                session_key,
+                updates=browser_task_state_update(
+                    active_task=active_browser_task(task_state),
+                    pending_confirmation=dict(task_state.get("pending_confirmation") or {}),
+                    pending_login=dict(task_state.get("pending_login") or {}),
+                    next_task_mode_override=str(task_state.get("next_task_mode_override", "") or ""),
+                ),
+            )
+            response_text = "Okay, I cleared that inferred browser task. Tell me what you want me to do instead."
+            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
         result = await self.browser_workflow_engine.maybe_run(
             message,
             user_id=user_id,
@@ -969,6 +1081,7 @@ class GatewayRouter:
             channel=channel,
             previous_state=task_state,
             force=force,
+            connection_id=connection_id,
         )
         if result is None:
             return None
@@ -998,6 +1111,19 @@ class GatewayRouter:
             return normalize_browser_task_state(raw)
         legacy = metadata.get(LEGACY_BROWSER_WORKFLOW_STATE_KEY, {})
         return normalize_browser_task_state(legacy if isinstance(legacy, dict) else {})
+
+    def _looks_like_disambiguation_cancel(self, message: str) -> bool:
+        normalized = message.strip().lower()
+        return normalized in {
+            "no",
+            "nope",
+            "not that",
+            "not this",
+            "cancel",
+            "never mind",
+            "stop",
+            "don't do that",
+        }
 
     async def _apply_browser_task_state(self, session_key: str, result: Any) -> None:
         if getattr(result, "clear_state", False):
@@ -1031,8 +1157,14 @@ class GatewayRouter:
                 metadata.pop(key, None)
 
     def _compose_browser_workflow_response(self, result: Any) -> str:
+        def _compact(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", value.lower())
+
         progress = [str(item).strip() for item in getattr(result, "progress_lines", []) if str(item).strip()]
         response = str(getattr(result, "response_text", "")).strip()
+        if response and progress:
+            compact_response = _compact(response)
+            progress = [item for item in progress if _compact(item) and _compact(item) not in compact_response]
         if response and response not in progress:
             progress.append(response)
         return "\n".join(progress) if progress else response

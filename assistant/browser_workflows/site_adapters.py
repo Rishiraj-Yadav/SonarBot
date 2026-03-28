@@ -12,6 +12,10 @@ class BrowserSiteAdapter:
     search_input_selectors: tuple[str, ...] = ()
     search_expand_selectors: tuple[str, ...] = ()
     result_strategy: str = "generic"
+    # Known authenticated check URL (for session health checks)
+    auth_check_url: str = ""
+    # Known auto-dismissable consent / cookie selectors
+    consent_accept_selectors: tuple[str, ...] = ()
 
 
 SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
@@ -29,6 +33,15 @@ SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
             "button[title='Search']",
         ),
         result_strategy="youtube",
+        auth_check_url="https://www.youtube.com/feed/subscriptions",
+        consent_accept_selectors=(
+            "button[aria-label*='Accept all' i]",
+            "button[aria-label*='Agree' i]",
+            "tp-yt-paper-button[aria-label*='Accept' i]",
+            "ytd-button-renderer:has-text('Accept all')",
+            "button:has-text('Accept all')",
+            "button:has-text('I agree')",
+        ),
     ),
     "google": BrowserSiteAdapter(
         canonical_name="google",
@@ -40,6 +53,13 @@ SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
             "input[aria-label*='Search' i]",
         ),
         result_strategy="google",
+        consent_accept_selectors=(
+            "button#L2AGLb",  # Google "Accept all" consent
+            "button[aria-label*='Accept all' i]",
+            "button:has-text('Accept all')",
+            "button:has-text('I agree')",
+            "div[role='none'] button:has-text('Accept')",
+        ),
     ),
     "github": BrowserSiteAdapter(
         canonical_name="github",
@@ -57,6 +77,7 @@ SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
             "button[title='Search']",
         ),
         result_strategy="github",
+        auth_check_url="https://github.com/notifications",
     ),
     "leetcode": BrowserSiteAdapter(
         canonical_name="leetcode",
@@ -68,6 +89,167 @@ SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
             "input[name='search']",
         ),
         result_strategy="leetcode",
+        auth_check_url="https://leetcode.com/problems/",
+    ),
+    # ── new adapters ────────────────────────────────────────────────
+    "twitter": BrowserSiteAdapter(
+        canonical_name="twitter",
+        aliases=("twitter.com", "www.twitter.com", "x.com", "www.x.com", "x", "tweet"),
+        search_input_selectors=(
+            "input[data-testid='SearchBox_Search_Input']",
+            "input[aria-label*='Search' i]",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+        consent_accept_selectors=(
+            "div[data-testid='confirmationSheetConfirm']",
+            "button:has-text('Accept all cookies')",
+            "button:has-text('Allow all cookies')",
+        ),
+    ),
+    "reddit": BrowserSiteAdapter(
+        canonical_name="reddit",
+        aliases=("reddit.com", "www.reddit.com"),
+        search_input_selectors=(
+            "input[placeholder*='Search Reddit' i]",
+            "input[data-testid='search-input']",
+            "input[name='q']",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+        consent_accept_selectors=(
+            "button.accept-button",
+            "button:has-text('Accept all')",
+            "button:has-text('Allow')",
+        ),
+    ),
+    "amazon": BrowserSiteAdapter(
+        canonical_name="amazon",
+        aliases=("amazon.com", "www.amazon.com", "amazon.in", "www.amazon.in"),
+        search_input_selectors=(
+            "input#twotabsearchtextbox",
+            "input[name='field-keywords']",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+        consent_accept_selectors=(
+            "input#sp-cc-accept",
+            "button:has-text('Accept Cookies')",
+        ),
+    ),
+    "flipkart": BrowserSiteAdapter(
+        canonical_name="flipkart",
+        aliases=("flipkart.com", "www.flipkart.com"),
+        search_input_selectors=(
+            "input[title='Search for Products, Brands and More']",
+            "input[placeholder*='Search' i]",
+            "input[name='q']",
+        ),
+        result_strategy="generic",
+    ),
+    "linkedin": BrowserSiteAdapter(
+        canonical_name="linkedin",
+        aliases=("linkedin.com", "www.linkedin.com"),
+        search_input_selectors=(
+            "input.search-global-typeahead__input",
+            "input[aria-label*='Search' i]",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://www.linkedin.com/feed/",
+        consent_accept_selectors=(
+            "button[action-type='ACCEPT']",
+            "button:has-text('Accept')",
+        ),
+    ),
+    "stackoverflow": BrowserSiteAdapter(
+        canonical_name="stackoverflow",
+        aliases=("stackoverflow.com", "www.stackoverflow.com", "stack overflow", "so"),
+        search_input_selectors=(
+            "input#search",
+            "input[name='q']",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+        consent_accept_selectors=(
+            "button.js-accept-cookies",
+            "button[data-consent-trigger='general']",
+            "button:has-text('Accept all cookies')",
+        ),
+    ),
+    "wikipedia": BrowserSiteAdapter(
+        canonical_name="wikipedia",
+        aliases=("wikipedia.org", "en.wikipedia.org", "wiki"),
+        search_input_selectors=(
+            "input#searchInput",
+            "input[name='search']",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "hackernews": BrowserSiteAdapter(
+        canonical_name="hackernews",
+        aliases=("news.ycombinator.com", "hacker news", "hn"),
+        search_input_selectors=(
+            "input[name='q']",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "npm": BrowserSiteAdapter(
+        canonical_name="npm",
+        aliases=("npmjs.com", "www.npmjs.com"),
+        search_input_selectors=(
+            "input#search",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "pypi": BrowserSiteAdapter(
+        canonical_name="pypi",
+        aliases=("pypi.org", "www.pypi.org"),
+        search_input_selectors=(
+            "input#search",
+            "input[name='q']",
+        ),
+        result_strategy="generic",
+    ),
+    "spotify": BrowserSiteAdapter(
+        canonical_name="spotify",
+        aliases=("open.spotify.com", "spotify.com"),
+        search_input_selectors=(
+            "input[data-testid='search-input']",
+            "input[placeholder*='What do you want to play' i]",
+            "input[placeholder*='Search' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://open.spotify.com/browse",
+        consent_accept_selectors=(
+            "button[data-testid='accept-button']",
+            "button:has-text('Accept Cookies')",
+        ),
+    ),
+    "netflix": BrowserSiteAdapter(
+        canonical_name="netflix",
+        aliases=("netflix.com", "www.netflix.com"),
+        search_input_selectors=(
+            "input.searchInput",
+            "input[placeholder*='Titles, people, genres' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "instagram": BrowserSiteAdapter(
+        canonical_name="instagram",
+        aliases=("instagram.com", "www.instagram.com", "insta"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+        consent_accept_selectors=(
+            "button:has-text('Allow all cookies')",
+            "button:has-text('Accept All')",
+        ),
     ),
 }
 
