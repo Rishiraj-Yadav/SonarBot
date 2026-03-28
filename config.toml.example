@@ -17,6 +17,7 @@ enabled = true
 
 [llm]
 gemini_api_key = ""
+anthropic_api_key = ""
 openai_api_key = ""
 
 [channels]
@@ -104,6 +105,7 @@ headed_on_blockers = true
 headed_on_high_impact = true
 revert_to_headless_after_manual_step = true
 keep_headed_browser_alive_seconds = 60
+human_simulation = false
 
 [oauth.google]
 client_id = ""

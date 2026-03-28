@@ -154,11 +154,19 @@ def build_browser_tools(
         )
         locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
         try:
-            await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
+            if bool(getattr(config.browser_execution, "human_simulation", False)):
+                await locator.fill("", timeout=max(1000, timeout_seconds * 1000))
+                await locator.type(text, delay=90)
+            else:
+                await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
         except Exception:
             await page.wait_for_timeout(150)
             locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
-            await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
+            if bool(getattr(config.browser_execution, "human_simulation", False)):
+                await locator.fill("", timeout=max(1000, timeout_seconds * 1000))
+                await locator.type(text, delay=90)
+            else:
+                await locator.fill(text, timeout=max(1000, timeout_seconds * 1000))
         assert runtime.current_tab_id is not None
         await runtime._refresh_tab_state(runtime.current_tab_id, user_id)
         state = runtime._tabs[runtime.current_tab_id]
@@ -328,7 +336,11 @@ def build_browser_tools(
         filled: list[dict[str, Any]] = []
         for selector, value in raw_fields.items():
             locator, strategy = await runtime.resolve_locator(page, str(selector), timeout_seconds=timeout_seconds)
-            await locator.fill(str(value), timeout=max(1000, timeout_seconds * 1000))
+            if bool(getattr(config.browser_execution, "human_simulation", False)):
+                await locator.fill("", timeout=max(1000, timeout_seconds * 1000))
+                await locator.type(str(value), delay=90)
+            else:
+                await locator.fill(str(value), timeout=max(1000, timeout_seconds * 1000))
             filled.append({"selector": str(selector), "strategy": strategy})
         return {"filled": filled, "count": len(filled), "tab_id": runtime.current_tab_id}
 

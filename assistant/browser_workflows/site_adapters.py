@@ -147,6 +147,123 @@ SITE_ADAPTERS: dict[str, BrowserSiteAdapter] = {
         ),
         result_strategy="generic",
     ),
+    "irctc": BrowserSiteAdapter(
+        canonical_name="irctc",
+        aliases=("irctc.co.in", "www.irctc.co.in", "railway", "railways"),
+        search_input_selectors=(
+            "input[placeholder*='From']",
+            "input[aria-label*='From' i]",
+            "input[placeholder*='To']",
+            "input[aria-label*='To' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://www.irctc.co.in/nget/train-search",
+    ),
+    "makemytrip": BrowserSiteAdapter(
+        canonical_name="makemytrip",
+        aliases=("makemytrip.com", "www.makemytrip.com", "make my trip", "mmt"),
+        search_input_selectors=(
+            "input[placeholder*='From' i]",
+            "input[placeholder*='To' i]",
+            "input[aria-label*='From' i]",
+            "input[aria-label*='To' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://www.makemytrip.com/railways/",
+    ),
+    "cleartrip": BrowserSiteAdapter(
+        canonical_name="cleartrip",
+        aliases=("cleartrip.com", "www.cleartrip.com", "clear trip"),
+        search_input_selectors=(
+            "input[placeholder*='Where from' i]",
+            "input[placeholder*='Where to' i]",
+            "input[aria-label*='From' i]",
+            "input[aria-label*='To' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "redbus": BrowserSiteAdapter(
+        canonical_name="redbus",
+        aliases=("redbus.in", "www.redbus.in", "red bus"),
+        search_input_selectors=(
+            "input#src",
+            "input#dest",
+            "input[placeholder*='Source' i]",
+            "input[placeholder*='Destination' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "swiggy": BrowserSiteAdapter(
+        canonical_name="swiggy",
+        aliases=("swiggy.com", "www.swiggy.com"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://www.swiggy.com/restaurants",
+    ),
+    "zomato": BrowserSiteAdapter(
+        canonical_name="zomato",
+        aliases=("zomato.com", "www.zomato.com"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://www.zomato.com/",
+    ),
+    "paytm": BrowserSiteAdapter(
+        canonical_name="paytm",
+        aliases=("paytm.com", "www.paytm.com"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+        auth_check_url="https://paytm.com/",
+    ),
+    "zepto": BrowserSiteAdapter(
+        canonical_name="zepto",
+        aliases=("zeptonow.com", "www.zeptonow.com", "zepto"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "blinkit": BrowserSiteAdapter(
+        canonical_name="blinkit",
+        aliases=("blinkit.com", "www.blinkit.com", "grofers"),
+        search_input_selectors=(
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "ola": BrowserSiteAdapter(
+        canonical_name="ola",
+        aliases=("olacabs.com", "www.olacabs.com", "ola cabs"),
+        search_input_selectors=(
+            "input[placeholder*='Pickup' i]",
+            "input[placeholder*='Drop' i]",
+            "input[aria-label*='Pickup' i]",
+            "input[aria-label*='Drop' i]",
+        ),
+        result_strategy="generic",
+    ),
+    "hdfc netbanking": BrowserSiteAdapter(
+        canonical_name="hdfc netbanking",
+        aliases=("netbanking.hdfcbank.com", "hdfc", "hdfc bank"),
+        result_strategy="generic",
+        auth_check_url="https://netbanking.hdfcbank.com/netbanking/",
+    ),
+    "sbi netbanking": BrowserSiteAdapter(
+        canonical_name="sbi netbanking",
+        aliases=("retail.onlinesbi.sbi", "sbi", "sbi bank", "onlinesbi"),
+        result_strategy="generic",
+        auth_check_url="https://retail.onlinesbi.sbi/retail/login.htm",
+    ),
     "linkedin": BrowserSiteAdapter(
         canonical_name="linkedin",
         aliases=("linkedin.com", "www.linkedin.com"),

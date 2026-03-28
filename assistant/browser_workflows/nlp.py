@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from typing import Any
 
 from assistant.browser_workflows.models import BrowserWorkflowMatch
-from assistant.browser_workflows.recipes import RECIPE_BY_NAME, SITE_ALIASES
+from assistant.browser_workflows.recipes import RECIPE_BY_NAME, SITE_ALIASES, SITE_URLS
 from assistant.browser_workflows.state import active_browser_task, normalize_browser_task_state
 
 
@@ -222,6 +222,15 @@ class BrowserWorkflowNLP:
                 details=details,
             )
 
+        browser_open = self._extract_open_browser_request(
+            message,
+            runtime_state=runtime_state,
+            active_task=active_task,
+            task_state=task_state,
+        )
+        if browser_open is not None:
+            return browser_open
+
         if re.search(r"\b(?:login|log in|sign in)(?:\s+(?:to|into))?\s+(?:it|there|this site|this page)\b", lowered):
             site_name = inferred_site or str(active_task.get("site_name", "")).strip() or None
             if site_name:
@@ -387,6 +396,50 @@ class BrowserWorkflowNLP:
                 details={"task_state": task_state},
             )
 
+        train_match = self._extract_train_search(message)
+        if train_match:
+            return BrowserWorkflowMatch(
+                recipe_name="train_search_book",
+                confidence=0.94,
+                site_name="irctc",
+                query=str(train_match.get("route", "")).strip() or None,
+                action="search_trains",
+                details={"task_state": task_state, **train_match},
+            )
+
+        flight_match = self._extract_flight_search(message)
+        if flight_match:
+            return BrowserWorkflowMatch(
+                recipe_name="flight_search_book",
+                confidence=0.94,
+                site_name=str(flight_match.get("site_name", "")).strip() or "makemytrip",
+                query=str(flight_match.get("route", "")).strip() or None,
+                action="search_flights",
+                details={"task_state": task_state, **flight_match},
+            )
+
+        food_match = self._extract_food_order(message)
+        if food_match:
+            return BrowserWorkflowMatch(
+                recipe_name="food_search_order",
+                confidence=0.92,
+                site_name=str(food_match.get("site_name", "")).strip() or "swiggy",
+                query=str(food_match.get("query", "")).strip() or None,
+                action="search_food",
+                details={"task_state": task_state, **food_match},
+            )
+
+        bill_match = self._extract_bill_payment_review(message)
+        if bill_match:
+            return BrowserWorkflowMatch(
+                recipe_name="bill_payment_review",
+                confidence=0.92,
+                site_name=str(bill_match.get("site_name", "")).strip() or None,
+                query=str(bill_match.get("query", "")).strip() or None,
+                action="review",
+                details={"task_state": task_state, **bill_match},
+            )
+
         # page_read_summarize
         summarize_url = self._extract_page_summarize_url(message)
         if summarize_url:
@@ -449,10 +502,19 @@ class BrowserWorkflowNLP:
         if (inferred_site or active_site) != "youtube":
             return None
         normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        if lowered.startswith("open "):
+            open_target = _normalize_quotes(normalized[5:])
+            explicit_site = normalize_site_name(open_target)
+            explicit_raw_site, explicit_url = normalize_browser_target(open_target)
+            if explicit_site or explicit_raw_site or explicit_url:
+                return None
+            if any(token in lowered for token in (" website", " site", " browser")):
+                return None
         patterns = (
             r"^(?:now\s+)?search\s+(?:for\s+)?(.+?)\s+(?:and\s+)?(?:play|watch|open)(?:\s+it)?$",
             r"^(?:now\s+)?search\s+(?:for\s+)?(.+?)$",
-            r"^(?:now\s+)?(?:play|watch|open)\s+(.+?)(?:\s+video)?$",
+            r"^(?:now\s+)?(?:play|watch)\s+(.+?)(?:\s+video)?$",
         )
         for pattern in patterns:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
@@ -479,6 +541,43 @@ class BrowserWorkflowNLP:
             open_directive = (match.group(2) or "").lower()
             return query, "first result" in open_directive
         return None, False
+
+    def _extract_open_browser_request(
+        self,
+        message: str,
+        *,
+        runtime_state: dict[str, Any] | None,
+        active_task: dict[str, Any],
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowMatch | None:
+        normalized = _normalize_spaces(message)
+        if not re.match(r"^(?:please\s+)?open(?:\s+the)?\s+browser(?:\s+window)?(?:\s+now)?$", normalized, flags=re.IGNORECASE):
+            return None
+
+        active_tab = (runtime_state or {}).get("active_tab") or {}
+        target_url = str(
+            active_task.get("target_url", "")
+            or active_task.get("active_url", "")
+            or active_tab.get("url", "")
+            or ""
+        ).strip()
+        site_name = (
+            normalize_site_name(str(active_task.get("site_name", "")).strip())
+            or infer_site_from_runtime(runtime_state)
+            or self._site_from_url_quick(target_url)
+        )
+        if not target_url and site_name:
+            canonical_site = normalize_site_name(site_name) or site_name
+            target_url = SITE_URLS.get(canonical_site, "")
+        if not target_url and not site_name:
+            return None
+        return BrowserWorkflowMatch(
+            recipe_name="site_open_exact_url_or_path",
+            confidence=0.95,
+            site_name=site_name,
+            action="open",
+            details={"task_state": task_state, **({"target_url": target_url} if target_url else {})},
+        )
 
     def _extract_explicit_open_target(self, message: str) -> tuple[str, str] | None:
         normalized = _normalize_spaces(message)
@@ -544,6 +643,7 @@ class BrowserWorkflowNLP:
     ) -> BrowserWorkflowMatch | None:
         normalized = _normalize_spaces(message)
         patterns = (
+            r"^(?:please\s+)?open\s+([a-z0-9][a-z0-9 ._:/-]*?)(?:\.com)?\s+website(?:\s+(?:and\s+(?:search|find|look for)|for)\s+(.+))?$",
             r"^(?:please\s+)?open\s+([a-z0-9][a-z0-9 ._:/-]*?)(?:\.com)?(?:\s+and\s+(?:search|find|look for)\s+(.+))?$",
             r"^(?:please\s+)?(?:search|find|look for)\s+(.+?)\s+(?:on|in)\s+([a-z0-9][a-z0-9 ._:/-]*?)(?:\.com)?$",
         )
@@ -593,6 +693,11 @@ class BrowserWorkflowNLP:
         task_state: dict[str, Any],
     ) -> bool:
         lowered = message.lower()
+        if re.search(
+            r"\b[a-z0-9._/-]+\.(?:md|txt|pdf|json|yaml|yml|toml|csv|xml|py|js|ts|tsx|jsx|html|doc|docx)\b",
+            lowered,
+        ) and not any(token in lowered for token in ("http://", "https://", "www.", "browser", "website", "page", "tab", "site")):
+            return False
         browser_verbs = (
             "open", "search", "find", "play", "watch", "login", "log in", "sign in",
             "switch", "download", "pause", "mute", "unmute", "resume", "skip", "rewind",
@@ -619,7 +724,9 @@ class BrowserWorkflowNLP:
         headed_patterns = (
             r"\bshow me what you(?:'| a)re doing\b",
             r"\bshow me what you're doing\b",
+            r"\bshow me w(?:ha|ah)t you(?:'| a)?re doing\b",
             r"\bshow me what are you doing(?: now)?\b",
+            r"\bshow me w(?:ha|ah)t are you doing(?: now)?\b",
             r"\bshow what you(?:'| a)re doing(?: now)?\b",
             r"\bshow what are you doing(?: now)?\b",
             r"\bshow me the browser\b",
@@ -693,7 +800,8 @@ class BrowserWorkflowNLP:
                     "github_issue_compose, site_login_then_continue, browser_continue_last_task, "
                     "generic_page_interact, page_read_summarize, multi_tab_research, "
                     "twitter_search_scroll, reddit_search_open, amazon_search_buy, "
-                    "web_form_fill_submit, calendar_book, email_compose_send, youtube_media_control, none."
+                    "web_form_fill_submit, calendar_book, email_compose_send, youtube_media_control, "
+                    "train_search_book, flight_search_book, food_search_order, bill_payment_review, none."
                 ),
                 "For multi_tab_research: extract URLs into the urls[] array.",
                 "For web_form_fill_submit: extract field values into the fields{} object, target URL into site_name.",
@@ -792,6 +900,100 @@ class BrowserWorkflowNLP:
         if len(compact.split()) <= 4:
             return True
         return compact.lower() in {"this", "that", "it", "there", "here", "the first one", "the second one"}
+
+    def _extract_train_search(self, message: str) -> dict[str, Any] | None:
+        normalized = _normalize_spaces(message)
+        if not any(token in normalized.lower() for token in ("irctc", "train", "railway")):
+            return None
+        match = re.search(
+            r"\b(?:train|trains|ticket|tickets).+?\bfrom\s+(.+?)\s+\bto\s+(.+?)(?:\s+\bon\s+(.+))?$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            match = re.search(
+                r"\bfrom\s+(.+?)\s+\bto\s+(.+?)(?:\s+\bon\s+(.+))?(?:\s+\bon\s+irctc|\s+train.*)$",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        if match is None:
+            return None
+        source = _normalize_quotes(match.group(1))
+        destination = _normalize_quotes(match.group(2))
+        travel_date = _normalize_quotes(match.group(3) or "")
+        if not source or not destination:
+            return None
+        return {
+            "source": source,
+            "destination": destination,
+            "travel_date": travel_date,
+            "route": f"{source} to {destination}",
+        }
+
+    def _extract_flight_search(self, message: str) -> dict[str, Any] | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        if "flight" not in lowered:
+            return None
+        site_name = "makemytrip" if "makemytrip" in lowered or "make my trip" in lowered else (
+            "cleartrip" if "cleartrip" in lowered or "clear trip" in lowered else "makemytrip"
+        )
+        match = re.search(r"\bfrom\s+(.+?)\s+\bto\s+(.+?)(?:\s+\bon\s+(.+))?$", normalized, flags=re.IGNORECASE)
+        if match is None:
+            return None
+        source = _normalize_quotes(match.group(1))
+        destination = _normalize_quotes(match.group(2))
+        travel_date = _normalize_quotes(match.group(3) or "")
+        if not source or not destination:
+            return None
+        return {
+            "site_name": site_name,
+            "source": source,
+            "destination": destination,
+            "travel_date": travel_date,
+            "route": f"{source} to {destination}",
+        }
+
+    def _extract_food_order(self, message: str) -> dict[str, Any] | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        site_name = None
+        if "swiggy" in lowered:
+            site_name = "swiggy"
+        elif "zomato" in lowered:
+            site_name = "zomato"
+        if site_name is None:
+            return None
+        match = re.search(r"\b(?:search|find|order|get)\s+(.+?)\s+\b(?:on|in)\s+(swiggy|zomato)\b", normalized, flags=re.IGNORECASE)
+        if match:
+            query = _normalize_quotes(match.group(1))
+        else:
+            query = normalized
+            for prefix in ("open swiggy and ", "open zomato and "):
+                if lowered.startswith(prefix):
+                    query = normalized[len(prefix):]
+                    break
+            query = re.sub(r"\b(?:search|find|order|get)\b", "", query, flags=re.IGNORECASE).strip()
+        query = _normalize_quotes(query)
+        return {"site_name": site_name, "query": query or ""}
+
+    def _extract_bill_payment_review(self, message: str) -> dict[str, Any] | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        site_name = None
+        for candidate in ("paytm", "hdfc netbanking", "sbi netbanking", "hdfc", "sbi"):
+            if candidate in lowered:
+                site_name = normalize_site_name(candidate) or candidate
+                break
+        if site_name is None:
+            return None
+        if not any(token in lowered for token in ("bill", "payment", "netbanking", "banking", "login", "review", "account")):
+            return None
+        return {
+            "site_name": site_name,
+            "query": normalized,
+            "read_only": True,
+        }
 
     def _looks_like_continue(self, lowered: str) -> bool:
         normalized = _normalize_spaces(lowered)
@@ -929,6 +1131,36 @@ class BrowserWorkflowNLP:
 
     def _extract_page_summarize_url(self, message: str) -> str | None:
         """Detect page-read/summarize intent with a URL."""
+        def _normalize_page_url(candidate: str) -> str | None:
+            value = candidate.strip()
+            if not value:
+                return None
+            lowered = value.lower()
+            common_file_extensions = {
+                ".md",
+                ".txt",
+                ".pdf",
+                ".doc",
+                ".docx",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".toml",
+                ".csv",
+                ".xml",
+                ".py",
+                ".js",
+                ".ts",
+                ".tsx",
+                ".jsx",
+                ".html",
+            }
+            if not lowered.startswith(("http://", "https://", "www.")) and any(lowered.endswith(ext) for ext in common_file_extensions):
+                return None
+            if not value.startswith("http"):
+                value = f"https://{value}"
+            return value
+
         normalized = _normalize_spaces(message)
         # Explicit summarize/read + URL
         m = re.search(
@@ -937,10 +1169,7 @@ class BrowserWorkflowNLP:
             normalized, flags=re.IGNORECASE,
         )
         if m:
-            url = m.group(1).strip()
-            if not url.startswith("http"):
-                url = f"https://{url}"
-            return url
+            return _normalize_page_url(m.group(1))
         # Pattern: "summarize <url>"
         m2 = re.match(
             r"^(?:please\s+)?(?:summarize|summarise|read and summarize|read)\s+"
@@ -948,10 +1177,7 @@ class BrowserWorkflowNLP:
             normalized, flags=re.IGNORECASE,
         )
         if m2:
-            url = m2.group(1).strip()
-            if not url.startswith("http"):
-                url = f"https://{url}"
-            return url
+            return _normalize_page_url(m2.group(1))
         return None
 
     def _site_from_url_quick(self, url: str) -> str | None:

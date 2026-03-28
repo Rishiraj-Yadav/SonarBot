@@ -86,15 +86,17 @@ export function BrowserPanel() {
   const [screenshot, setScreenshot] = useState("");
   const [workflow, setWorkflow] = useState<BrowserWorkflow | null>(null);
   const screenshotRef = useRef<HTMLImageElement | null>(null);
+  const loadInFlightRef = useRef(false);
+  const loadAbortRef = useRef<AbortController | null>(null);
 
-  const fetchBrowserData = async () => {
+  const fetchBrowserData = async (signal?: AbortSignal) => {
     const [stateData, tabsData, logsData, downloadsData, profilesData, screenshotData] = await Promise.all([
-      fetchJson<{ state: BrowserState }>("/api/browser/state"),
-      fetchJson<{ tabs: BrowserTab[] }>("/api/browser/tabs"),
-      fetchJson<{ logs: BrowserLog[] }>("/api/browser/logs?limit=8"),
-      fetchJson<{ downloads: BrowserDownload[] }>("/api/browser/downloads?limit=8"),
-      fetchJson<{ profiles: BrowserProfile[] }>("/api/browser/profiles"),
-      fetchJson<{ screenshot: BrowserScreenshot | null }>("/api/browser/live-screenshot"),
+      fetchJson<{ state: BrowserState }>("/api/browser/state", { signal }),
+      fetchJson<{ tabs: BrowserTab[] }>("/api/browser/tabs", { signal }),
+      fetchJson<{ logs: BrowserLog[] }>("/api/browser/logs?limit=8", { signal }),
+      fetchJson<{ downloads: BrowserDownload[] }>("/api/browser/downloads?limit=8", { signal }),
+      fetchJson<{ profiles: BrowserProfile[] }>("/api/browser/profiles", { signal }),
+      fetchJson<{ screenshot: BrowserScreenshot | null }>("/api/browser/live-screenshot", { signal }),
     ]);
     return { stateData, tabsData, logsData, downloadsData, profilesData, screenshotData };
   };
@@ -142,14 +144,29 @@ export function BrowserPanel() {
     let mounted = true;
 
     const load = async () => {
+      if (loadInFlightRef.current) {
+        return;
+      }
+      const controller = new AbortController();
+      loadAbortRef.current?.abort();
+      loadAbortRef.current = controller;
+      loadInFlightRef.current = true;
       try {
-        const data = await fetchBrowserData();
+        const data = await fetchBrowserData(controller.signal);
         if (!mounted) {
           return;
         }
         applyBrowserData(data);
-      } catch {
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
         return;
+      } finally {
+        if (loadAbortRef.current === controller) {
+          loadAbortRef.current = null;
+        }
+        loadInFlightRef.current = false;
       }
     };
 
@@ -210,6 +227,7 @@ export function BrowserPanel() {
 
     return () => {
       mounted = false;
+      loadAbortRef.current?.abort();
       window.clearInterval(timer);
       window.removeEventListener("sonarbot:browser.state", onBrowserState);
       window.removeEventListener("sonarbot:browser.log", onBrowserLog);

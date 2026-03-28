@@ -39,8 +39,21 @@ SITE_URLS: dict[str, str] = {
     "facebook": "https://www.facebook.com",
     # Shopping
     "amazon": "https://www.amazon.com",
+    "amazon india": "https://www.amazon.in",
     "flipkart": "https://www.flipkart.com",
     "ebay": "https://www.ebay.com",
+    "irctc": "https://www.irctc.co.in",
+    "makemytrip": "https://www.makemytrip.com",
+    "cleartrip": "https://www.cleartrip.com",
+    "redbus": "https://www.redbus.in",
+    "swiggy": "https://www.swiggy.com",
+    "zomato": "https://www.zomato.com",
+    "paytm": "https://paytm.com",
+    "zepto": "https://www.zeptonow.com",
+    "blinkit": "https://blinkit.com",
+    "ola": "https://www.olacabs.com",
+    "hdfc netbanking": "https://netbanking.hdfcbank.com",
+    "sbi netbanking": "https://retail.onlinesbi.sbi",
     # News & reference
     "wikipedia": "https://en.wikipedia.org",
     "bbc": "https://www.bbc.com",
@@ -68,6 +81,16 @@ SITE_LOGIN_URLS: dict[str, str] = {
     "facebook": "https://www.facebook.com/login",
     "amazon": "https://www.amazon.com/ap/signin",
     "flipkart": "https://www.flipkart.com/account/login",
+    "irctc": "https://www.irctc.co.in/nget/train-search",
+    "makemytrip": "https://www.makemytrip.com/",
+    "cleartrip": "https://www.cleartrip.com/",
+    "redbus": "https://www.redbus.in/",
+    "swiggy": "https://www.swiggy.com/",
+    "zomato": "https://www.zomato.com/",
+    "paytm": "https://paytm.com/",
+    "ola": "https://www.olacabs.com/",
+    "hdfc netbanking": "https://netbanking.hdfcbank.com/netbanking/",
+    "sbi netbanking": "https://retail.onlinesbi.sbi/retail/login.htm",
     "netflix": "https://www.netflix.com/login",
     "spotify": "https://accounts.spotify.com/login",
 }
@@ -87,8 +110,21 @@ SITE_ALIASES: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram", "instagram.com", "insta"),
     "facebook": ("facebook", "facebook.com", "fb"),
     "amazon": ("amazon", "amazon.com", "amazon.in"),
+    "amazon india": ("amazon india", "amazon.in", "www.amazon.in"),
     "flipkart": ("flipkart", "flipkart.com"),
     "ebay": ("ebay", "ebay.com"),
+    "irctc": ("irctc", "irctc.co.in", "railway", "railways"),
+    "makemytrip": ("makemytrip", "make my trip", "makemytrip.com", "mmt"),
+    "cleartrip": ("cleartrip", "clear trip", "cleartrip.com"),
+    "redbus": ("redbus", "red bus", "redbus.in"),
+    "swiggy": ("swiggy", "swiggy.com"),
+    "zomato": ("zomato", "zomato.com"),
+    "paytm": ("paytm", "paytm.com"),
+    "zepto": ("zepto", "zeptonow", "zeptonow.com"),
+    "blinkit": ("blinkit", "blinkit.com", "grofers"),
+    "ola": ("ola", "ola cabs", "olacabs.com"),
+    "hdfc netbanking": ("hdfc", "hdfc bank", "hdfc netbanking", "netbanking.hdfcbank.com"),
+    "sbi netbanking": ("sbi", "sbi bank", "sbi netbanking", "onlinesbi", "retail.onlinesbi.sbi"),
     "wikipedia": ("wikipedia", "wiki", "wikipedia.org"),
     "hackernews": ("hacker news", "hackernews", "hn", "news.ycombinator.com"),
     "npm": ("npm", "npmjs", "npmjs.com"),
@@ -98,7 +134,24 @@ SITE_ALIASES: dict[str, tuple[str, ...]] = {
     "twitch": ("twitch", "twitch.tv"),
 }
 
-LOGIN_FAVORING_SITES = {"gmail", "leetcode", "linkedin", "instagram", "facebook", "netflix", "spotify"}
+LOGIN_FAVORING_SITES = {
+    "gmail",
+    "leetcode",
+    "linkedin",
+    "instagram",
+    "facebook",
+    "netflix",
+    "spotify",
+    "irctc",
+    "makemytrip",
+    "cleartrip",
+    "redbus",
+    "swiggy",
+    "zomato",
+    "paytm",
+    "hdfc netbanking",
+    "sbi netbanking",
+}
 
 RECIPES: tuple[BrowserWorkflowRecipe, ...] = (
     # ── existing recipes ─────────────────────────────────────
@@ -271,6 +324,42 @@ RECIPES: tuple[BrowserWorkflowRecipe, ...] = (
             "skip ahead 30 seconds",
             "resume playback",
         ),
+    ),
+    BrowserWorkflowRecipe(
+        name="train_search_book",
+        description="Open IRCTC and search trains between two stations, pausing before any irreversible booking step.",
+        examples=(
+            "search trains from borivali to jaipur on irctc",
+            "book train from mumbai to delhi on irctc",
+        ),
+        low_risk=False,
+    ),
+    BrowserWorkflowRecipe(
+        name="flight_search_book",
+        description="Open a travel site and search flights, pausing before passenger or payment confirmation.",
+        examples=(
+            "search flights from mumbai to delhi on makemytrip",
+            "find flights from pune to bangalore on cleartrip",
+        ),
+        low_risk=False,
+    ),
+    BrowserWorkflowRecipe(
+        name="food_search_order",
+        description="Open a food-delivery site, search for a dish or restaurant, and pause before placing the order.",
+        examples=(
+            "search swiggy for biryani near me",
+            "order pizza on zomato",
+        ),
+        low_risk=False,
+    ),
+    BrowserWorkflowRecipe(
+        name="bill_payment_review",
+        description="Open a banking or wallet site in read-only review mode and stop before any money movement.",
+        examples=(
+            "open paytm and review my electricity bill payment page",
+            "open hdfc netbanking and show the login page",
+        ),
+        low_risk=False,
     ),
 )
 

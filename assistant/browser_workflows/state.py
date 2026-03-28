@@ -15,6 +15,8 @@ def empty_browser_task_state() -> dict[str, Any]:
         "active_task": {},
         "pending_confirmation": {},
         "pending_login": {},
+        "pending_otp": {},
+        "pending_captcha": {},
         "pending_disambiguation": {},
         "next_task_mode_override": "",
     }
@@ -55,6 +57,25 @@ def normalize_browser_task_state(raw: dict[str, Any] | None) -> dict[str, Any]:
                 "target_url": str(active.get("target_url", "") or active.get("active_url", "")),
                 "execution_mode": str(active.get("execution_mode", "")),
             }
+    if not normalized["pending_otp"]:
+        active = normalized["active_task"]
+        if str(active.get("blocked_reason", "")).strip().lower() == "otp":
+            normalized["pending_otp"] = {
+                "site_name": str(active.get("site_name", "")),
+                "target_url": str(active.get("target_url", "") or active.get("active_url", "")),
+                "execution_mode": str(active.get("execution_mode", "")),
+                "prompt": str(active.get("otp_prompt", "") or "An OTP is required to continue."),
+            }
+    if not normalized["pending_captcha"]:
+        active = normalized["active_task"]
+        if str(active.get("blocked_reason", "")).strip().lower() == "captcha":
+            normalized["pending_captcha"] = {
+                "site_name": str(active.get("site_name", "")),
+                "target_url": str(active.get("target_url", "") or active.get("active_url", "")),
+                "execution_mode": str(active.get("execution_mode", "")),
+                "prompt": str(active.get("captcha_prompt", "") or "A CAPTCHA must be solved to continue."),
+                "screenshot_path": str(active.get("captcha_screenshot_path", "")),
+            }
 
     return normalized
 
@@ -68,6 +89,8 @@ def browser_task_state_update(
     active_task: dict[str, Any] | None = None,
     pending_confirmation: dict[str, Any] | None = None,
     pending_login: dict[str, Any] | None = None,
+    pending_otp: dict[str, Any] | None = None,
+    pending_captcha: dict[str, Any] | None = None,
     pending_disambiguation: dict[str, Any] | None = None,
     next_task_mode_override: str | None = None,
 ) -> dict[str, Any]:
@@ -78,6 +101,10 @@ def browser_task_state_update(
         state["pending_confirmation"] = deepcopy(pending_confirmation)
     if pending_login:
         state["pending_login"] = deepcopy(pending_login)
+    if pending_otp:
+        state["pending_otp"] = deepcopy(pending_otp)
+    if pending_captcha:
+        state["pending_captcha"] = deepcopy(pending_captcha)
     if pending_disambiguation:
         state["pending_disambiguation"] = deepcopy(pending_disambiguation)
     if next_task_mode_override:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import mimetypes
+import random
 import re
 from collections import deque
 from dataclasses import dataclass, field
@@ -62,6 +64,8 @@ class BrowserRuntime:
     session_index_path: Path = field(init=False)
     screenshots_dir: Path = field(init=False)
     downloads_dir: Path = field(init=False)
+    browser_state_dir: Path = field(init=False)
+    pending_state_path: Path = field(init=False)
     _tabs: dict[str, BrowserTabState] = field(init=False, default_factory=dict)
     _page_tab_ids: dict[int, str] = field(init=False, default_factory=dict)
     _recent_logs: deque[dict[str, Any]] = field(init=False)
@@ -70,6 +74,8 @@ class BrowserRuntime:
     _streaming_user_id: str | None = field(init=False, default=None)
     _pending_login: dict[str, Any] | None = field(init=False, default=None)
     _pending_protected_action: dict[str, Any] | None = field(init=False, default=None)
+    _pending_otp: dict[str, Any] | None = field(init=False, default=None)
+    _pending_captcha: dict[str, Any] | None = field(init=False, default=None)
     _mode_states: dict[str, BrowserModeState] = field(init=False, default_factory=dict)
     _active_mode: str = field(init=False, default="headless")
     _headed_idle_close_task: asyncio.Task[None] | None = field(init=False, default=None)
@@ -80,9 +86,12 @@ class BrowserRuntime:
         self.session_index_path = self.sessions_dir / "index.json"
         self.screenshots_dir = self._resolve_workspace_subdir(self.config.tools.browser_screenshots_subdir)
         self.downloads_dir = self._resolve_workspace_subdir(self.config.tools.browser_downloads_subdir)
+        self.browser_state_dir = self._resolve_workspace_subdir("browser_state")
+        self.pending_state_path = self.browser_state_dir / "pending.json"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.browser_state_dir.mkdir(parents=True, exist_ok=True)
         retention = max(20, int(getattr(self.config.tools, "browser_log_retention", 200)))
         self._recent_logs = deque(maxlen=retention)
         self._recent_downloads = deque(maxlen=retention)
@@ -99,12 +108,58 @@ class BrowserRuntime:
         self.current_user_id = None
         self._tabs = self._mode_states[self._active_mode].tabs
         self._page_tab_ids = self._mode_states[self._active_mode].page_tab_ids
+        self._restore_pending_runtime_state()
 
     def default_mode(self) -> str:
         configured = str(getattr(self.config.browser_execution, "default_mode", "") or "").strip().lower()
         if configured in {"headless", "headed"}:
             return configured
         return "headless" if bool(getattr(self.config.tools, "browser_headless", True)) else "headed"
+
+    def _restore_pending_runtime_state(self) -> None:
+        if not self.pending_state_path.exists():
+            return
+        try:
+            payload = json.loads(self.pending_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        self._pending_login = dict(payload.get("pending_login") or {}) or None
+        self._pending_protected_action = dict(payload.get("pending_protected_action") or {}) or None
+        self._pending_otp = dict(payload.get("pending_otp") or {}) or None
+        self._pending_captcha = dict(payload.get("pending_captcha") or {}) or None
+
+    def _persist_pending_runtime_state(self) -> None:
+        payload = {
+            "pending_login": self._pending_login or None,
+            "pending_protected_action": self._pending_protected_action or None,
+            "pending_otp": self._pending_otp or None,
+            "pending_captcha": self._pending_captcha or None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.pending_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.pending_state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            return
+
+    def _update_pending_runtime_state(self, **updates: Any) -> None:
+        for key, value in updates.items():
+            setattr(self, key, value)
+        self._persist_pending_runtime_state()
+
+    def _resumable_runtime_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.current_tab_id and self.current_tab_id in self._tabs:
+            tab = self._tabs[self.current_tab_id]
+            payload["tab"] = {
+                "tab_id": tab.tab_id,
+                "url": tab.url,
+                "title": tab.title,
+                "mode": self.current_mode(),
+            }
+        return payload
 
     def current_mode(self) -> str:
         return self._active_mode
@@ -307,11 +362,12 @@ class BrowserRuntime:
 
     async def start_login(self, site_name: str, profile_name: str, login_url: str, *, user_id: str | None = None):
         await self._ensure_playwright()
-        self._pending_login = {
+        self._update_pending_runtime_state(_pending_login={
             "site_name": site_name,
             "profile_name": self._normalize_profile_name(profile_name),
             "login_url": login_url,
-        }
+            **self._resumable_runtime_payload(),
+        })
         await self._cancel_headed_idle_close()
         await self._reset_context(storage_state=None, headless=False, profile=None, user_id=user_id)
         assert self.current_tab_id is not None
@@ -404,6 +460,7 @@ class BrowserRuntime:
             str(self._pending_login.get("profile_name", "default")),
             login_url,
         )
+        self._update_pending_runtime_state(_pending_login=None, _pending_otp=None, _pending_captcha=None)
         target_mode = self.default_mode()
         target_headless = self._mode_headless(target_mode)
         if not getattr(self.config.browser_execution, "revert_to_headless_after_manual_step", True):
@@ -623,6 +680,8 @@ class BrowserRuntime:
             },
             "pending_login": dict(self._pending_login) if self._pending_login else None,
             "pending_protected_action": dict(self._pending_protected_action) if self._pending_protected_action else None,
+            "pending_otp": dict(self._pending_otp) if self._pending_otp else None,
+            "pending_captcha": dict(self._pending_captcha) if self._pending_captcha else None,
         }
 
     def _profile_for_active_tab(
@@ -688,6 +747,35 @@ class BrowserRuntime:
             first_tab_id = next(iter(state.tabs))
             return await self._tab_screenshot_payload(mode, first_tab_id)
         return None
+
+    async def summarize_url_temporarily(
+        self,
+        url: str,
+        *,
+        headless: bool = True,
+        screenshot_name: str | None = None,
+    ) -> dict[str, Any]:
+        await self._ensure_playwright()
+        assert self.playwright is not None
+        browser = await self.playwright.chromium.launch(headless=headless)
+        context = await browser.new_context(accept_downloads=False)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1200)
+            summary = await self.page_summarize_rich(page)
+            screenshot_path = None
+            if screenshot_name:
+                screenshot_path = self.screenshots_dir / screenshot_name
+                await page.screenshot(path=str(screenshot_path), full_page=False)
+            return {
+                "url": str(getattr(page, "url", "") or url),
+                "summary": summary,
+                "screenshot_path": str(screenshot_path) if screenshot_path else "",
+            }
+        finally:
+            await context.close()
+            await browser.close()
 
     async def _tab_screenshot_payload(self, mode: str, tab_id: str) -> dict[str, Any] | None:
         state = self._state_for_mode(mode)
@@ -839,14 +927,25 @@ class BrowserRuntime:
     ) -> dict[str, Any]:
         """Scroll the page by pixels or to top/bottom. Returns new scroll position."""
         try:
+            human_simulation = bool(getattr(self.config.browser_execution, "human_simulation", False))
             if to_bottom:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             elif to_top:
                 await page.evaluate("window.scrollTo(0, 0)")
             elif direction.lower() in {"up", "u"}:
-                await page.evaluate(f"window.scrollBy(0, -{pixels})")
+                if human_simulation:
+                    for _ in range(3):
+                        await page.evaluate(f"window.scrollBy(0, -{max(50, pixels // 3)})")
+                        await page.wait_for_timeout(random.randint(80, 180))
+                else:
+                    await page.evaluate(f"window.scrollBy(0, -{pixels})")
             else:
-                await page.evaluate(f"window.scrollBy(0, {pixels})")
+                if human_simulation:
+                    for _ in range(3):
+                        await page.evaluate(f"window.scrollBy(0, {max(50, pixels // 3)})")
+                        await page.wait_for_timeout(random.randint(80, 180))
+                else:
+                    await page.evaluate(f"window.scrollBy(0, {pixels})")
             await page.wait_for_timeout(300)
             scroll_y = await page.evaluate("window.scrollY")
             page_height = await page.evaluate("document.body.scrollHeight")
@@ -916,6 +1015,17 @@ class BrowserRuntime:
     ) -> dict[str, Any]:
         """Click at pixel coordinates (x, y) — used by WebChat click-passthrough."""
         try:
+            if bool(getattr(self.config.browser_execution, "human_simulation", False)):
+                start_x = max(0.0, x + random.randint(-120, 120))
+                start_y = max(0.0, y + random.randint(-120, 120))
+                await page.mouse.move(start_x, start_y)
+                for point_x, point_y in (
+                    (x * 0.4 + start_x * 0.6, y * 0.4 + start_y * 0.6),
+                    (x * 0.7 + start_x * 0.3, y * 0.7 + start_y * 0.3),
+                    (x, y),
+                ):
+                    await page.mouse.move(float(point_x), float(point_y), steps=random.randint(4, 8))
+                    await page.wait_for_timeout(random.randint(35, 90))
             await page.mouse.click(x, y)
             await page.wait_for_timeout(300)
             await self._refresh_tab_state(self.current_tab_id or "", user_id)
@@ -1526,13 +1636,32 @@ class BrowserRuntime:
                 "message": "The browser is blocked by a login page.",
                 "url": current_url,
             }
+        captcha_markers = (
+            "g-recaptcha",
+            "grecaptcha",
+            "hcaptcha",
+            "arkose",
+            "funcaptcha",
+            "cf-challenge",
+            "challenge-container",
+            "captcha-container",
+            "data-sitekey",
+        )
         if any(token in lowered_url for token in ("/sorry/", "recaptcha", "/challenge", "/checkpoint")) or any(
-            phrase in visible_text for phrase in ("captcha", "unusual traffic", "verify you are human")
-        ):
+            phrase in visible_text for phrase in ("captcha", "unusual traffic", "verify you are human", "i am human", "complete the security check")
+        ) or any(marker in html.lower() for marker in captcha_markers):
+            sitekey_match = re.search(r'data-sitekey\s*=\s*["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
+            if sitekey_match is None:
+                sitekey_match = re.search(
+                    r'(?:[?&]|/anchor\?)[^"\']*\bk=([^&"\']+)',
+                    html,
+                    flags=re.IGNORECASE,
+                )
             return {
                 "kind": "captcha",
                 "message": "The browser is blocked by a captcha or human-verification page.",
                 "url": current_url,
+                "sitekey": sitekey_match.group(1) if sitekey_match else "",
             }
         if any(token in lowered_url for token in ("consent.", "consent.google", "beforeyoucontinue")) or any(
             phrase in visible_text for phrase in ("before you continue", "accept all", "reject all", "cookie settings")
@@ -1552,6 +1681,289 @@ class BrowserRuntime:
             }
         return None
 
+    async def detect_otp_requirement(self, page: Any) -> dict[str, Any] | None:
+        selectors = (
+            "input[autocomplete='one-time-code']",
+            "input[name*='otp' i]",
+            "input[id*='otp' i]",
+            "input[placeholder*='otp' i]",
+            "input[name*='verification' i]",
+            "input[id*='verification' i]",
+            "input[placeholder*='verification' i]",
+            "input[type='tel'][maxlength='6']",
+            "input[type='text'][maxlength='6']",
+            "input[inputmode='numeric']",
+        )
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if not await self._locator_supports_fill(locator, timeout_ms=1200):
+                    continue
+                placeholder = ""
+                try:
+                    placeholder = str(await locator.get_attribute("placeholder") or "")
+                except Exception:
+                    placeholder = ""
+                return {
+                    "selector": selector,
+                    "placeholder": placeholder,
+                    "prompt": "An OTP has been sent to your registered device. Reply with the OTP now.",
+                    "url": str(getattr(page, "url", "") or ""),
+                }
+            except Exception:
+                continue
+        return None
+
+    async def set_pending_otp(
+        self,
+        *,
+        site_name: str,
+        selector: str,
+        prompt: str,
+        target_url: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "site_name": site_name,
+            "selector": selector,
+            "prompt": prompt,
+            "target_url": target_url,
+            "tab_id": self.current_tab_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **self._resumable_runtime_payload(),
+        }
+        self._update_pending_runtime_state(_pending_otp=payload)
+        await self._emit_state(user_id or self.current_user_id)
+        return dict(payload)
+
+    async def submit_pending_otp(self, otp: str, *, user_id: str | None = None) -> dict[str, Any]:
+        pending = self._pending_otp
+        if pending is None:
+            raise RuntimeError("There is no OTP waiting to be filled.")
+        selector = str(pending.get("selector", "")).strip()
+        if not selector:
+            raise RuntimeError("The pending OTP challenge is missing its target selector.")
+        self._activate_mode("headed", user_id=user_id)
+        if self.current_tab_id and self.current_tab_id in self._tabs:
+            page = self._tabs[self.current_tab_id].page
+        else:
+            page = await self.get_page(
+                target_url=str(pending.get("target_url", "")).strip() or None,
+                user_id=user_id,
+                headless=False,
+            )
+        locator, _strategy = await self.resolve_locator(page, selector, timeout_seconds=10)
+        try:
+            await locator.fill("")
+        except Exception:
+            pass
+        await locator.type(otp, delay=90 if getattr(self.config.browser_execution, "human_simulation", False) else 0)
+        try:
+            await self.press_key(page, "Enter")
+        except Exception:
+            pass
+        await page.wait_for_timeout(400)
+        await self._refresh_tab_state(self.current_tab_id or "", user_id or self.current_user_id)
+        result = dict(pending)
+        self._update_pending_runtime_state(_pending_otp=None)
+        return result
+
+    async def _capture_captcha_screenshot(self, page: Any) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = self.screenshots_dir / f"captcha-{timestamp}.png"
+        try:
+            for selector in (
+                "iframe[src*='recaptcha']",
+                "iframe[src*='hcaptcha']",
+                "[data-sitekey]",
+                ".g-recaptcha",
+                ".h-captcha",
+                "[class*='captcha']",
+            ):
+                locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=800)
+                await locator.screenshot(path=str(target))
+                return target
+        except Exception:
+            pass
+        await page.screenshot(path=str(target), full_page=False)
+        return target
+
+    async def solve_captcha_with_vision(self, page: Any, model_provider: Any) -> dict[str, Any] | None:
+        if model_provider is None or not hasattr(model_provider, "complete_with_image"):
+            return None
+        try:
+            screenshot_path = await self._capture_captcha_screenshot(page)
+            image_bytes = screenshot_path.read_bytes()
+            prompt = (
+                "This is a CAPTCHA image from a browser. "
+                "If it is a simple text or alphanumeric captcha, return JSON like "
+                '{"status":"solved","answer":"TEXT"}.\n'
+                'If it is an image-selection, checkbox, or slider challenge, return {"status":"unsolvable","kind":"interactive"}.\n'
+                'If you cannot confidently solve it, return {"status":"unsolvable","kind":"unknown"}.'
+            )
+            response = await model_provider.complete_with_image(
+                prompt,
+                image_b64=base64.b64encode(image_bytes).decode("ascii"),
+                image_mime=mimetypes.guess_type(str(screenshot_path))[0] or "image/png",
+            )
+            text = str(response.get("text", "") if isinstance(response, dict) else getattr(response, "text", "") or "").strip()
+            match = re.search(r"\{[\s\S]*\}", text)
+            if not match:
+                return None
+            data = json.loads(match.group())
+            if str(data.get("status", "")).lower() == "solved" and str(data.get("answer", "")).strip():
+                return {
+                    "status": "solved",
+                    "answer": str(data.get("answer", "")).strip(),
+                    "screenshot_path": str(screenshot_path),
+                }
+            return {
+                "status": "unsolved",
+                "kind": str(data.get("kind", "unknown") or "unknown"),
+                "screenshot_path": str(screenshot_path),
+            }
+        except Exception:
+            return None
+
+    async def set_pending_captcha(
+        self,
+        *,
+        site_name: str,
+        prompt: str,
+        target_url: str,
+        screenshot_path: str = "",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "site_name": site_name,
+            "prompt": prompt,
+            "target_url": target_url,
+            "screenshot_path": screenshot_path,
+            "tab_id": self.current_tab_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **self._resumable_runtime_payload(),
+        }
+        self._update_pending_runtime_state(_pending_captcha=payload)
+        await self._emit_state(user_id or self.current_user_id)
+        return dict(payload)
+
+    async def submit_pending_captcha(self, answer: str, *, user_id: str | None = None) -> dict[str, Any]:
+        pending = self._pending_captcha
+        if pending is None:
+            raise RuntimeError("There is no CAPTCHA waiting for an answer.")
+        self._activate_mode("headed", user_id=user_id)
+        if self.current_tab_id and self.current_tab_id in self._tabs:
+            page = self._tabs[self.current_tab_id].page
+        else:
+            page = await self.get_page(
+                target_url=str(pending.get("target_url", "")).strip() or None,
+                user_id=user_id,
+                headless=False,
+            )
+        selector_candidates = (
+            "input[name*='captcha' i]",
+            "input[id*='captcha' i]",
+            "input[placeholder*='captcha' i]",
+            "input[type='text']",
+        )
+        filled = False
+        for selector in selector_candidates:
+            try:
+                locator = page.locator(selector).first
+                if not await self._locator_supports_fill(locator, timeout_ms=1200):
+                    continue
+                await locator.fill("")
+                await locator.type(answer, delay=90 if getattr(self.config.browser_execution, "human_simulation", False) else 0)
+                filled = True
+                break
+            except Exception:
+                continue
+        if not filled:
+            raise RuntimeError("I couldn't find a visible CAPTCHA input field to fill.")
+        try:
+            await self.press_key(page, "Enter")
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
+        await self._refresh_tab_state(self.current_tab_id or "", user_id or self.current_user_id)
+        result = dict(pending)
+        self._update_pending_runtime_state(_pending_captcha=None)
+        return result
+
+    async def inspect_form(self, page: Any) -> dict[str, Any]:
+        schema = await page.evaluate(
+            """() => {
+              const forms = Array.from(document.querySelectorAll('form'));
+              const collectLabel = (element) => {
+                if (!element) return '';
+                const id = element.id || '';
+                if (id) {
+                  const explicit = document.querySelector(`label[for="${id}"]`);
+                  if (explicit && explicit.textContent) return explicit.textContent.trim();
+                }
+                const wrapped = element.closest('label');
+                if (wrapped && wrapped.textContent) return wrapped.textContent.trim();
+                let prev = element.previousElementSibling;
+                while (prev) {
+                  const tag = (prev.tagName || '').toLowerCase();
+                  if (['label', 'span', 'div', 'p'].includes(tag) && prev.textContent && prev.textContent.trim()) {
+                    return prev.textContent.trim();
+                  }
+                  prev = prev.previousElementSibling;
+                }
+                return '';
+              };
+              const serializeField = (element, formIndex) => {
+                const tag = (element.tagName || '').toLowerCase();
+                const type = (element.getAttribute('type') || tag || '').toLowerCase();
+                const options = tag === 'select'
+                  ? Array.from(element.querySelectorAll('option')).map((option) => ({
+                      value: option.value || '',
+                      label: (option.textContent || '').trim(),
+                    }))
+                  : [];
+                return {
+                  form_index: formIndex,
+                  tag,
+                  type,
+                  name: element.getAttribute('name') || '',
+                  id: element.id || '',
+                  placeholder: element.getAttribute('placeholder') || '',
+                  aria_label: element.getAttribute('aria-label') || '',
+                  label: collectLabel(element),
+                  required: !!element.required,
+                  disabled: !!element.disabled,
+                  visible: !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length),
+                  selector_hint: element.id
+                    ? `#${element.id}`
+                    : (element.getAttribute('name') ? `${tag}[name="${element.getAttribute('name')}"]` : tag),
+                  options,
+                };
+              };
+              const results = [];
+              const scan = (root, formIndex) => {
+                root.querySelectorAll('input, select, textarea').forEach((element) => {
+                  results.push(serializeField(element, formIndex));
+                });
+              };
+              if (forms.length) {
+                forms.forEach((form, index) => scan(form, index));
+              } else {
+                scan(document, 0);
+              }
+              return {
+                url: window.location.href,
+                title: document.title,
+                form_count: forms.length || (results.length ? 1 : 0),
+                fields: results,
+              };
+            }"""
+        )
+        if not isinstance(schema, dict):
+            return {"url": str(getattr(page, "url", "") or ""), "title": "", "form_count": 0, "fields": []}
+        return schema
+
     def safe_action_requires_confirmation(self, action_type: str, target: str | None = None) -> bool:
         lowered = action_type.strip().lower()
         if lowered in {"submit", "send", "purchase", "publish", "delete", "merge", "approve"}:
@@ -1562,6 +1974,12 @@ class BrowserRuntime:
 
     def pending_protected_action(self) -> dict[str, Any] | None:
         return dict(self._pending_protected_action) if self._pending_protected_action else None
+
+    def pending_otp(self) -> dict[str, Any] | None:
+        return dict(self._pending_otp) if self._pending_otp else None
+
+    def pending_captcha(self) -> dict[str, Any] | None:
+        return dict(self._pending_captcha) if self._pending_captcha else None
 
     async def prepare_protected_action(
         self,
@@ -1580,7 +1998,7 @@ class BrowserRuntime:
         if self.current_tab_id and self.current_tab_id in self._tabs:
             current_url = str(self._tabs[self.current_tab_id].url or getattr(self._tabs[self.current_tab_id].page, "url", "") or "")
         headed = await self.open_visible_intervention(current_url or target or "about:blank", user_id=user_id)
-        self._pending_protected_action = {
+        self._update_pending_runtime_state(_pending_protected_action={
             "action_type": action_type,
             "selector": selector or "",
             "target": target or current_url,
@@ -1591,7 +2009,8 @@ class BrowserRuntime:
             "timeout_seconds": max(1, int(timeout_seconds)),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "awaiting_followup": "confirmation",
-        }
+            **self._resumable_runtime_payload(),
+        })
         await self._emit_state(user_id or self.current_user_id)
         return dict(self._pending_protected_action)
 
@@ -1612,7 +2031,7 @@ class BrowserRuntime:
             )
             await self.refresh_active_tab(user_id or self.current_user_id)
         result = dict(action)
-        self._pending_protected_action = None
+        self._update_pending_runtime_state(_pending_protected_action=None)
         if getattr(self.config.browser_execution, "revert_to_headless_after_manual_step", True):
             self._activate_mode("headless", user_id=user_id)
             await self._schedule_headed_idle_close()
@@ -1623,7 +2042,7 @@ class BrowserRuntime:
         action = self._pending_protected_action
         if action is None:
             raise RuntimeError("There is no protected browser action waiting for cancellation.")
-        self._pending_protected_action = None
+        self._update_pending_runtime_state(_pending_protected_action=None)
         if getattr(self.config.browser_execution, "revert_to_headless_after_manual_step", True):
             self._activate_mode("headless", user_id=user_id)
             await self._schedule_headed_idle_close()
@@ -1663,6 +2082,7 @@ class BrowserRuntime:
         return resolved
 
     async def close(self) -> None:
+        self._persist_pending_runtime_state()
         await self._stop_streaming()
         await self._cancel_headed_idle_close()
         self._snapshot_active_mode()
@@ -1723,6 +2143,11 @@ class BrowserRuntime:
         if self.context is not None:
             await self.context.close()
         context_kwargs: dict[str, Any] = {"accept_downloads": True}
+        if bool(getattr(self.config.browser_execution, "human_simulation", False)):
+            context_kwargs["viewport"] = {
+                "width": 1366 + random.randint(-50, 50),
+                "height": 768 + random.randint(-40, 40),
+            }
         if storage_state:
             context_kwargs["storage_state"] = storage_state
         self.context = await self.browser.new_context(**context_kwargs)
@@ -1871,6 +2296,10 @@ class BrowserRuntime:
             "url": getattr(page, "url", ""),
             "mode": mode,
         }
+        metadata = await self._post_process_download(target)
+        if metadata:
+            entry["metadata_path"] = metadata.get("metadata_path")
+            entry["extract_preview"] = metadata.get("extract_preview", "")
         self._recent_downloads.append(entry)
         target_user = user_id or state.current_user_id or self.current_user_id
         if target_user:
@@ -1889,6 +2318,40 @@ class BrowserRuntime:
                 },
             )
             await self._emit_state(target_user)
+
+    async def _post_process_download(self, target: Path) -> dict[str, Any] | None:
+        suffix = target.suffix.lower()
+        if suffix not in {".pdf", ".txt", ".html", ".htm", ".md", ".csv", ".json"}:
+            return None
+        text = ""
+        try:
+            if suffix == ".pdf":
+                try:
+                    from pypdf import PdfReader  # type: ignore
+                except Exception:
+                    return None
+                reader = PdfReader(str(target))
+                text = "\n".join((page.extract_text() or "") for page in reader.pages[:10]).strip()
+            else:
+                text = target.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            return None
+        if not text:
+            return None
+        preview = re.sub(r"\s+", " ", text)[:1200]
+        metadata_path = target.with_suffix(f"{target.suffix}.meta.json")
+        payload = {
+            "source_path": str(target),
+            "mime_type": mimetypes.guess_type(str(target))[0] or "application/octet-stream",
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "preview": preview,
+            "char_count": len(text),
+        }
+        try:
+            metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            return None
+        return {"metadata_path": str(metadata_path), "extract_preview": preview}
 
     async def _refresh_tab_state(self, tab_id: str, user_id: str | None = None) -> None:
         state = self._tabs.get(tab_id)

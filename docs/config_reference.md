@@ -25,6 +25,7 @@
 ### `[llm]`
 
 - `gemini_api_key`: string, usually sourced from `.env`
+- `anthropic_api_key`: string, optional; enables Anthropic-backed cheap/background LLM routing when configured
 - `openai_api_key`: string, optional
 
 ### `[channels]`
@@ -153,6 +154,7 @@ You can also inspect and force those workflows through slash commands:
 - `headed_on_high_impact`: boolean, default `true`; reserve irreversible browser actions for visible review/confirmation
 - `revert_to_headless_after_manual_step`: boolean, default `true`; after login or review, return normal work to headless mode
 - `keep_headed_browser_alive_seconds`: integer, default `60`; how long to keep the visible browser open after manual intervention before closing it automatically
+- `human_simulation`: boolean, default `false`; enables slower, more human-like mouse movement, typing, scroll, and viewport variation for bot-sensitive sites
 
 This gives SonarBot a hybrid browser policy:
 

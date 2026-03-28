@@ -490,6 +490,32 @@ async def test_browser_workflow_nlp_matches_youtube_followup_on_active_site(app_
 
 
 @pytest.mark.asyncio
+async def test_browser_workflow_nlp_does_not_hijack_explicit_site_open_with_active_youtube(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.page.url = "https://www.youtube.com/watch?v=abc123"
+    runtime._set_active_tab("tab-1", "https://www.youtube.com/watch?v=abc123", "headed", title="YouTube")
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "open google",
+        runtime_state=runtime.current_state(),
+        previous_state={
+            "active_task": {
+                "recipe_name": "youtube_search_play",
+                "site_name": "youtube",
+                "target_url": "https://www.youtube.com/watch?v=abc123",
+                "execution_mode": "headed",
+            }
+        },
+    )
+
+    assert match is not None
+    assert match.recipe_name == "site_open_and_search"
+    assert match.site_name == "google"
+    assert match.query is None
+
+
+@pytest.mark.asyncio
 async def test_browser_workflow_nlp_tolerates_none_active_tab_in_runtime_state(app_config) -> None:
     runtime = FakeBrowserRuntime()
     nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
@@ -500,6 +526,65 @@ async def test_browser_workflow_nlp_tolerates_none_active_tab_in_runtime_state(a
         previous_state={},
         force=True,
     )
+
+    assert match is None
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_uses_previous_task_for_open_browser_request(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "open browser",
+        runtime_state=runtime.current_state(),
+        previous_state={
+            "active_task": {
+                "recipe_name": "github_repo_inspect",
+                "site_name": "github",
+                "query": "Rishiraj-Yadav/SonarBot",
+                "target_url": "https://github.com/Rishiraj-Yadav/SonarBot",
+                "execution_mode": "headless",
+            }
+        },
+    )
+
+    assert match is not None
+    assert match.recipe_name == "site_open_exact_url_or_path"
+    assert match.site_name == "github"
+    assert match.details["target_url"] == "https://github.com/Rishiraj-Yadav/SonarBot"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_handles_typo_variant_in_show_me_override(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "open browser and show me waht you're doing",
+        previous_state={
+            "active_task": {
+                "recipe_name": "github_repo_inspect",
+                "site_name": "github",
+                "query": "Rishiraj-Yadav/SonarBot",
+                "target_url": "https://github.com/Rishiraj-Yadav/SonarBot",
+                "execution_mode": "headless",
+            }
+        },
+    )
+
+    assert match is not None
+    assert match.recipe_name == "site_open_exact_url_or_path"
+    assert match.details["execution_mode_override"] == "headed"
+    assert match.details["target_url"] == "https://github.com/Rishiraj-Yadav/SonarBot"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_does_not_treat_local_file_read_as_browser_intent(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match("Read TOOLS.md", previous_state={})
 
     assert match is None
 

@@ -137,6 +137,22 @@ def test_browser_runtime_current_state_and_lists(app_config) -> None:
     assert runtime.list_downloads(limit=1)[0]["filename"] == "report.csv"
 
 
+def test_browser_runtime_restores_persistent_pending_challenges(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+    runtime._update_pending_runtime_state(
+        _pending_otp={"site_name": "irctc", "tab_id": "tab-1", "selector": "input[name=otp]"},
+        _pending_captcha={"site_name": "google", "tab_id": "tab-2", "selector": "input[name=captcha]"},
+    )
+
+    _tools_2, restored = build_browser_tools(app_config)
+
+    assert restored.pending_otp()["site_name"] == "irctc"
+    assert restored.pending_captcha()["site_name"] == "google"
+    state = restored.current_state()
+    assert state["pending_otp"]["selector"] == "input[name=otp]"
+    assert state["pending_captcha"]["selector"] == "input[name=captcha]"
+
+
 def test_browser_runtime_hides_mismatched_active_profile_and_dedupes_tabs(app_config) -> None:
     _tools, runtime = build_browser_tools(app_config)
     profile_key = profile_key_for("leetcode.com", "default")
@@ -321,6 +337,80 @@ async def test_browser_runtime_detects_real_login_page_from_password_form(app_co
 
     assert result is not None
     assert result["kind"] == "login"
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_detects_captcha_from_iframe_markers_without_visible_text(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+    page = _BlockingPage(
+        "https://www.google.com/sorry/index",
+        """
+        <html><body>
+        <iframe src="https://www.google.com/recaptcha/api2/anchor?k=test-site-key"></iframe>
+        <div id="rc-anchor-container"></div>
+        </body></html>
+        """,
+    )
+
+    result = await runtime.detect_blocking_state(page)
+
+    assert result is not None
+    assert result["kind"] == "captcha"
+    assert result["sitekey"] == "test-site-key"
+
+
+class _FormPage:
+    url = "https://example.com/form"
+
+    async def evaluate(self, _script: str):
+        return {
+            "url": self.url,
+            "title": "Example Form",
+            "form_count": 1,
+            "fields": [
+                {
+                    "form_index": 0,
+                    "tag": "input",
+                    "type": "email",
+                    "name": "email",
+                    "id": "email",
+                    "placeholder": "Email address",
+                    "aria_label": "",
+                    "label": "Email",
+                    "required": True,
+                    "disabled": False,
+                    "visible": True,
+                    "selector_hint": "#email",
+                    "options": [],
+                },
+                {
+                    "form_index": 0,
+                    "tag": "select",
+                    "type": "select",
+                    "name": "class",
+                    "id": "class",
+                    "placeholder": "",
+                    "aria_label": "",
+                    "label": "Class",
+                    "required": False,
+                    "disabled": False,
+                    "visible": True,
+                    "selector_hint": "#class",
+                    "options": [{"value": "economy", "label": "Economy"}],
+                },
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_browser_runtime_inspect_form_returns_structured_schema(app_config) -> None:
+    _tools, runtime = build_browser_tools(app_config)
+
+    schema = await runtime.inspect_form(_FormPage())
+
+    assert schema["form_count"] == 1
+    assert schema["fields"][0]["label"] == "Email"
+    assert schema["fields"][1]["options"][0]["value"] == "economy"
 
 
 @pytest.mark.asyncio

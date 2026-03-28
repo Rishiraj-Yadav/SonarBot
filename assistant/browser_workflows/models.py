@@ -21,6 +21,7 @@ class BlockingState:
     kind: str
     message: str
     url: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

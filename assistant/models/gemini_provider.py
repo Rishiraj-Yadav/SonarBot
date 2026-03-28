@@ -343,3 +343,33 @@ class GeminiProvider(ModelProvider):
 
     def _chunk_text(self, text: str, size: int = 120) -> list[str]:
         return [text[index : index + size] for index in range(0, len(text), size)] or [text]
+
+    async def complete_with_image(
+        self,
+        prompt: str,
+        *,
+        image_b64: str,
+        image_mime: str = "image/png",
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise RuntimeError("Missing GEMINI_API_KEY or llm.gemini_api_key configuration.")
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": image_mime,
+                                "data": image_b64,
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        data = await self._perform_request(url, payload)
+        text, tool_calls, usage = self._parse_response(data)
+        return {"text": text, "tool_calls": tool_calls, "usage": usage}

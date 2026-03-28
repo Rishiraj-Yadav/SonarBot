@@ -140,6 +140,14 @@ class BrowserWorkflowEngine:
                 result = await self._run_reddit_search_open(match, user_id=user_id, task_state=task_state)
             elif match.recipe_name == "amazon_search_buy":
                 result = await self._run_amazon_search_buy(match, user_id=user_id, task_state=task_state)
+            elif match.recipe_name == "train_search_book":
+                result = await self._run_train_search_book(match, user_id=user_id, task_state=task_state)
+            elif match.recipe_name == "flight_search_book":
+                result = await self._run_flight_search_book(match, user_id=user_id, task_state=task_state)
+            elif match.recipe_name == "food_search_order":
+                result = await self._run_food_search_order(match, user_id=user_id, task_state=task_state)
+            elif match.recipe_name == "bill_payment_review":
+                result = await self._run_bill_payment_review(match, user_id=user_id, task_state=task_state)
             elif match.recipe_name == "web_form_fill_submit":
                 result = await self._run_web_form_fill_submit(match, user_id=user_id, task_state=task_state)
             elif match.recipe_name == "calendar_book":
@@ -177,6 +185,8 @@ class BrowserWorkflowEngine:
                     ),
                     pending_confirmation=task_state.get("pending_confirmation"),
                     pending_login=task_state.get("pending_login"),
+                    pending_otp=task_state.get("pending_otp"),
+                    pending_captcha=task_state.get("pending_captcha"),
                     pending_disambiguation=task_state.get("pending_disambiguation"),
                 ),
                 payload={"raw_error": str(exc)},
@@ -213,6 +223,8 @@ class BrowserWorkflowEngine:
                 active_task=active_browser_task(task_state),
                 pending_confirmation=dict(task_state.get("pending_confirmation") or {}),
                 pending_login=dict(task_state.get("pending_login") or {}),
+                pending_otp=dict(task_state.get("pending_otp") or {}),
+                pending_captcha=dict(task_state.get("pending_captcha") or {}),
                 pending_disambiguation=pending,
                 next_task_mode_override=str(task_state.get("next_task_mode_override", "") or ""),
             ),
@@ -1225,10 +1237,33 @@ class BrowserWorkflowEngine:
     async def _detect_blocker(self, page: Any) -> BlockingState | None:
         payload = await self._step_with_watchdog(self.runtime.detect_blocking_state(page))
         if payload:
+            kind = str(payload.get("kind", "blocked"))
+            if kind == "captcha":
+                solver = getattr(self.runtime, "solve_captcha_with_vision", None)
+                model_provider = getattr(self.tool_registry, "model_provider", None)
+                if callable(solver) and model_provider is not None:
+                    solved = await self._step_with_watchdog(solver(page, model_provider))
+                    if isinstance(solved, dict) and str(solved.get("status", "")).lower() == "solved":
+                        await self.runtime.set_pending_captcha(
+                            site_name=self._site_from_url(str(getattr(page, "url", "") or "")) or "site",
+                            prompt="I solved a simple CAPTCHA automatically and tried to continue.",
+                            target_url=str(getattr(page, "url", "") or ""),
+                            screenshot_path=str(solved.get("screenshot_path", "")),
+                            user_id=getattr(self.runtime, "current_user_id", None),
+                        )
+                        await self.runtime.submit_pending_captcha(
+                            str(solved.get("answer", "")),
+                            user_id=getattr(self.runtime, "current_user_id", None),
+                        )
+                        await self.runtime.refresh_active_tab(getattr(self.runtime, "current_user_id", None))
+                        return None
+                    if isinstance(solved, dict) and str(solved.get("screenshot_path", "")).strip():
+                        payload["screenshot_path"] = str(solved.get("screenshot_path", "")).strip()
             return BlockingState(
-                kind=str(payload.get("kind", "blocked")),
+                kind=kind,
                 message=str(payload.get("message", "The browser is blocked.")),
                 url=payload.get("url"),
+                details=dict(payload),
             )
         # Phase B: vision-assisted fallback
         vision_detect = getattr(self.runtime, "vision_detect_blocking_state", None)
@@ -1240,6 +1275,17 @@ class BrowserWorkflowEngine:
                     kind=str(vision_payload.get("kind", "blocked")),
                     message=str(vision_payload.get("message", "Vision-detected blocker on page.")),
                     url=vision_payload.get("url"),
+                    details=dict(vision_payload),
+                )
+        detect_otp = getattr(self.runtime, "detect_otp_requirement", None)
+        if callable(detect_otp):
+            otp_payload = await self._step_with_watchdog(detect_otp(page))
+            if otp_payload:
+                return BlockingState(
+                    kind="otp",
+                    message=str(otp_payload.get("prompt", "An OTP is required to continue.")),
+                    url=str(otp_payload.get("url", "") or getattr(page, "url", "") or ""),
+                    details=dict(otp_payload),
                 )
         return None
 
@@ -1267,6 +1313,77 @@ class BrowserWorkflowEngine:
                 opened_visible = True
         except Exception:
             opened_visible = False
+        pending_login = None
+        pending_otp = None
+        pending_captcha = None
+        response_text = blocked.message
+        if blocked.kind == "login":
+            pending_login = {
+                "site_name": match.site_name,
+                "target_url": blocked.url or match.details.get("target_url", ""),
+                "execution_mode": "headed" if opened_visible else self._desired_mode_for_match(match),
+            }
+            response_text = (
+                f"{blocked.message} "
+                + (
+                    "I opened a visible browser window on the host machine so you can clear it there. Say \"continue\" when you're done."
+                    if opened_visible
+                    else "Clear it in the visible browser on the host machine, then say \"continue\"."
+                )
+            )
+        elif blocked.kind == "otp":
+            set_pending_otp = getattr(self.runtime, "set_pending_otp", None)
+            if callable(set_pending_otp):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        set_pending_otp(
+                            site_name=match.site_name or self._site_from_url(blocked.url),
+                            selector=str(blocked.details.get("selector", "")).strip(),
+                            prompt=str(blocked.details.get("prompt", "") or blocked.message),
+                            target_url=blocked.url or str(match.details.get("target_url", "") or ""),
+                            user_id=self.runtime.current_user_id,
+                        )
+                    )
+                except Exception:
+                    pass
+            pending_otp = {
+                "site_name": match.site_name,
+                "target_url": blocked.url or match.details.get("target_url", ""),
+                "execution_mode": "headed" if opened_visible else self._desired_mode_for_match(match),
+                "prompt": str(blocked.details.get("prompt", "") or blocked.message),
+                "selector": str(blocked.details.get("selector", "")).strip(),
+            }
+            response_text = f'{blocked.message} Reply with the OTP code to continue.'
+        elif blocked.kind == "captcha":
+            set_pending_captcha = getattr(self.runtime, "set_pending_captcha", None)
+            if callable(set_pending_captcha):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        set_pending_captcha(
+                            site_name=match.site_name or self._site_from_url(blocked.url),
+                            prompt="Please solve the CAPTCHA and reply with the answer.",
+                            target_url=blocked.url or str(match.details.get("target_url", "") or ""),
+                            screenshot_path=str(blocked.details.get("screenshot_path", "")),
+                            user_id=self.runtime.current_user_id,
+                        )
+                    )
+                except Exception:
+                    pass
+            pending_captcha = {
+                "site_name": match.site_name,
+                "target_url": blocked.url or match.details.get("target_url", ""),
+                "execution_mode": "headed" if opened_visible else self._desired_mode_for_match(match),
+                "prompt": "Please solve the CAPTCHA and reply with the answer.",
+                "screenshot_path": str(blocked.details.get("screenshot_path", "")),
+            }
+            response_text = (
+                "The browser is blocked by a CAPTCHA or human-verification challenge. "
+                "Reply with the CAPTCHA answer to continue."
+            )
+            if str(blocked.details.get("screenshot_path", "")).strip():
+                response_text += f"\nCAPTCHA screenshot: {blocked.details['screenshot_path']}"
         state = browser_task_state_update(
             active_task=self._build_workflow_state(
                 recipe_name=match.recipe_name,
@@ -1277,32 +1394,22 @@ class BrowserWorkflowEngine:
                 blocked_reason=blocked.kind,
                 blocked_url=blocked.url,
                 awaiting_followup="continue",
+                otp_prompt=str(blocked.details.get("prompt", "")),
+                captcha_prompt="Please solve the CAPTCHA and reply with the answer.",
+                captcha_screenshot_path=str(blocked.details.get("screenshot_path", "")),
             ),
-            pending_login=(
-                {
-                    "site_name": match.site_name,
-                    "target_url": blocked.url or match.details.get("target_url", ""),
-                    "execution_mode": "headed" if opened_visible else self._desired_mode_for_match(match),
-                }
-                if blocked.kind == "login"
-                else None
-            ),
+            pending_login=pending_login,
+            pending_otp=pending_otp,
+            pending_captcha=pending_captcha,
         )
         return BrowserWorkflowResult(
             recipe_name=match.recipe_name,
             status="blocked",
-            response_text=(
-                f"{blocked.message} "
-                + (
-                    "I opened a visible browser window on the host machine so you can clear it there. Say \"continue\" when you're done."
-                    if opened_visible
-                    else "Clear it in the visible browser on the host machine, then say \"continue\"."
-                )
-            ),
+            response_text=response_text,
             progress_lines=progress,
             steps=steps,
             state_update=state,
-            payload={"blocking_reason": blocked.kind, "url": blocked.url},
+            payload={"blocking_reason": blocked.kind, "url": blocked.url, **dict(blocked.details)},
         )
 
     def _has_active_profile(self, site_name: str) -> bool:
@@ -1604,7 +1711,11 @@ class BrowserWorkflowEngine:
             return self._blocked_result(match, blocked, progress, steps)
         summary = await self.runtime.page_summarize_rich(page)
         candidates = await self.runtime.list_clickable_candidates(page, limit=15)
-        progress.append(f"Page has {len(candidates)} interactive elements and {summary.get('word_count', 0)} words.")
+        form_schema = await self.runtime.inspect_form(page)
+        progress.append(
+            f"Page has {len(candidates)} interactive elements, {summary.get('word_count', 0)} words, "
+            f"and {int(form_schema.get('form_count', 0))} form(s)."
+        )
         await self._emit_step(user_id, match.recipe_name, "enumerate_elements", progress[-1])
         elements_text = "\n".join(
             f"  [{idx}] {'<' + item['tag'] + '>'} \"" + (item.get('text') or item.get('aria_label') or '') + '"'
@@ -1633,6 +1744,7 @@ class BrowserWorkflowEngine:
                 "tab_id": self.runtime.current_tab_id,
                 "page_summary": summary,
                 "clickable_candidates": candidates[:10],
+                "form_schema": form_schema,
             },
         )
 
@@ -1733,7 +1845,8 @@ class BrowserWorkflowEngine:
         summaries: list[dict[str, Any]] = []
         progress: list[str] = []
         steps: list[WorkflowPlanStep] = []
-        for i, url in enumerate(urls):
+        async def _summarize_target(index: int, raw_url: str) -> tuple[int, dict[str, Any], str]:
+            url = raw_url
             if not url.startswith("http"):
                 url = f"https://{url}"
             try:
@@ -1744,14 +1857,19 @@ class BrowserWorkflowEngine:
                 if getattr(self.config.browser_workflows, "auto_dismiss_consent", True) and callable(auto_dismiss):
                     await auto_dismiss(page)
                 page_summary = await self.runtime.page_summarize_rich(page)
-                summaries.append({"url": url, "title": page_summary.get("title", url), "text": page_summary.get("text", "")[:1500]})
-                msg = f"Tab {i + 1}: Opened and read {page_summary.get('title', url)}."
+                summary = {"url": url, "title": page_summary.get("title", url), "text": page_summary.get("text", "")[:1500]}
+                msg = f"Tab {index + 1}: Opened and read {page_summary.get('title', url)}."
             except Exception as exc:
-                summaries.append({"url": url, "title": url, "text": f"Error: {exc}"})
-                msg = f"Tab {i + 1}: Could not open {url}."
+                summary = {"url": url, "title": url, "text": f"Error: {exc}"}
+                msg = f"Tab {index + 1}: Could not open {url}."
+            return index, summary, msg
+
+        results = await asyncio.gather(*(_summarize_target(i, url) for i, url in enumerate(urls)))
+        for index, summary, msg in sorted(results, key=lambda item: item[0]):
+            summaries.append(summary)
             progress.append(msg)
-            steps.append(WorkflowPlanStep(name=f"open_tab_{i + 1}", detail=msg, status="completed"))
-            await self._emit_step(user_id, match.recipe_name, f"open_tab_{i + 1}", msg)
+            steps.append(WorkflowPlanStep(name=f"open_tab_{index + 1}", detail=msg, status="completed"))
+            await self._emit_step(user_id, match.recipe_name, f"open_tab_{index + 1}", msg)
         # Synthesize
         combined_text = "\n\n".join(
             f"[{s['title']}]({s['url']}):\n{s['text']}" for s in summaries
@@ -1988,6 +2106,272 @@ class BrowserWorkflowEngine:
     # Phase D — web_form_fill_submit
     # ──────────────────────────────────────────────────────────────────────────
 
+    async def _fill_first_candidate(self, page: Any, selectors: list[str], value: str) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=3000)
+                await locator.click(timeout=3000)
+                await locator.fill("")
+                await locator.type(value, delay=90 if getattr(self.config.browser_execution, "human_simulation", False) else 0)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _click_first_candidate(self, page: Any, selectors: list[str]) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=3000)
+                await locator.click(timeout=3000)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _run_train_search_book(
+        self,
+        match: BrowserWorkflowMatch,
+        *,
+        user_id: str,
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowResult:
+        source = str(match.details.get("source", "") or "").strip()
+        destination = str(match.details.get("destination", "") or "").strip()
+        travel_date = str(match.details.get("travel_date", "") or "").strip()
+        preview = self._maybe_preview_workflow_plan(
+            match,
+            task_state,
+            execution_mode="headed",
+            target_url=SITE_URLS.get("irctc", ""),
+            steps=[
+                WorkflowPlanStep(name="open_irctc", detail="Open IRCTC."),
+                WorkflowPlanStep(name="fill_route", detail=f"Fill train route from {source} to {destination}."),
+                WorkflowPlanStep(name="search_trains", detail="Search trains and stop before any irreversible booking action."),
+            ],
+            resume_details={"source": source, "destination": destination, "travel_date": travel_date},
+        )
+        if preview is not None:
+            return preview
+        page = await self._open_site("irctc", user_id=user_id, headless=False)
+        progress = ["Opened IRCTC."]
+        steps = [WorkflowPlanStep(name="open_irctc", detail="Open IRCTC.", status="completed")]
+        await self._emit_step(user_id, match.recipe_name, "open_irctc", progress[-1])
+        blocked = await self._detect_blocker(page)
+        if blocked:
+            return self._blocked_result(match, blocked, progress, steps)
+        await self._fill_first_candidate(page, [
+            "input[placeholder*='From' i]",
+            "input[aria-label*='From' i]",
+            "input[formcontrolname*='from' i]",
+        ], source)
+        await self._fill_first_candidate(page, [
+            "input[placeholder*='To' i]",
+            "input[aria-label*='To' i]",
+            "input[formcontrolname*='dest' i]",
+        ], destination)
+        if travel_date:
+            await self._fill_first_candidate(page, [
+                "input[placeholder*='DD/MM/YYYY' i]",
+                "input[aria-label*='Date' i]",
+                "input[formcontrolname*='journeyDate' i]",
+            ], travel_date)
+        await self._click_first_candidate(page, [
+            "button:has-text('Search Trains')",
+            "button[type='submit']",
+            "button.search_btn",
+        ])
+        await self.runtime.post_action_wait(page, "domcontentloaded", 20)
+        await self.runtime.refresh_active_tab(user_id)
+        progress.append(f"Filled train search from {source} to {destination}.")
+        steps.append(WorkflowPlanStep(name="fill_route", detail="Fill the train route.", status="completed"))
+        await self._emit_step(user_id, match.recipe_name, "fill_route", progress[-1])
+        return BrowserWorkflowResult(
+            recipe_name=match.recipe_name,
+            status="blocked",
+            response_text=(
+                f'Searched IRCTC for trains from "{source}" to "{destination}". '
+                "I've stopped before any booking or payment step."
+            ),
+            progress_lines=progress,
+            steps=steps,
+            state_update=browser_task_state_update(
+                active_task=self._build_workflow_state(
+                    recipe_name=match.recipe_name,
+                    site_name="irctc",
+                    query=f"{source} to {destination}",
+                    target_url=page.url,
+                    execution_mode="headed",
+                    awaiting_followup="site_action",
+                    blocked_reason="review_required",
+                )
+            ),
+            payload={"tab_id": self.runtime.current_tab_id, "source": source, "destination": destination},
+        )
+
+    async def _run_flight_search_book(
+        self,
+        match: BrowserWorkflowMatch,
+        *,
+        user_id: str,
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowResult:
+        site_name = str(match.site_name or match.details.get("site_name") or "makemytrip").strip() or "makemytrip"
+        source = str(match.details.get("source", "") or "").strip()
+        destination = str(match.details.get("destination", "") or "").strip()
+        travel_date = str(match.details.get("travel_date", "") or "").strip()
+        preview = self._maybe_preview_workflow_plan(
+            match,
+            task_state,
+            execution_mode="headed",
+            target_url=SITE_URLS.get(site_name, ""),
+            steps=[
+                WorkflowPlanStep(name="open_travel_site", detail=f"Open {site_name}."),
+                WorkflowPlanStep(name="fill_route", detail=f"Fill flight route from {source} to {destination}."),
+                WorkflowPlanStep(name="search_flights", detail="Search flights and stop before passenger/payment confirmation."),
+            ],
+            resume_details={"site_name": site_name, "source": source, "destination": destination, "travel_date": travel_date},
+        )
+        if preview is not None:
+            return preview
+        page = await self._open_site(site_name, user_id=user_id, headless=False)
+        progress = [f"Opened {site_name.title()}."]
+        steps = [WorkflowPlanStep(name="open_travel_site", detail=f"Open {site_name.title()}.", status="completed")]
+        await self._emit_step(user_id, match.recipe_name, "open_travel_site", progress[-1])
+        blocked = await self._detect_blocker(page)
+        if blocked:
+            return self._blocked_result(match, blocked, progress, steps)
+        await self._fill_first_candidate(page, [
+            "input[placeholder*='From' i]",
+            "input[aria-label*='From' i]",
+            "input[placeholder*='Where from' i]",
+        ], source)
+        await self._fill_first_candidate(page, [
+            "input[placeholder*='To' i]",
+            "input[aria-label*='To' i]",
+            "input[placeholder*='Where to' i]",
+        ], destination)
+        if travel_date:
+            await self._fill_first_candidate(page, [
+                "input[placeholder*='Departure' i]",
+                "input[aria-label*='Date' i]",
+                "input[placeholder*='Date' i]",
+            ], travel_date)
+        await self._click_first_candidate(page, ["button:has-text('Search')", "button[type='submit']"])
+        await self.runtime.post_action_wait(page, "domcontentloaded", 20)
+        await self.runtime.refresh_active_tab(user_id)
+        progress.append(f"Filled flight search from {source} to {destination}.")
+        steps.append(WorkflowPlanStep(name="fill_route", detail="Fill flight route.", status="completed"))
+        await self._emit_step(user_id, match.recipe_name, "fill_route", progress[-1])
+        return BrowserWorkflowResult(
+            recipe_name=match.recipe_name,
+            status="blocked",
+            response_text=(
+                f'Searched {site_name.title()} for flights from "{source}" to "{destination}". '
+                "I've paused before any passenger or payment confirmation."
+            ),
+            progress_lines=progress,
+            steps=steps,
+            state_update=browser_task_state_update(
+                active_task=self._build_workflow_state(
+                    recipe_name=match.recipe_name,
+                    site_name=site_name,
+                    query=f"{source} to {destination}",
+                    target_url=page.url,
+                    execution_mode="headed",
+                    awaiting_followup="site_action",
+                    blocked_reason="review_required",
+                )
+            ),
+            payload={"tab_id": self.runtime.current_tab_id, "site_name": site_name},
+        )
+
+    async def _run_food_search_order(
+        self,
+        match: BrowserWorkflowMatch,
+        *,
+        user_id: str,
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowResult:
+        site_name = str(match.site_name or match.details.get("site_name") or "swiggy").strip() or "swiggy"
+        query = str(match.query or match.details.get("query") or "").strip()
+        page = await self._open_site(site_name, user_id=user_id, headless=False)
+        progress = [f"Opened {site_name.title()}."]
+        steps = [WorkflowPlanStep(name="open_food_site", detail=f"Open {site_name.title()}.", status="completed")]
+        await self._emit_step(user_id, match.recipe_name, "open_food_site", progress[-1])
+        blocked = await self._detect_blocker(page)
+        if blocked:
+            return self._blocked_result(match, blocked, progress, steps)
+        search_box, _ = await self._find_search_input(page, site_name=site_name)
+        await self._step_with_watchdog(search_box.fill(query))
+        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 20))
+        await self.runtime.refresh_active_tab(user_id)
+        progress.append(f'Searched {site_name.title()} for "{query}".')
+        steps.append(WorkflowPlanStep(name="search_food", detail="Search for the requested food or restaurant.", status="completed"))
+        await self._emit_step(user_id, match.recipe_name, "search_food", progress[-1])
+        return BrowserWorkflowResult(
+            recipe_name=match.recipe_name,
+            status="blocked",
+            response_text=(
+                f'Searched {site_name.title()} for "{query}". '
+                "I've paused before placing any order or checkout."
+            ),
+            progress_lines=progress,
+            steps=steps,
+            state_update=browser_task_state_update(
+                active_task=self._build_workflow_state(
+                    recipe_name=match.recipe_name,
+                    site_name=site_name,
+                    query=query,
+                    target_url=page.url,
+                    execution_mode="headed",
+                    awaiting_followup="site_action",
+                    blocked_reason="review_required",
+                )
+            ),
+            payload={"tab_id": self.runtime.current_tab_id, "site_name": site_name, "query": query},
+        )
+
+    async def _run_bill_payment_review(
+        self,
+        match: BrowserWorkflowMatch,
+        *,
+        user_id: str,
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowResult:
+        site_name = str(match.site_name or match.details.get("site_name") or "").strip()
+        page = await self._open_site(site_name, user_id=user_id, headless=False)
+        progress = [f"Opened {site_name.title()} in read-only review mode."]
+        steps = [WorkflowPlanStep(name="open_finance_site", detail=f"Open {site_name.title()}.", status="completed")]
+        await self._emit_step(user_id, match.recipe_name, "open_finance_site", progress[-1])
+        blocked = await self._detect_blocker(page)
+        if blocked:
+            return self._blocked_result(match, blocked, progress, steps)
+        return BrowserWorkflowResult(
+            recipe_name=match.recipe_name,
+            status="blocked",
+            response_text=(
+                f"Opened {site_name.title()} in read-only review mode. "
+                "I will not perform any money movement or irreversible payment action from this workflow."
+            ),
+            progress_lines=progress,
+            steps=steps,
+            state_update=browser_task_state_update(
+                active_task=self._build_workflow_state(
+                    recipe_name=match.recipe_name,
+                    site_name=site_name,
+                    query=str(match.query or ""),
+                    target_url=page.url,
+                    execution_mode="headed",
+                    awaiting_followup="site_action",
+                    blocked_reason="read_only_review",
+                )
+            ),
+            payload={"tab_id": self.runtime.current_tab_id, "read_only": True, "site_name": site_name},
+        )
+
     async def _run_web_form_fill_submit(
         self,
         match: BrowserWorkflowMatch,
@@ -2028,18 +2412,88 @@ class BrowserWorkflowEngine:
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
+        form_schema = await self.runtime.inspect_form(page)
         if fields:
             filled: list[str] = []
+            normalized_fields = {
+                re.sub(r"[^a-z0-9]+", "", str(key).lower()): str(value)
+                for key, value in fields.items()
+            }
+            discovered_fields = list(form_schema.get("fields") or [])
             for selector, value in fields.items():
                 try:
                     locator, _ = await self.runtime.resolve_locator(page, selector, timeout_seconds=8)
                     await locator.fill(str(value), timeout=8000)
                     filled.append(selector)
                 except Exception:
-                    pass
+                    compact_selector = re.sub(r"[^a-z0-9]+", "", str(selector).lower())
+                    best_match = None
+                    for candidate in discovered_fields:
+                        hints = " ".join(
+                            str(candidate.get(key, "") or "")
+                            for key in ("label", "name", "id", "placeholder", "aria_label")
+                        ).lower()
+                        if compact_selector and compact_selector in re.sub(r"[^a-z0-9]+", "", hints):
+                            best_match = candidate
+                            break
+                    if best_match and str(best_match.get("selector_hint", "")).strip():
+                        try:
+                            locator, _ = await self.runtime.resolve_locator(
+                                page,
+                                str(best_match.get("selector_hint", "")).strip(),
+                                timeout_seconds=8,
+                            )
+                            await locator.fill(str(value), timeout=8000)
+                            filled.append(str(best_match.get("selector_hint", "")).strip())
+                        except Exception:
+                            continue
+            if not filled and discovered_fields:
+                mapped = 0
+                for candidate in discovered_fields:
+                    hints = [
+                        re.sub(r"[^a-z0-9]+", "", str(candidate.get(key, "")).lower())
+                        for key in ("label", "name", "id", "placeholder", "aria_label")
+                    ]
+                    selector_hint = str(candidate.get("selector_hint", "")).strip()
+                    if not selector_hint:
+                        continue
+                    value = next((normalized_fields.get(hint) for hint in hints if hint and normalized_fields.get(hint)), None)
+                    if value is None:
+                        continue
+                    try:
+                        locator, _ = await self.runtime.resolve_locator(page, selector_hint, timeout_seconds=8)
+                        await locator.fill(str(value), timeout=8000)
+                        mapped += 1
+                    except Exception:
+                        continue
+                if mapped:
+                    filled.append(f"{mapped} mapped fields")
             progress.append(f"Filled {len(filled)} form fields.")
             steps.append(WorkflowPlanStep(name="fill_fields", detail="Fill form fields.", status="completed"))
             await self._emit_step(user_id, match.recipe_name, "fill_fields", progress[-1])
+        elif form_schema.get("fields"):
+            field_descriptions = []
+            for field in list(form_schema.get("fields") or [])[:10]:
+                label = str(field.get("label") or field.get("placeholder") or field.get("name") or field.get("id") or field.get("tag") or "field")
+                field_descriptions.append(f"- {label}")
+            return BrowserWorkflowResult(
+                recipe_name=match.recipe_name,
+                status="needs_followup",
+                response_text="I inspected the form, but I still need the values to fill.\nAvailable fields:\n" + "\n".join(field_descriptions),
+                progress_lines=progress,
+                steps=steps,
+                state_update=browser_task_state_update(
+                    active_task=self._build_workflow_state(
+                        recipe_name=match.recipe_name,
+                        site_name=self._site_from_url(page.url),
+                        query=target_url,
+                        target_url=page.url,
+                        execution_mode="headed",
+                        awaiting_followup="site_action",
+                    )
+                ),
+                payload={"form_schema": form_schema, "target_url": target_url},
+            )
         pending = await self.runtime.prepare_protected_action(
             "submit",
             selector="button[type='submit'], input[type='submit'], button:has-text('Submit')",

@@ -31,6 +31,7 @@ from assistant.channels.base import ChannelMessage
 from assistant.channels.telegram.adapter import TelegramChannel
 from assistant.channels.webchat import get_webchat_device_id
 from assistant.browser_workflows import BrowserWorkflowEngine
+from assistant.browser_workflows.browser_monitors import BrowserMonitorService
 from assistant.config import AppConfig, load_config
 from assistant.context_engine import ContextEngine
 from assistant.gateway.auth import authenticate_token
@@ -52,6 +53,37 @@ from assistant.tools import create_default_tool_registry
 from assistant.utils import configure_logging, get_logger
 from assistant.utils.user_facing_errors import sanitize_error_text
 from assistant.users import UserProfileStore
+
+
+def _is_benign_windows_connection_reset(context: dict[str, Any]) -> bool:
+    exception = context.get("exception")
+    if not isinstance(exception, ConnectionResetError):
+        return False
+    if getattr(exception, "winerror", None) != 10054:
+        return False
+    message = str(context.get("message", "") or "")
+    handle = context.get("handle")
+    callback_repr = repr(handle) if handle is not None else ""
+    return "_ProactorBasePipeTransport._call_connection_lost" in message or (
+        "_ProactorBasePipeTransport._call_connection_lost" in callback_repr
+    )
+
+
+def _install_loop_exception_filter(logger: Any) -> Any:
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+
+    def _handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        if _is_benign_windows_connection_reset(context):
+            logger.debug("Ignoring benign Windows connection reset from a closed browser/WebChat socket.")
+            return
+        if previous_handler is not None:
+            previous_handler(loop, context)
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+    return previous_handler
 
 
 @dataclass(slots=True)
@@ -83,11 +115,13 @@ class GatewayServices:
     logger: Any
     user_profiles: UserProfileStore
     automation_store: AutomationStore
+    notification_dispatcher: NotificationDispatcher
     automation_engine: AutomationEngine
     context_engine: ContextEngine
     system_access_manager: SystemAccessManager
     browser_runtime: Any
     browser_workflow_engine: BrowserWorkflowEngine | None
+    browser_monitor_service: BrowserMonitorService | None
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -97,6 +131,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         runtime_config.ensure_runtime_dirs()
         configure_logging(runtime_config.logs_dir / "gateway.log")
         logger = get_logger("gateway")
+        loop = asyncio.get_running_loop()
+        previous_loop_exception_handler = _install_loop_exception_filter(logger)
         connection_manager = ConnectionManager(rate_limit_per_minute=runtime_config.gateway.rate_limit_per_minute)
         device_registry = DeviceRegistry(runtime_config)
         await device_registry.initialize()
@@ -197,6 +233,11 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         automation_store = AutomationStore(runtime_config)
         await automation_store.initialize()
         notification_dispatcher = NotificationDispatcher(runtime_config, automation_store, user_profiles, connection_manager)
+        browser_monitor_service = (
+            BrowserMonitorService(runtime_config, browser_runtime, notification_dispatcher)
+            if browser_runtime is not None
+            else None
+        )
         automation_engine = AutomationEngine(
             runtime_config,
             agent_loop,
@@ -218,6 +259,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles=user_profiles,
         )
         router.automation_engine = automation_engine
+        router.browser_monitor_service = browser_monitor_service
         automation_scheduler = AutomationScheduler(runtime_config, automation_engine)
         automation_engine.set_scheduler(automation_scheduler)
         heartbeat_service = HeartbeatService(runtime_config, agent_loop, automation_engine)
@@ -249,11 +291,13 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             logger=logger,
             user_profiles=user_profiles,
             automation_store=automation_store,
+            notification_dispatcher=notification_dispatcher,
             automation_engine=automation_engine,
             context_engine=context_engine,
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
             browser_workflow_engine=browser_workflow_engine,
+            browser_monitor_service=browser_monitor_service,
         )
         browser_health_task: asyncio.Task[None] | None = None
         await session_manager.start_pruning_task()
@@ -267,6 +311,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             connection_manager.register_channel(channel)
             await channel.start()
         await context_engine.start()
+        if browser_monitor_service is not None:
+            await browser_monitor_service.start()
         if browser_runtime is not None:
             async def _run_browser_health_checks() -> None:
                 try:
@@ -290,9 +336,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         try:
             yield
         finally:
+            loop.set_exception_handler(previous_loop_exception_handler)
             if browser_health_task is not None and not browser_health_task.done():
                 browser_health_task.cancel()
                 await asyncio.gather(browser_health_task, return_exceptions=True)
+            if browser_monitor_service is not None:
+                await browser_monitor_service.stop()
             await agent_loop.wait_for_idle(timeout=30)
             await connection_manager.close_all()
             for channel in channels:

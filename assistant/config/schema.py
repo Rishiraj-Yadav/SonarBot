@@ -45,6 +45,7 @@ class AgentConfig(BaseModel):
 class LlmConfig(BaseModel):
     gemini_api_key: str
     openai_api_key: str = ""
+    anthropic_api_key: str = ""
 
 
 class OAuthGoogleConfig(BaseModel):
@@ -197,6 +198,7 @@ class BrowserExecutionConfig(BaseModel):
     keep_headed_browser_alive_seconds: int = 60
     # Per-step watchdog timeout in seconds; 0 = disabled
     step_timeout_seconds: int = 45
+    human_simulation: bool = False
 
 
 class ToolsConfig(BaseModel):
