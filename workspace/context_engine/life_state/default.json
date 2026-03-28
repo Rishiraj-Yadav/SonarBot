@@ -1,0 +1,286 @@
+{
+  "generated_at": "2026-03-28T07:38:16.570824+00:00",
+  "user_id": "default",
+  "memory": {
+    "long_term": "# Long-Term Memory Phase 1 does not yet maintain structured long-term memory beyond this starter file.",
+    "recent_daily": "### 2026-03-27 ## 03:13:04 UTC Rishiraj was assisted with various tasks including browsing, email, file management, ERP interaction and app creation."
+  },
+  "recent_sessions": [
+    {
+      "session_key": "main",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "I'm refreshing my understanding of the workspace instructions and user preferences by reviewing AGENT.md and USER.md. I'll be ready for your next instruction shortly."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        },
+        {
+          "role": "assistant",
+          "content": "I am reviewing AGENT.md and USER.md to refresh my understanding of the workspace instructions and user preferences. I will be ready for your next instruction after this."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        },
+        {
+          "role": "assistant",
+          "content": "I'm refreshing my understanding of the workspace instructions and user preferences by reviewing AGENT.md and USER.md. I'll be ready for your next instruction shortly."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        }
+      ]
+    },
+    {
+      "session_key": "webchat_main",
+      "messages": [
+        {
+          "role": "user",
+          "content": "what is the latest mail that i have received"
+        },
+        {
+          "role": "assistant",
+          "content": "Latest email in your inbox: From: Kotak Bank <bankalerts@kotak.bank.in> Subject: Important notice: Scheduled Maintenance activity Date: Tue, 24 Mar 2026 21:36:26 +0530 (IST) Preview: <!DOCTYPE html PUBLIC \"-//W3C//DTD X…"
+        },
+        {
+          "role": "user",
+          "content": "create a reminder today at 10:15 pm to write assignment"
+        },
+        {
+          "role": "assistant",
+          "content": "I am sorry, I cannot create reminders. Is there anything else I can help you with?"
+        },
+        {
+          "role": "user",
+          "content": "create a cron job for today at 10:16 pm to write the assignment"
+        },
+        {
+          "role": "assistant",
+          "content": "I am sorry, I cannot create cron jobs. Is there anything else I can help you with?"
+        }
+      ]
+    },
+    {
+      "session_key": "telegram:8616242206",
+      "messages": [
+        {
+          "role": "user",
+          "content": "open youtube"
+        },
+        {
+          "role": "assistant",
+          "content": "Opened youtube. Opened youtube in tab-2."
+        },
+        {
+          "role": "user",
+          "content": "ok do that"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't finish that browser task: Locator.fill: Error: Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly] Call log: - waiting for get_by_label(re.co…"
+        },
+        {
+          "role": "user",
+          "content": "Now run the latest video of MrBeast"
+        },
+        {
+          "role": "assistant",
+          "content": "Opened YouTube. Searching for \"MrBeast\". I searched YouTube for \"MrBeast\", but I couldn't find a clear video result."
+        }
+      ]
+    }
+  ],
+  "automation": {
+    "notifications": [
+      {
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-03-28T06:40:00.057592+00:00"
+      },
+      {
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-03-28T06:30:00.136441+00:00"
+      },
+      {
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-03-25T16:50:00.077927+00:00"
+      },
+      {
+        "title": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage",
+        "body": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyBH-AwvzQj06SaSSYZh7z2hcol76W9fAmI' For more information check: htt…",
+        "source": "cron:0",
+        "created_at": "2026-03-25T16:30:02.347843+00:00"
+      },
+      {
+        "title": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage",
+        "body": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyBH-AwvzQj06SaSSYZh7z2hcol76W9fAmI' For more information check: htt…",
+        "source": "cron:0",
+        "created_at": "2026-03-25T16:20:02.129652+00:00"
+      },
+      {
+        "title": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage",
+        "body": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyBH-AwvzQj06SaSSYZh7z2hcol76W9fAmI' For more information check: htt…",
+        "source": "cron:0",
+        "created_at": "2026-03-25T16:10:02.343783+00:00"
+      },
+      {
+        "title": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage",
+        "body": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyBH-AwvzQj06SaSSYZh7z2hcol76W9fAmI' For more information check: htt…",
+        "source": "cron:0",
+        "created_at": "2026-03-25T16:00:02.094710+00:00"
+      },
+      {
+        "title": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage",
+        "body": "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyBH-AwvzQj06SaSSYZh7z2hcol76W9fAmI' For more information check: htt…",
+        "source": "cron:0",
+        "created_at": "2026-03-25T15:50:02.862319+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-03-28T06:49:15.846963+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-03-28T06:44:09.457033+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-03-28T06:40:00.040193+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-03-28T06:39:06.397877+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-03-28T06:34:01.244500+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-03-28T06:30:00.106309+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "failed",
+        "result_text": "",
+        "created_at": "2026-03-25T20:05:33.129605+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-03-25T16:50:00.056203+00:00"
+      }
+    ]
+  },
+  "google": {
+    "connected": true,
+    "gmail_threads": [
+      {
+        "thread_id": "19d3334c09a66dd0",
+        "subject": "Click to Explore: DSA at ₹ 1 _ 99 😉",
+        "from": "GeeksforGeeks <no-reply@geeksforgeeks.org>",
+        "date": "Sat, 28 Mar 2026 06:49:48 +0000",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d31c80afb76db8",
+        "subject": "[Oracle University Learning Community] Oracle University Learning Community – Weekly Digest",
+        "from": "\"Oracle University Learning Community (NO-REPLY)\" <ou.oracle@vanillaforums.email>",
+        "date": "Mon, 23 Mar 2026 13:00:00 +0000 (UTC)",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d3153f1e4ebf23",
+        "subject": "Your quick guide to what’s new in Clerk",
+        "from": "Steve at Clerk <steve@clerk.com>",
+        "date": "Fri, 27 Mar 2026 22:04:37 +0000",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d2ff6e5961fde9",
+        "subject": "\"Relationship is f**ked\"",
+        "from": "Reddit <noreply@redditmail.com>",
+        "date": "Fri, 27 Mar 2026 15:43:22 +0000",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d2e09ebba42816",
+        "subject": "LeetCode Weekly Digest",
+        "from": "LeetCode <no-reply@leetcode.com>",
+        "date": "Fri, 27 Mar 2026 06:44:54 +0000",
+        "snippet": ""
+      }
+    ],
+    "calendar_events": [
+      {
+        "summary": "Happy birthday!",
+        "start": "2026-09-03",
+        "end": "2026-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2027-09-03",
+        "end": "2027-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2028-09-03",
+        "end": "2028-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2029-09-03",
+        "end": "2029-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2030-09-03",
+        "end": "2030-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2031-09-03",
+        "end": "2031-09-04",
+        "location": ""
+      }
+    ]
+  },
+  "signals": {
+    "connected_providers": [
+      "github",
+      "google"
+    ],
+    "session_count": 3,
+    "notification_count": 8,
+    "automation_run_count": 8
+  }
+}

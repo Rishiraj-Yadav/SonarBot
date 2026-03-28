@@ -90,6 +90,7 @@ class DynamicCronJob:
     user_id: str
     schedule: str
     message: str
+    mode: str = "direct"
     paused: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)

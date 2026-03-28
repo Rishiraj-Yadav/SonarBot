@@ -109,6 +109,7 @@ class WebhookConfig(BaseModel):
 class CronJobConfig(BaseModel):
     schedule: str
     message: str
+    mode: Literal["direct", "ai"] = "direct"
 
 
 class AutomationRuleConfig(BaseModel):
@@ -165,6 +166,24 @@ class ContextEngineConfig(BaseModel):
     dedupe_days: int = 7
     snapshot_subdir: str = "context_engine/life_state"
     insights_subdir: str = "context_engine/insights"
+
+
+class BrowserWorkflowsConfig(BaseModel):
+    enabled: bool = True
+    classifier_confidence_threshold: float = 0.82
+    max_results_to_rank: int = 8
+    allow_auto_play: bool = True
+    ask_before_high_impact: bool = True
+    llm_classifier_enabled: bool = True
+
+
+class BrowserExecutionConfig(BaseModel):
+    default_mode: Literal["headless", "headed"] = "headless"
+    headed_login_required: bool = True
+    headed_on_blockers: bool = True
+    headed_on_high_impact: bool = True
+    revert_to_headless_after_manual_step: bool = True
+    keep_headed_browser_alive_seconds: int = 60
 
 
 class ToolsConfig(BaseModel):
@@ -268,6 +287,8 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     automation: AutomationConfig = Field(default_factory=AutomationConfig)
     context_engine: ContextEngineConfig = Field(default_factory=ContextEngineConfig)
+    browser_workflows: BrowserWorkflowsConfig = Field(default_factory=BrowserWorkflowsConfig)
+    browser_execution: BrowserExecutionConfig = Field(default_factory=BrowserExecutionConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)

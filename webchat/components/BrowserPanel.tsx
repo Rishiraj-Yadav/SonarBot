@@ -9,6 +9,7 @@ type BrowserTab = {
   title: string;
   url: string;
   active: boolean;
+  mode?: string;
 };
 
 type BrowserLog = {
@@ -38,10 +39,23 @@ type BrowserProfile = {
 type BrowserState = {
   active: boolean;
   headless: boolean;
+  current_mode?: string;
   current_tab_id: string | null;
   tabs: BrowserTab[];
   active_profile?: BrowserProfile | null;
   streaming: boolean;
+  pending_protected_action?: {
+    action_type?: string;
+    selector?: string;
+    target?: string;
+  } | null;
+};
+
+type BrowserWorkflow = {
+  recipe_name?: string;
+  status?: string;
+  response_text?: string;
+  message?: string;
 };
 
 function shortTime(value: string) {
@@ -62,6 +76,7 @@ export function BrowserPanel() {
   const [downloads, setDownloads] = useState<BrowserDownload[]>([]);
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [screenshot, setScreenshot] = useState("");
+  const [workflow, setWorkflow] = useState<BrowserWorkflow | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -124,12 +139,23 @@ export function BrowserPanel() {
       void load();
     };
 
+    const onWorkflowUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<BrowserWorkflow>).detail;
+      if (detail) {
+        setWorkflow(detail);
+      }
+    };
+
     void load();
     window.addEventListener("sonarbot:browser.state", onBrowserState);
     window.addEventListener("sonarbot:browser.log", onBrowserLog);
     window.addEventListener("sonarbot:browser.download", onBrowserDownload);
     window.addEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
     window.addEventListener("sonarbot:browser.session_expired", onSessionExpired);
+    window.addEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
+    window.addEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
+    window.addEventListener("sonarbot:browser.workflow.blocked", onWorkflowUpdate);
+    window.addEventListener("sonarbot:browser.workflow.completed", onWorkflowUpdate);
     const timer = window.setInterval(() => void load(), 12000);
 
     return () => {
@@ -140,6 +166,10 @@ export function BrowserPanel() {
       window.removeEventListener("sonarbot:browser.download", onBrowserDownload);
       window.removeEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
       window.removeEventListener("sonarbot:browser.session_expired", onSessionExpired);
+      window.removeEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
+      window.removeEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
+      window.removeEventListener("sonarbot:browser.workflow.blocked", onWorkflowUpdate);
+      window.removeEventListener("sonarbot:browser.workflow.completed", onWorkflowUpdate);
     };
   }, []);
 
@@ -159,7 +189,7 @@ export function BrowserPanel() {
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium text-ink">{state?.active ? "Browser active" : "Browser idle"}</div>
                 <div className="rounded-full bg-sand px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">
-                  {state?.headless ? "headless" : "headed"}
+                  {state?.current_mode || (state?.headless ? "headless" : "headed")}
                 </div>
               </div>
               <div className="mt-2 text-sm text-slate-600">
@@ -170,10 +200,31 @@ export function BrowserPanel() {
               <div className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
                 {state?.streaming ? "Live screenshot stream on" : "Live screenshot stream off"}
               </div>
+              {state?.pending_protected_action ? (
+                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Waiting for review: {state.pending_protected_action.action_type || "browser action"} on{" "}
+                  {state.pending_protected_action.selector || state.pending_protected_action.target || "the current page"}.
+                  Reply with confirm or cancel.
+                </div>
+              ) : null}
             </div>
             <div className="rounded-[1.35rem] border border-line/80 bg-white/95 p-4 text-sm leading-6 text-slate-600">
               Profiles stay named per site/account, downloads land in the workspace inbox, and stale sessions remain
               inspectable instead of being silently deleted.
+            </div>
+            <div className="rounded-[1.35rem] border border-line/80 bg-white/95 p-4">
+              <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Workflow</div>
+              {workflow ? (
+                <>
+                  <div className="mt-2 text-sm font-medium text-ink">{workflow.recipe_name || "Browser workflow"}</div>
+                  <div className="mt-1 text-sm text-slate-600">{workflow.response_text || workflow.message || "Waiting for workflow updates."}</div>
+                  <div className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                    {workflow.status || "running"}
+                  </div>
+                </>
+              ) : (
+                <div className="mt-2 text-sm text-slate-500">No browser workflow has run yet.</div>
+              )}
             </div>
           </div>
           <div className="overflow-hidden rounded-[1.35rem] border border-line/80 bg-slate-950">
@@ -203,7 +254,7 @@ export function BrowserPanel() {
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-medium text-ink">{tab.title || tab.url || tab.tab_id}</div>
                   <div className="rounded-full bg-glow px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-accent">
-                    {tab.active ? "active" : tab.tab_id}
+                    {tab.active ? `active${tab.mode ? ` • ${tab.mode}` : ""}` : tab.mode || tab.tab_id}
                   </div>
                 </div>
                 <div className="mt-2 break-all text-sm text-slate-600">{tab.url || "about:blank"}</div>

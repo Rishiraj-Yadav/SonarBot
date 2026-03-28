@@ -24,6 +24,17 @@ def build_browser_tools(
 ) -> tuple[list[ToolDefinition], BrowserRuntime]:
     runtime = BrowserRuntime(config=config, event_emitter=event_emitter, viewer_checker=viewer_checker)
 
+    def _headless_from_payload(payload: dict[str, Any]) -> bool | None:
+        mode = optional_string(payload.get("mode"))
+        if mode is None:
+            return None
+        lowered = mode.strip().lower()
+        if lowered == "headed":
+            return False
+        if lowered == "headless":
+            return True
+        return None
+
     async def browser_navigate(payload: dict[str, Any]) -> dict[str, Any]:
         url = str(payload["url"])
         profile_name = optional_string(payload.get("profile_name"))
@@ -31,8 +42,15 @@ def build_browser_tools(
         tab_id = optional_string(payload.get("tab_id"))
         timeout_seconds = int(payload.get("timeout_seconds", 30))
         wait_for = optional_string(payload.get("wait_for"))
+        headless = _headless_from_payload(payload)
         matched_profile = runtime.match_profile(url, profile_name=profile_name)
-        page = await runtime.get_page(target_url=url, profile_name=profile_name, tab_id=tab_id, user_id=user_id)
+        page = await runtime.get_page(
+            target_url=url,
+            profile_name=profile_name,
+            tab_id=tab_id,
+            user_id=user_id,
+            headless=headless,
+        )
         response = await page.goto(url, wait_until=runtime.wait_state_for_navigation(wait_for))
         await runtime.post_action_wait(page, wait_for, timeout_seconds)
         current_url = page.url
@@ -74,11 +92,34 @@ def build_browser_tools(
         timeout_seconds = int(payload.get("timeout_seconds", 10))
         wait_for = optional_string(payload.get("wait_for"))
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
+        action_type = optional_string(payload.get("action_type")) or "click"
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
+        if runtime.safe_action_requires_confirmation(action_type, selector):
+            pending = await runtime.prepare_protected_action(
+                selector=selector,
+                action_type=action_type,
+                wait_for=wait_for,
+                timeout_seconds=timeout_seconds,
+                user_id=user_id,
+            )
+            return {
+                "clicked": None,
+                "selector": selector,
+                "action_type": action_type,
+                "review_required": True,
+                "message": (
+                    "I prepared that browser action in a visible window and paused before the final click. "
+                    "Review it, then say \"confirm\" or \"cancel\"."
+                ),
+                "pending_action": pending,
+                "tab_id": pending.get("tab_id"),
+            }
         locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
         try:
             await locator.click(timeout=max(1000, timeout_seconds * 1000))
@@ -92,6 +133,7 @@ def build_browser_tools(
         state = runtime._tabs[runtime.current_tab_id]
         return {
             "clicked": selector,
+            "review_required": False,
             "selector_strategy": strategy,
             "url": state.url,
             "tab_id": runtime.current_tab_id,
@@ -103,10 +145,12 @@ def build_browser_tools(
         text = str(payload["text"])
         timeout_seconds = int(payload.get("timeout_seconds", 10))
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
         locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds)
         try:
@@ -128,10 +172,12 @@ def build_browser_tools(
 
     async def browser_screenshot(payload: dict[str, Any]) -> dict[str, Any]:
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
         runtime.screenshots_dir.mkdir(parents=True, exist_ok=True)
         target = runtime.screenshots_dir / f"screenshot-{runtime.current_tab_id or 'browser'}.png"
@@ -149,9 +195,12 @@ def build_browser_tools(
         page = await runtime.start_login(site_name, profile_name, login_url, user_id=user_id)
         await wait_for_manual_login(page, login_url, timeout_seconds)
         saved = await runtime.save_login_session(site_name, profile_name, login_url)
+        target_headless = runtime.default_mode() == "headless"
+        if not getattr(config.browser_execution, "revert_to_headless_after_manual_step", True):
+            target_headless = False
         await runtime._reset_context(
             storage_state=str(saved.get("storage_path", "")) or None,
-            headless=config.tools.browser_headless,
+            headless=target_headless,
             profile=saved,
             user_id=user_id,
         )
@@ -170,6 +219,7 @@ def build_browser_tools(
             user_id=optional_string(payload.get("user_id")),
             wait_for=optional_string(payload.get("wait_for")),
             timeout_seconds=int(payload.get("timeout_seconds", 30)),
+            headless=_headless_from_payload(payload),
         )
 
     async def browser_tab_switch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -183,10 +233,12 @@ def build_browser_tools(
         path = await runtime.ensure_workspace_file(str(payload["path"]))
         timeout_seconds = int(payload.get("timeout_seconds", 10))
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
         locator, strategy = await runtime.resolve_locator(page, selector, timeout_seconds=timeout_seconds, state="attached")
         await locator.set_input_files(str(path), timeout=max(1000, timeout_seconds * 1000))
@@ -201,10 +253,12 @@ def build_browser_tools(
     async def browser_extract_table(payload: dict[str, Any]) -> dict[str, Any]:
         selector = optional_string(payload.get("selector"))
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
         if selector:
             locator, _ = await runtime.resolve_locator(page, selector, timeout_seconds=int(payload.get("timeout_seconds", 10)), state="attached")
@@ -220,10 +274,12 @@ def build_browser_tools(
             raise RuntimeError("browser_fill_form requires a non-empty 'fields' object.")
         timeout_seconds = int(payload.get("timeout_seconds", 10))
         user_id = optional_string(payload.get("user_id"))
+        headless = _headless_from_payload(payload)
         page = await runtime.get_page(
             tab_id=optional_string(payload.get("tab_id")),
             profile_name=optional_string(payload.get("profile_name")),
             user_id=user_id,
+            headless=headless,
         )
         filled: list[dict[str, Any]] = []
         for selector, value in raw_fields.items():
@@ -236,25 +292,25 @@ def build_browser_tools(
         ToolDefinition(
             name="browser_navigate",
             description="Open a URL in the shared browser and capture the visible page content.",
-            parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}, "required": ["url"]},
+            parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}, "required": ["url"]},
             handler=browser_navigate,
         ),
         ToolDefinition(
             name="browser_click",
             description="Click an element in the shared browser using a resilient locator strategy.",
-            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}, "wait_for": {"type": "string"}}, "required": ["selector"]},
+            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "action_type": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}, "wait_for": {"type": "string"}}, "required": ["selector"]},
             handler=browser_click,
         ),
         ToolDefinition(
             name="browser_type",
             description="Type text into an element in the shared browser using CSS, text, label, or role fallback locators.",
-            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "text"]},
+            parameters={"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "text"]},
             handler=browser_type,
         ),
         ToolDefinition(
             name="browser_screenshot",
             description="Take a screenshot of the current browser page and save it into the workspace.",
-            parameters={"type": "object", "properties": {"profile_name": {"type": "string"}, "tab_id": {"type": "string"}}},
+            parameters={"type": "object", "properties": {"profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}}},
             handler=browser_screenshot,
         ),
         ToolDefinition(
@@ -265,13 +321,13 @@ def build_browser_tools(
         ),
         ToolDefinition(name="browser_sessions_list", description="List saved browser login profiles and the last time each was used.", parameters={"type": "object", "properties": {}}, handler=browser_sessions_list),
         ToolDefinition(name="browser_tabs_list", description="List the currently open browser tabs in the active browser context.", parameters={"type": "object", "properties": {}}, handler=browser_tabs_list),
-        ToolDefinition(name="browser_tab_open", description="Open a new browser tab, optionally navigating to a URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}}, handler=browser_tab_open),
+        ToolDefinition(name="browser_tab_open", description="Open a new browser tab, optionally navigating to a URL.", parameters={"type": "object", "properties": {"url": {"type": "string"}, "profile_name": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 30}, "wait_for": {"type": "string"}}}, handler=browser_tab_open),
         ToolDefinition(name="browser_tab_switch", description="Switch the active browser tab by tab id.", parameters={"type": "object", "properties": {"tab_id": {"type": "string"}}, "required": ["tab_id"]}, handler=browser_tab_switch),
         ToolDefinition(name="browser_tab_close", description="Close a browser tab by tab id.", parameters={"type": "object", "properties": {"tab_id": {"type": "string"}}, "required": ["tab_id"]}, handler=browser_tab_close),
-        ToolDefinition(name="browser_upload", description="Upload a file from the workspace into the current browser page.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "path": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "path"]}, handler=browser_upload),
+        ToolDefinition(name="browser_upload", description="Upload a file from the workspace into the current browser page.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "path": {"type": "string"}, "profile_name": {"type": "string"}, "tab_id": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["selector", "path"]}, handler=browser_upload),
         ToolDefinition(name="browser_downloads_list", description="List recent browser downloads saved into the workspace inbox.", parameters={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "default": 20}}}, handler=browser_downloads_list),
         ToolDefinition(name="browser_logs", description="List recent browser console and network log entries.", parameters={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "default": 50}}}, handler=browser_logs),
-        ToolDefinition(name="browser_extract_table", description="Extract tabular data from the current page or a selected table element.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "max_rows": {"type": "integer", "minimum": 1, "default": 25}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}}, handler=browser_extract_table),
-        ToolDefinition(name="browser_fill_form", description="Fill multiple form fields in the current page using resilient locator fallbacks.", parameters={"type": "object", "properties": {"fields": {"type": "object", "additionalProperties": {"type": "string"}}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["fields"]}, handler=browser_fill_form),
+        ToolDefinition(name="browser_extract_table", description="Extract tabular data from the current page or a selected table element.", parameters={"type": "object", "properties": {"selector": {"type": "string"}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "max_rows": {"type": "integer", "minimum": 1, "default": 25}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}}, handler=browser_extract_table),
+        ToolDefinition(name="browser_fill_form", description="Fill multiple form fields in the current page using resilient locator fallbacks.", parameters={"type": "object", "properties": {"fields": {"type": "object", "additionalProperties": {"type": "string"}}, "tab_id": {"type": "string"}, "profile_name": {"type": "string"}, "mode": {"type": "string", "enum": ["headless", "headed"]}, "timeout_seconds": {"type": "integer", "minimum": 1, "default": 10}}, "required": ["fields"]}, handler=browser_fill_form),
     ]
     return tools, runtime

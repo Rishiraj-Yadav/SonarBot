@@ -23,6 +23,7 @@ class AutomationScheduler:
                 schedule=job.schedule,
                 rule_name=f"cron:{index}",
                 message=job.message,
+                mode=getattr(job, "mode", "direct"),
                 user_id=None,
             )
         for job in await self.automation_engine.list_all_dynamic_cron_jobs():
@@ -33,6 +34,7 @@ class AutomationScheduler:
                 schedule=str(job["schedule"]),
                 rule_name=self._dynamic_rule_name(str(job["cron_id"])),
                 message=str(job["message"]),
+                mode=str(job.get("mode", "direct")),
                 user_id=str(job["user_id"]),
             )
         self.scheduler.start()
@@ -41,8 +43,14 @@ class AutomationScheduler:
         if self.scheduler is not None and self.scheduler.running:
             self.scheduler.shutdown(wait=False)
 
-    async def enqueue_cron_message(self, rule_name: str, message: str, user_id: str | None = None) -> None:
-        await self.automation_engine.handle_cron_job(rule_name, message, user_id=user_id)
+    async def enqueue_cron_message(
+        self,
+        rule_name: str,
+        message: str,
+        user_id: str | None = None,
+        mode: str = "direct",
+    ) -> None:
+        await self.automation_engine.handle_cron_job(rule_name, message, user_id=user_id, mode=mode)
 
     async def register_dynamic_job(self, job: dict[str, object]) -> None:
         if self.scheduler is None:
@@ -52,6 +60,7 @@ class AutomationScheduler:
             schedule=str(job["schedule"]),
             rule_name=self._dynamic_rule_name(str(job["cron_id"])),
             message=str(job["message"]),
+            mode=str(job.get("mode", "direct")),
             user_id=str(job["user_id"]),
         )
 
@@ -70,6 +79,7 @@ class AutomationScheduler:
             schedule=str(job["schedule"]),
             rule_name=self._dynamic_rule_name(str(job["cron_id"])),
             message=str(job["message"]),
+            mode=str(job.get("mode", "direct")),
             user_id=str(job["user_id"]),
         )
 
@@ -87,6 +97,7 @@ class AutomationScheduler:
         schedule: str,
         rule_name: str,
         message: str,
+        mode: str,
         user_id: str | None,
     ) -> None:
         from apscheduler.triggers.cron import CronTrigger  # type: ignore
@@ -96,7 +107,7 @@ class AutomationScheduler:
             self.enqueue_cron_message,
             trigger=trigger,
             id=job_id,
-            kwargs={"rule_name": rule_name, "message": message, "user_id": user_id},
+            kwargs={"rule_name": rule_name, "message": message, "user_id": user_id, "mode": mode},
             replace_existing=True,
         )
 

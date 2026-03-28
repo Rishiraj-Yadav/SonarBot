@@ -75,10 +75,18 @@ class NotificationDispatcher:
         if channel_name == "telegram":
             identity = await self.user_profiles.get_identity(notification.user_id, "telegram")
             if identity is None:
+                await self.store.record_delivery(
+                    notification.notification_id,
+                    "telegram",
+                    notification.user_id,
+                    "failed",
+                    "No linked Telegram identity for this user.",
+                )
                 return False
             recipient = str(identity.get("metadata", {}).get("chat_id") or identity.get("identity_value"))
+            message_text = self._format_channel_message(notification, channel_name)
             try:
-                await self.connection_manager.send_channel_message("telegram", recipient, notification.body)
+                await self.connection_manager.send_channel_message("telegram", recipient, message_text)
                 await self.store.record_delivery(notification.notification_id, "telegram", recipient, "delivered")
                 return True
             except Exception as exc:
@@ -119,3 +127,14 @@ class NotificationDispatcher:
             "status": notification.status,
             "created_at": notification.created_at,
         }
+
+    def _format_channel_message(self, notification: Notification, channel_name: str) -> str:
+        body = str(notification.body).strip()
+        if channel_name != "telegram":
+            return body
+        source = str(notification.source or "").strip().lower()
+        if source == "context-engine":
+            return f"[Life Context] {body}" if body else "[Life Context]"
+        if source or notification.metadata.get("rule_name") or notification.metadata.get("event_id"):
+            return f"[Automation] {body}" if body else "[Automation]"
+        return body

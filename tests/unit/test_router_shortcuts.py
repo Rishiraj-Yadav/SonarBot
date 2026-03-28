@@ -305,12 +305,13 @@ class DummyAutomationEngine:
     def __init__(self) -> None:
         self.dynamic_jobs: list[dict[str, object]] = []
 
-    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
+    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str, mode: str = "direct") -> dict[str, object]:
         job = {
             "cron_id": "cron-user-1",
             "user_id": user_id,
             "schedule": schedule,
             "message": message,
+            "mode": mode,
             "paused": False,
         }
         self.dynamic_jobs = [job]
@@ -1103,7 +1104,7 @@ async def test_router_cron_add_list_pause_resume_delete_flow(app_config) -> None
     )
 
     assert list_response.ok is True
-    assert "cron-user-1: active | 0 8 * * * | Good morning briefing" in list_response.payload["command_response"]
+    assert "cron-user-1: active | direct | 0 8 * * * | Good morning briefing" in list_response.payload["command_response"]
 
     pause_response = await router.route_user_message(
         connection_id="conn-cron-3",

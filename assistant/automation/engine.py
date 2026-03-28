@@ -50,17 +50,27 @@ class AutomationEngine:
     def set_scheduler(self, scheduler) -> None:
         self.scheduler = scheduler
 
-    async def handle_cron_job(self, rule_name: str, message: str, user_id: str | None = None) -> dict[str, Any]:
+    async def handle_cron_job(
+        self,
+        rule_name: str,
+        message: str,
+        user_id: str | None = None,
+        *,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
         target_user = user_id or self.config.users.default_user_id
+        cron_mode = self._resolve_cron_mode(rule_name, mode)
         rule = self._configured_rule(rule_name, "cron") or self._cron_rule(rule_name, message)
         event = self._build_event(
             event_type="cron",
             user_id=target_user,
             source=rule.name,
-            payload={"message": message},
+            payload={"message": message, "mode": cron_mode},
             dedupe_key=f"{rule.name}:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}",
             priority=40,
         )
+        if cron_mode == "direct":
+            return await self._run_direct_notification_event(event, rule, message)
         return await self._run_event(event, rule, user_prompt=rule.prompt_or_skill or message)
 
     async def handle_heartbeat(self, user_id: str | None = None) -> dict[str, Any]:
@@ -131,7 +141,16 @@ class AutomationEngine:
         state = await self.store.list_rule_state(user_id)
         dynamic_jobs = await self.store.list_dynamic_cron_jobs(user_id)
         rules = [
-            *[self._rule_to_payload(self._cron_rule(f"cron:{index}", job.message), state.get(f"cron:{index}", {})) for index, job in enumerate(self.config.automation.cron_jobs)],
+            *[
+                {
+                    **self._rule_to_payload(self._cron_rule(f"cron:{index}", job.message), state.get(f"cron:{index}", {})),
+                    "schedule": job.schedule,
+                    "message": job.message,
+                    "mode": getattr(job, "mode", "direct"),
+                    "dynamic": False,
+                }
+                for index, job in enumerate(self.config.automation.cron_jobs)
+            ],
             *[self._rule_to_payload(rule, state.get(rule.name, {})) for rule in self.config.automation.rules],
             *[self._rule_to_payload(rule, state.get(rule.name, {})) for rule in await self.standing_orders_manager.compile_rules()],
         ]
@@ -140,6 +159,7 @@ class AutomationEngine:
             payload = self._rule_to_payload(dynamic_rule, state.get(dynamic_rule.name, {}))
             payload["schedule"] = str(job["schedule"])
             payload["message"] = str(job["message"])
+            payload["mode"] = str(job.get("mode", "direct"))
             payload["paused"] = bool(job["paused"])
             payload["dynamic"] = True
             payload["cron_id"] = str(job["cron_id"])
@@ -173,16 +193,24 @@ class AutomationEngine:
             return
         await self.store.set_rule_paused(user_id, rule_name, False)
 
-    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, Any]:
+    async def create_dynamic_cron_job(
+        self,
+        user_id: str,
+        schedule: str,
+        message: str,
+        mode: str = "direct",
+    ) -> dict[str, Any]:
         normalized_schedule = self._validate_cron_schedule(schedule)
         cleaned_message = message.strip()
         if not cleaned_message:
             raise ValueError("Cron job message cannot be empty.")
+        normalized_mode = self._normalize_cron_mode(mode)
         job = DynamicCronJob(
             cron_id=uuid4().hex[:12],
             user_id=user_id,
             schedule=normalized_schedule,
             message=cleaned_message,
+            mode=normalized_mode,
         )
         await self.store.create_dynamic_cron_job(job)
         await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(job.cron_id), False)
@@ -193,6 +221,7 @@ class AutomationEngine:
                     "user_id": user_id,
                     "schedule": job.schedule,
                     "message": job.message,
+                    "mode": job.mode,
                     "paused": False,
                 }
             )
@@ -201,6 +230,7 @@ class AutomationEngine:
             "user_id": job.user_id,
             "schedule": job.schedule,
             "message": job.message,
+            "mode": job.mode,
             "paused": job.paused,
             "created_at": job.created_at,
             "updated_at": job.updated_at,
@@ -248,9 +278,19 @@ class AutomationEngine:
             raise KeyError(f"Automation run '{run_id}' is missing its event payload.")
         rule_name = str(run["rule_name"])
         if rule_name.startswith("cron:"):
-            return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
+            return await self.handle_cron_job(
+                rule_name,
+                str(event["payload"].get("message", "")),
+                user_id=str(run["user_id"]),
+                mode=str(event["payload"].get("mode", "direct")),
+            )
         if rule_name.startswith("dynamic-cron:"):
-            return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
+            return await self.handle_cron_job(
+                rule_name,
+                str(event["payload"].get("message", "")),
+                user_id=str(run["user_id"]),
+                mode=str(event["payload"].get("mode", "direct")),
+            )
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
                 rule_name.removeprefix("webhook:"),
@@ -334,7 +374,7 @@ class AutomationEngine:
         if not assistant_text or assistant_text.upper() == "NO_REPLY":
             await self.store.finish_run(run.run_id, status="completed", result_text=assistant_text)
             await self.store.update_event_status(event.event_id, "completed")
-            return {"status": "completed", "rule_name": rule.name, "notified": False}
+            return {"status": "completed", "rule_name": rule.name, "notified": False, "delivery_status": "skipped:NO_REPLY"}
 
         if rule.action_policy != "notify_first" and self.config.automation.approvals.enabled:
             approval = ApprovalRequest(
@@ -375,7 +415,78 @@ class AutomationEngine:
             notification_id=delivered.notification_id,
         )
         await self.store.update_event_status(event.event_id, "completed")
-        return {"status": "completed", "notification_id": delivered.notification_id, "rule_name": rule.name}
+        return {
+            "status": "completed",
+            "notification_id": delivered.notification_id,
+            "rule_name": rule.name,
+            "delivery_status": delivered.status,
+        }
+
+    async def _run_direct_notification_event(
+        self,
+        event: AutomationEvent,
+        rule: AutomationRule,
+        message: str,
+    ) -> dict[str, Any]:
+        await self.initialize()
+        should_skip, reason = await self.store.should_skip_for_dedupe(
+            event.user_id,
+            rule.name,
+            event.dedupe_key,
+            rule.dedupe_window_seconds,
+            rule.cooldown_seconds,
+        )
+        await self.store.record_event(event, status="skipped" if should_skip else "queued")
+        if should_skip:
+            return {"status": "skipped", "reason": reason, "rule_name": rule.name, "mode": "direct"}
+
+        run = AutomationRun(
+            run_id=uuid4().hex,
+            event_id=event.event_id,
+            user_id=event.user_id,
+            rule_name=rule.name,
+            session_key=f"automation:{event.user_id}:{self._slug(rule.name)}",
+            status="running",
+            prompt=message,
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+            result_text=message,
+        )
+        await self.store.create_run(run)
+        await self.store.update_event_status(event.event_id, "running")
+
+        notification = Notification(
+            notification_id=uuid4().hex,
+            user_id=event.user_id,
+            title=self._notification_title(rule, message),
+            body=message,
+            source=rule.name,
+            severity=rule.severity or self.config.automation.notifications.default_severity,
+            delivery_mode=rule.delivery_policy,
+            status="queued",
+            target_channels=[],
+            metadata={
+                "rule_name": rule.name,
+                "event_id": event.event_id,
+                "delivery_policy": rule.delivery_policy,
+                "cron_mode": "direct",
+            },
+        )
+        delivered = await self.dispatcher.dispatch(notification)
+        await self.store.finish_run(
+            run.run_id,
+            status="completed",
+            result_text=message,
+            notification_id=delivered.notification_id,
+        )
+        await self.store.update_event_status(event.event_id, "completed")
+        return {
+            "status": "completed",
+            "notification_id": delivered.notification_id,
+            "rule_name": rule.name,
+            "delivery_status": delivered.status,
+            "mode": "direct",
+        }
 
     def _build_event(
         self,
@@ -515,6 +626,24 @@ class AutomationEngine:
 
     def _dynamic_cron_rule(self, cron_id: str, message: str) -> AutomationRule:
         return self._cron_rule(self._dynamic_cron_rule_name(cron_id), message)
+
+    def _normalize_cron_mode(self, value: str | None) -> str:
+        normalized = str(value or "direct").strip().lower()
+        return "ai" if normalized == "ai" else "direct"
+
+    def _resolve_cron_mode(self, rule_name: str, mode: str | None) -> str:
+        if mode is not None:
+            return self._normalize_cron_mode(mode)
+        if rule_name.startswith("dynamic-cron:"):
+            return "direct"
+        if rule_name.startswith("cron:"):
+            try:
+                index = int(rule_name.split(":", maxsplit=1)[1])
+            except (IndexError, ValueError):
+                return "direct"
+            if 0 <= index < len(self.config.automation.cron_jobs):
+                return self._normalize_cron_mode(getattr(self.config.automation.cron_jobs[index], "mode", "direct"))
+        return "direct"
 
     def _webhook_rule(self, name: str, message: str) -> AutomationRule:
         return AutomationRule(

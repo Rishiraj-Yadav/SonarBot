@@ -29,6 +29,7 @@ from assistant.automation import (
 from assistant.channels.base import ChannelMessage
 from assistant.channels.telegram.adapter import TelegramChannel
 from assistant.channels.webchat import get_webchat_device_id
+from assistant.browser_workflows import BrowserWorkflowEngine
 from assistant.config import AppConfig, load_config
 from assistant.context_engine import ContextEngine
 from assistant.gateway.auth import authenticate_token
@@ -85,6 +86,7 @@ class GatewayServices:
     context_engine: ContextEngine
     system_access_manager: SystemAccessManager
     browser_runtime: Any
+    browser_workflow_engine: BrowserWorkflowEngine | None
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -141,6 +143,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_viewer_checker=lambda user_id: bool(connection_manager.active_user_connections(user_id, "webchat")),
         )
         browser_runtime = getattr(tool_registry, "browser_runtime", None)
+        browser_workflow_engine = BrowserWorkflowEngine(runtime_config, tool_registry)
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
@@ -178,6 +181,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             system_access_manager=system_access_manager,
             user_profiles=user_profiles,
             started_at=started_at,
+            browser_workflow_engine=browser_workflow_engine,
         )
         channels = _build_channels(runtime_config, connection_manager, router, user_profiles, system_access_manager)
         standing_orders = StandingOrdersManager(runtime_config.agent.workspace_dir)
@@ -240,6 +244,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             context_engine=context_engine,
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
+            browser_workflow_engine=browser_workflow_engine,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()

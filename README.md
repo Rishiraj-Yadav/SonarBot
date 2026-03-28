@@ -12,6 +12,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Phase 6 service integrations: Gmail search/read/send/draft tools, GitHub repo/issue/PR read tools, Gmail briefing skill, GitHub PR summary skill, OAuth token fallback for connected accounts
 - [x] Automation V2: unified user profiles, persisted automation runs, background cron/heartbeat/webhook execution, notification inbox, primary-channel delivery, rule pause/resume controls
 - [x] Browser Automation V2: named browser profiles, multi-tab Playwright runtime, downloads/log capture, table extraction, form fill helpers, and a live browser panel in WebChat
+- [x] Browser Autonomous Workflows V1: hybrid natural-language browser task routing for YouTube, Google, site search, continuation, and login-aware flows
 
 ## What You Can Use Today
 
@@ -22,6 +23,8 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
 - advanced browser automation with named profiles, multi-tab control, uploads/downloads, logs, table extraction, and form autofill
+- autonomous browser workflows for natural-language open/search/play flows across WebChat and Telegram
+- hybrid browser execution that stays headless for background work and opens a visible browser only for login, blockers, and protected review steps
 - host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
@@ -86,10 +89,27 @@ The browser subsystem now includes:
 - console/network log capture
 - table extraction and form autofill helpers
 - WebChat browser panel with live state, tabs, downloads, logs, and headed-browser screenshot streaming
+- autonomous workflow routing for natural-language tasks such as YouTube play, Google search/open, site search, and continuation after a blocker is cleared
+- dual browser execution policy: background tasks run headlessly, while login, captcha/consent blockers, and review-before-submit steps automatically switch to a visible browser window
 
 Browser downloads are stored under the workspace by default:
 
 - `workspace/inbox/browser_downloads`
+
+Autonomous workflow examples:
+
+- `open youtube and play Trapped On An Island Until I Build A Boat`
+- `search google for SonarBot GitHub and open the first result`
+- `open leetcode and search arrays problems`
+- `/browser workflows`
+- `/browser task open youtube and play mr beast latest video`
+
+Hybrid execution examples:
+
+- `search google for flights to delhi` -> headless background browsing
+- `open leetcode and log in` -> visible browser login, then saved session reuse
+- `show me what you're doing and open github` -> force the current task into headed mode
+- `run silently and search youtube for mr beast` -> force the current task into headless mode
 
 ## Proactive Life Context Engine
 

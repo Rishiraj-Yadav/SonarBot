@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineK
 
 from assistant.channels.base import Channel, ChannelMessage
 from assistant.channels.telegram.media import transcribe_voice
+from assistant.utils.user_facing_errors import sanitize_error_text
 
 
 @dataclass(slots=True)
@@ -149,7 +150,14 @@ class TelegramChannel(Channel):
         payload: dict[str, Any],
     ) -> None:
         if event_name == "agent.chunk":
-            state.accumulated_text += payload.get("text", "")
+            incoming_text = str(payload.get("text", ""))
+            if (
+                "[model error]" in incoming_text.lower()
+                or "generativelanguage.googleapis.com" in incoming_text.lower()
+                or "developer.mozilla.org/en-us/docs/web/http/status/" in incoming_text.lower()
+            ):
+                incoming_text = sanitize_error_text(incoming_text, fallback="The model request could not be completed right now. Please try again.")
+            state.accumulated_text += incoming_text
             if state.response_message is None:
                 if state.source_message is not None:
                     state.response_message = await self._reply_text(state.source_message, state.accumulated_text or "...")

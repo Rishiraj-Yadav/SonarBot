@@ -8,9 +8,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from assistant.agent.session import create_message
+from assistant.browser_workflows.state import (
+    BROWSER_TASK_STATE_KEY,
+    LEGACY_BROWSER_WORKFLOW_STATE_KEY,
+    active_browser_task,
+    browser_task_state_clear_keys,
+    browser_task_state_update,
+    normalize_browser_task_state,
+)
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.gateway.protocol import AgentSendParams, RequestFrame, ResponseFrame
 from assistant.utils.logging import get_logger
@@ -35,6 +44,7 @@ class GatewayRouter:
     user_profiles: Any
     started_at: datetime
     system_access_manager: Any = None
+    browser_workflow_engine: Any = None
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
         if request.method == "health":
@@ -94,6 +104,16 @@ class GatewayRouter:
         shortcut = await self._handle_tool_shortcut(request_id, session_key, stripped, metadata)
         if shortcut is not None:
             return shortcut
+
+        browser_workflow = await self._handle_browser_workflow(
+            connection_id=connection_id,
+            request_id=request_id,
+            session_key=session_key,
+            message=message,
+            metadata=metadata,
+        )
+        if browser_workflow is not None:
+            return browser_workflow
 
         skill_activation = await self._resolve_skill_intent(stripped)
         if skill_activation is not None:
@@ -425,6 +445,7 @@ class GatewayRouter:
                         "session_key": session_key,
                         "command_response": (
                             f"Created cron job '{job['cron_id']}' on {job['schedule']}.\n"
+                            f"Mode: {job.get('mode', 'direct')}\n"
                             f"Message: {job['message']}"
                         ),
                         "cron_job": job,
@@ -436,7 +457,7 @@ class GatewayRouter:
                 if dynamic_jobs:
                     lines.append("Chat-created cron jobs:")
                     lines.extend(
-                        f"- {item['cron_id']}: {'paused' if item['paused'] else 'active'} | {item['schedule']} | {item['message']}"
+                        f"- {item['cron_id']}: {'paused' if item['paused'] else 'active'} | {item.get('mode', 'direct')} | {item['schedule']} | {item['message']}"
                         for item in dynamic_jobs
                     )
                 else:
@@ -445,7 +466,7 @@ class GatewayRouter:
                     lines.append("")
                     lines.append("Config cron jobs:")
                     lines.extend(
-                        f"- config:{index}: active | {job.schedule} | {job.message}"
+                        f"- config:{index}: active | {getattr(job, 'mode', 'direct')} | {job.schedule} | {job.message}"
                         for index, job in enumerate(self.config.automation.cron_jobs)
                     )
                 return ResponseFrame(
@@ -529,7 +550,42 @@ class GatewayRouter:
                         "command_response": self._browser_help_text(),
                     },
                 )
-            if subcommand in {"profiles", "sessions"}:
+            if subcommand in {"workflows", "recipes"}:
+                workflows = []
+                if self.browser_workflow_engine is not None:
+                    workflows = self.browser_workflow_engine.available_workflows()
+                if not workflows:
+                    response_text = "No browser autonomous workflows are available right now."
+                else:
+                    lines = ["Browser autonomous workflows:"]
+                    for item in workflows:
+                        lines.append(f"- {item.get('name')}: {item.get('description')}")
+                    response_text = "\n".join(lines)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text, "workflows": workflows},
+                )
+            if subcommand == "task":
+                instruction = subargs.strip()
+                if not instruction:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /browser task <instruction>.")
+                workflow_response = await self._handle_browser_workflow(
+                    connection_id=connection_id,
+                    request_id=request_id,
+                    session_key=session_key,
+                    message=instruction,
+                    metadata={"user_id": user_id, "channel": "slash", "trace_id": uuid4().hex},
+                    force=True,
+                )
+                if workflow_response is not None:
+                    return workflow_response
+                return ResponseFrame(
+                    id=request_id,
+                    ok=False,
+                    error="I couldn't map that instruction to a supported browser workflow yet. Use /browser workflows to see supported tasks.",
+                )
+            if subcommand in {"profile", "profiles", "sessions"}:
                 result = await self.tool_registry.dispatch("browser_sessions_list", {"user_id": user_id})
                 response_text = self._format_browser_profiles_response(result.get("sessions", []))
                 return ResponseFrame(
@@ -580,7 +636,7 @@ class GatewayRouter:
                 response_text = (
                     f"Opened a new browser tab.\n"
                     f"Title: {result.get('title', '(unknown)')}\n"
-                    f"URL: {result.get('url', url)}\n"
+                    f"URL: {self._redact_browser_url(str(result.get('url', url)))}\n"
                     f"Tab id: {result.get('tab_id', 'unknown')}"
                 )
                 return ResponseFrame(
@@ -596,7 +652,7 @@ class GatewayRouter:
                 response_text = (
                     f"Switched to tab {result.get('tab_id', tab_id)}.\n"
                     f"Title: {result.get('title', '(unknown)')}\n"
-                    f"URL: {result.get('url', 'unknown')}"
+                    f"URL: {self._redact_browser_url(str(result.get('url', 'unknown')))}"
                 )
                 return ResponseFrame(
                     id=request_id,
@@ -621,7 +677,7 @@ class GatewayRouter:
                 result = await self.tool_registry.dispatch("browser_screenshot", {"user_id": user_id})
                 response_text = (
                     f"Captured a browser screenshot.\n"
-                    f"URL: {result.get('url', 'unknown')}\n"
+                    f"URL: {self._redact_browser_url(str(result.get('url', 'unknown')))}\n"
                     f"Tab id: {result.get('tab_id', 'unknown')}\n"
                     f"Saved at: {result.get('path', 'unknown')}"
                 )
@@ -641,7 +697,7 @@ class GatewayRouter:
                 response_text = (
                     f"Saved browser profile '{result.get('profile_name', profile_name or 'default')}' for {result.get('site_name', site_name)}.\n"
                     f"Status: {result.get('status', 'active')}\n"
-                    f"URL: {result.get('url', 'unknown')}"
+                    f"URL: {self._redact_browser_url(str(result.get('url', 'unknown')))}"
                 )
                 return ResponseFrame(
                     id=request_id,
@@ -869,6 +925,118 @@ class GatewayRouter:
             return None
         return classified, "classifier"
 
+    async def _handle_browser_workflow(
+        self,
+        connection_id: str,
+        request_id: str,
+        session_key: str,
+        message: str,
+        metadata: dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> ResponseFrame | None:
+        if self.browser_workflow_engine is None or not self.config.browser_workflows.enabled:
+            return None
+        user_id = str(metadata.get("user_id") or await self._resolve_user_id(connection_id, session_key))
+        channel = str(metadata.get("channel", "ws"))
+        task_state = await self._get_browser_task_state(session_key)
+        standalone_override = self.browser_workflow_engine.nlp.standalone_execution_override(message)
+        if standalone_override is not None:
+            await self._update_session_metadata(
+                session_key,
+                updates=browser_task_state_update(
+                    active_task=active_browser_task(task_state),
+                    pending_confirmation=dict(task_state.get("pending_confirmation") or {}),
+                    pending_login=dict(task_state.get("pending_login") or {}),
+                    next_task_mode_override=standalone_override,
+                ),
+            )
+            response_text = (
+                "I'll show the next browser task in a visible window on the host machine."
+                if standalone_override == "headed"
+                else "I'll run the next browser task silently in the background."
+            )
+            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        result = await self.browser_workflow_engine.maybe_run(
+            message,
+            user_id=user_id,
+            session_key=session_key,
+            channel=channel,
+            previous_state=task_state,
+            force=force,
+        )
+        if result is None:
+            return None
+        await self._apply_browser_task_state(session_key, result)
+        response_text = self._compose_browser_workflow_response(result)
+        await self._persist_inline_exchange(session_key, message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "browser_workflow": {
+                    "recipe_name": result.recipe_name,
+                    "status": result.status,
+                    "payload": result.payload,
+                },
+            },
+        )
+
+    async def _get_browser_task_state(self, session_key: str) -> dict[str, Any]:
+        session = await self.session_manager.load_or_create(session_key)
+        metadata = getattr(session, "metadata", {}) or {}
+        raw = metadata.get(BROWSER_TASK_STATE_KEY)
+        if isinstance(raw, dict):
+            return normalize_browser_task_state(raw)
+        legacy = metadata.get(LEGACY_BROWSER_WORKFLOW_STATE_KEY, {})
+        return normalize_browser_task_state(legacy if isinstance(legacy, dict) else {})
+
+    async def _apply_browser_task_state(self, session_key: str, result: Any) -> None:
+        if getattr(result, "clear_state", False):
+            await self._update_session_metadata(session_key, remove_keys=browser_task_state_clear_keys())
+            return
+        state_update = getattr(result, "state_update", None) or {}
+        if not isinstance(state_update, dict) or not state_update:
+            return
+        await self._update_session_metadata(session_key, updates=state_update)
+
+    async def _update_session_metadata(
+        self,
+        session_key: str,
+        *,
+        updates: dict[str, Any] | None = None,
+        remove_keys: list[str] | None = None,
+    ) -> None:
+        updater = getattr(self.session_manager, "update_metadata", None)
+        if callable(updater):
+            await updater(session_key, updates or {}, remove_keys=remove_keys)
+            return
+        session = await self.session_manager.load_or_create(session_key)
+        metadata = getattr(session, "metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            session.metadata = metadata
+        if updates:
+            metadata.update(updates)
+        if remove_keys:
+            for key in remove_keys:
+                metadata.pop(key, None)
+
+    def _compose_browser_workflow_response(self, result: Any) -> str:
+        progress = [str(item).strip() for item in getattr(result, "progress_lines", []) if str(item).strip()]
+        response = str(getattr(result, "response_text", "")).strip()
+        if response and response not in progress:
+            progress.append(response)
+        return "\n".join(progress) if progress else response
+
     async def _classify_skill_match(self, message: str, matches: list[Any]) -> Any | None:
         has_tool = getattr(self.tool_registry, "has", None)
         if callable(has_tool) and not has_tool("llm_task"):
@@ -1032,6 +1200,7 @@ class GatewayRouter:
             return ResponseFrame(id=request_id, ok=False, error=str(exc))
         response_text = (
             f"Created cron job '{job['cron_id']}' on {job['schedule']}.\n"
+            f"Mode: {job.get('mode', 'direct')}\n"
             f"Message: {job['message']}"
         )
         await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
@@ -1357,6 +1526,8 @@ class GatewayRouter:
     def _browser_help_text(self) -> str:
         return (
             "Browser commands:\n"
+            "/browser workflows\n"
+            "/browser task <instruction>\n"
             "/browser profiles\n"
             "/browser state\n"
             "/browser tabs\n"
@@ -2032,9 +2203,12 @@ class GatewayRouter:
     def _format_browser_state_response(self, state: dict[str, Any]) -> str:
         active_profile = state.get("active_profile")
         active_tab = state.get("active_tab") or {}
+        pending_login = state.get("pending_login") or {}
+        pending_action = state.get("pending_protected_action") or {}
         status = "Browser idle" if not active_tab else "Browser active"
         lines = [
             status,
+            f"Mode: {state.get('current_mode', 'headless')}",
             f"Headless: {'yes' if state.get('headless') else 'no'}",
             f"Open tabs: {len(state.get('tabs', []))}",
         ]
@@ -2045,8 +2219,22 @@ class GatewayRouter:
             )
         if active_tab:
             lines.append(f"Current tab: {active_tab.get('title', '(untitled)')}")
-            lines.append(f"URL: {active_tab.get('url', 'unknown')}")
+            lines.append(f"URL: {self._redact_browser_url(str(active_tab.get('url', 'unknown')))}")
             lines.append(f"Tab id: {active_tab.get('tab_id', 'unknown')}")
+            if active_tab.get("mode"):
+                lines.append(f"Tab mode: {active_tab.get('mode')}")
+        if pending_login:
+            lines.append(
+                f"Pending login: {pending_login.get('site_name', 'site')} "
+                f"at {self._redact_browser_url(str(pending_login.get('target_url', active_tab.get('url', 'unknown'))))}"
+            )
+            lines.append('A visible browser window should be open on the host machine. Reply with "continue" after login.')
+        if pending_action:
+            lines.append(
+                f"Pending protected action: {pending_action.get('action_type', 'action')} "
+                f"on {self._redact_browser_text(str(pending_action.get('selector') or pending_action.get('target') or 'current page'))}"
+            )
+            lines.append('Reply with "confirm" or "cancel".')
         return "\n".join(lines)
 
     def _format_browser_tabs_response(self, result: dict[str, Any]) -> str:
@@ -2057,8 +2245,9 @@ class GatewayRouter:
         lines = ["Open browser tabs:"]
         for tab in tabs[:10]:
             active = " [active]" if tab.get("tab_id") == current_tab_id else ""
+            mode = f" [{tab.get('mode')}]" if tab.get("mode") else ""
             lines.append(
-                f"- {tab.get('tab_id', 'unknown')}{active}: {tab.get('title', '(untitled)')} -> {tab.get('url', 'unknown')}"
+                f"- {tab.get('tab_id', 'unknown')}{active}{mode}: {tab.get('title', '(untitled)')} -> {self._redact_browser_url(str(tab.get('url', 'unknown')))}"
             )
         if len(tabs) > 10:
             lines.append(f"...and {len(tabs) - 10} more.")
@@ -2070,7 +2259,7 @@ class GatewayRouter:
         lines = ["Recent browser logs:"]
         for entry in logs[:10]:
             category = entry.get("kind", entry.get("type", "log"))
-            message = str(entry.get("message", entry.get("url", ""))).strip() or "(no message)"
+            message = self._redact_browser_text(str(entry.get("message", entry.get("url", ""))).strip()) or "(no message)"
             lines.append(f"- {category}: {message[:180]}")
         if len(logs) > 10:
             lines.append(f"...and {len(logs) - 10} more.")
@@ -2086,6 +2275,24 @@ class GatewayRouter:
         if len(downloads) > 10:
             lines.append(f"...and {len(downloads) - 10} more.")
         return "\n".join(lines)
+
+    def _redact_browser_url(self, url: str) -> str:
+        if not url:
+            return url
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return re.sub(r";jsessionid=[^/?#]+", "", url, flags=re.IGNORECASE)
+        path = re.sub(r";jsessionid=[^/?#]+", "", parsed.path or "", flags=re.IGNORECASE)
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+    def _redact_browser_text(self, text: str) -> str:
+        if not text:
+            return text
+        return re.sub(
+            r"https?://[^\s]+",
+            lambda match: self._redact_browser_url(match.group(0)),
+            text,
+        )
 
     def _format_latest_email_response(self, result: dict[str, Any]) -> str:
         if not result.get("found"):
@@ -2120,7 +2327,18 @@ class GatewayRouter:
         direct = self._extract_repo_from_text(message)
         if direct is not None:
             return direct
+        current_repo = self._current_github_repo_reference()
+        repo_hint = self._extract_repo_name_hint(message)
+        if current_repo is not None and repo_hint in {None, "", "this repo"}:
+            return current_repo
         history = await self.session_manager.session_history(session_key, limit=20)
+        if repo_hint:
+            compact_hint = self._compact_repo_name(repo_hint)
+            for item in reversed(history):
+                content = str(item.get("content", ""))
+                for owner, repo in re.findall(r"\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\b", content):
+                    if self._compact_repo_name(repo) == compact_hint or self._compact_repo_name(f"{owner}/{repo}") == compact_hint:
+                        return owner, repo
         for item in reversed(history):
             content = str(item.get("content", ""))
             extracted = self._extract_repo_from_text(content)
@@ -2133,6 +2351,44 @@ class GatewayRouter:
         if not match:
             return None
         return match.group(1), match.group(2)
+
+    def _extract_repo_name_hint(self, text: str) -> str | None:
+        patterns = (
+            r"\bthe\s+(.+?)\s+repo\b",
+            r"\babout\s+(.+?)\s+repo\b",
+            r"\brepo\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip().strip("\"'")
+            if candidate and candidate.lower() not in {"this", "that"}:
+                return candidate
+        if re.search(r"\bthis repo\b", text, flags=re.IGNORECASE):
+            return "this repo"
+        return None
+
+    def _compact_repo_name(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+    def _current_github_repo_reference(self) -> tuple[str, str] | None:
+        runtime = getattr(self.tool_registry, "browser_runtime", None)
+        if runtime is None or not hasattr(runtime, "current_state"):
+            return None
+        try:
+            state = runtime.current_state()
+        except Exception:
+            return None
+        active_tab = state.get("active_tab") or {}
+        url = str(active_tab.get("url", "") or "")
+        parsed = urlparse(url)
+        if "github.com" not in parsed.netloc.lower():
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2:
+            return None
+        return parts[0], parts[1]
 
     async def _persist_inline_exchange(
         self,

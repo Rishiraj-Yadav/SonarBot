@@ -40,6 +40,15 @@ class GeminiProvider(ModelProvider):
         try:
             data = await self._perform_request(url, payload)
             self.circuit_breaker.record_success()
+        except httpx.HTTPStatusError as exc:
+            self.circuit_breaker.record_failure()
+            self.logger.error(
+                "gemini_http_error",
+                status_code=exc.response.status_code if exc.response is not None else 0,
+                response_text=(exc.response.text[:2000] if exc.response is not None else ""),
+            )
+            self.logger.exception("gemini_request_failed")
+            raise
         except Exception:
             self.circuit_breaker.record_failure()
             self.logger.exception("gemini_request_failed")

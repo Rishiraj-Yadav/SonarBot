@@ -91,6 +91,22 @@ class SessionManager:
             "storage_path": str(session.storage_path),
         }
 
+    async def update_metadata(
+        self,
+        session_key: str,
+        updates: dict[str, Any] | None = None,
+        *,
+        remove_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
+        session = await self.load_or_create(session_key)
+        if updates:
+            session.metadata.update(updates)
+        if remove_keys:
+            for key in remove_keys:
+                session.metadata.pop(key, None)
+        await asyncio.to_thread(session.snapshot)
+        return dict(session.metadata)
+
     async def list_sessions(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_sessions_sync)
 
@@ -196,6 +212,13 @@ class SessionManager:
                         ordered_ids.append(summary_message["id"])
 
         messages = [messages_by_id[message_id] for message_id in ordered_ids]
+        metadata = {"memory_flush_ran": False}
+        stored_metadata = snapshot_data.get("metadata")
+        if isinstance(stored_metadata, dict):
+            metadata.update(stored_metadata)
+        if snapshot_data.get("snapshot_created_at"):
+            metadata["snapshot_created_at"] = snapshot_data.get("snapshot_created_at")
+
         return Session(
             session_id=storage_path.stem,
             session_key=session_key,
@@ -206,10 +229,7 @@ class SessionManager:
             updated_at=updated_at,
             storage_path=storage_path,
             snapshot_path=snapshot_path,
-            metadata={
-                "memory_flush_ran": False,
-                **({"snapshot_created_at": snapshot_data.get("snapshot_created_at")} if snapshot_data else {}),
-            },
+            metadata=metadata,
         )
 
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
