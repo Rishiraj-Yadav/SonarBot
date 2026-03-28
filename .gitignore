@@ -63,7 +63,7 @@ workspace/browser/
 workspace/sandbox/
 workspace/memory/
 workspace/browser/
-# workspace/browser_sessions/
+workspace/browser_sessions/
 workspace/context_engine/
 
 
