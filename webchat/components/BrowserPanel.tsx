@@ -41,6 +41,7 @@ type BrowserState = {
   headless: boolean;
   current_mode?: string;
   current_tab_id: string | null;
+  active_tab?: BrowserTab | null;
   tabs: BrowserTab[];
   active_profile?: BrowserProfile | null;
   streaming: boolean;
@@ -49,14 +50,45 @@ type BrowserState = {
     selector?: string;
     target?: string;
   } | null;
+  active_workflow?: BrowserActiveWorkflow | null;
+  workflow_stop_requested?: boolean;
   pending_vision_click?: BrowserVisionTarget | null;
 };
 
 type BrowserWorkflow = {
   recipe_name?: string;
+  site_name?: string;
   status?: string;
   response_text?: string;
   message?: string;
+  step_name?: string;
+  reason?: string;
+  query?: string;
+  target_url?: string;
+  current_url?: string;
+  last_step?: {
+    step_name?: string;
+    message?: string;
+    status?: string;
+  } | null;
+};
+
+type BrowserActiveWorkflow = {
+  recipe_name?: string;
+  site_name?: string;
+  query?: string;
+  action?: string;
+  execution_mode?: string;
+  status?: string;
+  response_text?: string;
+  last_step?: {
+    step_name?: string;
+    message?: string;
+    status?: string;
+  } | null;
+  started_at?: string;
+  target_url?: string;
+  current_url?: string;
 };
 
 type BrowserScreenshot = {
@@ -98,6 +130,65 @@ function shortTime(value: string) {
   return parsed.toLocaleString();
 }
 
+function prettifySiteName(value?: string | null) {
+  const raw = (value || "").trim();
+  if (!raw) {
+    return "browser";
+  }
+  return raw
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\.(com|in|co\.in|org|net)$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatWorkflowStatus(workflow: BrowserWorkflow | BrowserActiveWorkflow | null | undefined) {
+  if (!workflow) {
+    return "Working...";
+  }
+  const siteLabel = prettifySiteName(workflow.site_name || workflow.recipe_name || "browser");
+  const stepName = (workflow.last_step?.step_name || "").trim().toLowerCase();
+  const stepMessage = (workflow.last_step?.message || "").trim();
+  const status = (workflow.status || "").trim().toLowerCase();
+  if (stepMessage) {
+    return stepMessage;
+  }
+  if (status === "blocked") {
+    return "Paused for review";
+  }
+  if (status === "completed") {
+    return "Completed";
+  }
+  if (stepName === "open_site" || stepName === "open_store" || stepName === "open_food_site" || stepName === "open_travel_site") {
+    return `Opening ${siteLabel}`;
+  }
+  if (stepName === "type_query" || stepName === "fill_fields") {
+    return `Typing query for ${siteLabel}`;
+  }
+  if (stepName === "submit_query" || stepName === "search" || stepName === "search_food") {
+    return `Searching ${siteLabel}`;
+  }
+  if (stepName === "open_result" || stepName === "open_problem") {
+    return `Opening result on ${siteLabel}`;
+  }
+  return `Working on ${siteLabel}`;
+}
+
+function formatWorkflowDetail(workflow: BrowserWorkflow | BrowserActiveWorkflow | null | undefined) {
+  if (!workflow) {
+    return "";
+  }
+  const query = (workflow.query || "").trim();
+  const url = (workflow.current_url || workflow.target_url || "").trim();
+  if (query) {
+    return query;
+  }
+  return url;
+}
+
 export function BrowserPanel() {
   const [state, setState] = useState<BrowserState | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
@@ -106,6 +197,7 @@ export function BrowserPanel() {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [screenshot, setScreenshot] = useState("");
   const [workflow, setWorkflow] = useState<BrowserWorkflow | null>(null);
+  const [workflowEvents, setWorkflowEvents] = useState<BrowserWorkflow[]>([]);
   const [visionTarget, setVisionTarget] = useState<BrowserVisionTarget | null>(null);
   const [imageMetrics, setImageMetrics] = useState({
     naturalWidth: 0,
@@ -138,6 +230,7 @@ export function BrowserPanel() {
     setLogs(logsData.logs ?? []);
     setDownloads(downloadsData.downloads ?? []);
     setProfiles(profilesData.profiles ?? []);
+    setWorkflow(stateData.state?.active_workflow ? { ...stateData.state.active_workflow } : null);
     setVisionTarget((stateData.state?.pending_vision_click as BrowserVisionTarget | null) ?? null);
     if (screenshotData.screenshot?.image_data_url) {
       setScreenshot(screenshotData.screenshot.image_data_url);
@@ -209,6 +302,20 @@ export function BrowserPanel() {
     } catch {
       return;
     }
+  };
+
+  const stopActiveWorkflow = async () => {
+    try {
+      await fetch("http://localhost:8765/api/browser/workflow/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({}),
+      });
+    } catch {
+      return;
+    }
+    await applyBrowserData(await fetchBrowserData());
   };
 
   useEffect(() => {
@@ -288,12 +395,19 @@ export function BrowserPanel() {
       void load();
     };
 
-    const onWorkflowUpdate = (event: Event) => {
+    const appendWorkflowEvent = (kind: string, event: Event) => {
       const detail = (event as CustomEvent<BrowserWorkflow>).detail;
-      if (detail) {
-        setWorkflow(detail);
+      if (!detail) {
+        return;
       }
+      const nextEntry = { ...detail, reason: kind };
+      setWorkflow(nextEntry);
+      setWorkflowEvents((current) => [nextEntry, ...current].slice(0, 10));
     };
+    const onWorkflowStarted = (event: Event) => appendWorkflowEvent("started", event);
+    const onWorkflowStep = (event: Event) => appendWorkflowEvent("step", event);
+    const onWorkflowBlocked = (event: Event) => appendWorkflowEvent("blocked", event);
+    const onWorkflowCompleted = (event: Event) => appendWorkflowEvent("completed", event);
 
     void load();
     window.addEventListener("resize", syncImageMetrics);
@@ -303,10 +417,10 @@ export function BrowserPanel() {
     window.addEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
     window.addEventListener("sonarbot:browser.vision_target", onVisionTarget);
     window.addEventListener("sonarbot:browser.session_expired", onSessionExpired);
-    window.addEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
-    window.addEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
-    window.addEventListener("sonarbot:browser.workflow.blocked", onWorkflowUpdate);
-    window.addEventListener("sonarbot:browser.workflow.completed", onWorkflowUpdate);
+    window.addEventListener("sonarbot:browser.workflow.started", onWorkflowStarted);
+    window.addEventListener("sonarbot:browser.workflow.step", onWorkflowStep);
+    window.addEventListener("sonarbot:browser.workflow.blocked", onWorkflowBlocked);
+    window.addEventListener("sonarbot:browser.workflow.completed", onWorkflowCompleted);
     const timer = window.setInterval(() => void load(), 12000);
 
     return () => {
@@ -320,10 +434,10 @@ export function BrowserPanel() {
       window.removeEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
       window.removeEventListener("sonarbot:browser.vision_target", onVisionTarget);
       window.removeEventListener("sonarbot:browser.session_expired", onSessionExpired);
-      window.removeEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
-      window.removeEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
-      window.removeEventListener("sonarbot:browser.workflow.blocked", onWorkflowUpdate);
-      window.removeEventListener("sonarbot:browser.workflow.completed", onWorkflowUpdate);
+      window.removeEventListener("sonarbot:browser.workflow.started", onWorkflowStarted);
+      window.removeEventListener("sonarbot:browser.workflow.step", onWorkflowStep);
+      window.removeEventListener("sonarbot:browser.workflow.blocked", onWorkflowBlocked);
+      window.removeEventListener("sonarbot:browser.workflow.completed", onWorkflowCompleted);
     };
   }, []);
 
@@ -367,11 +481,52 @@ export function BrowserPanel() {
               inspectable instead of being silently deleted.
             </div>
             <div className="rounded-[1.35rem] border border-line/80 bg-white/95 p-4">
-              <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Workflow</div>
-              {workflow ? (
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Workflow</div>
+                {state?.active_workflow ? (
+                  <button
+                    type="button"
+                    onClick={() => void stopActiveWorkflow()}
+                    className="rounded-full bg-rose-100 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-rose-700 transition hover:bg-rose-200"
+                  >
+                    Terminate task
+                  </button>
+                ) : null}
+              </div>
+              {state?.active_workflow ? (
+                <div className="mt-2 space-y-2 rounded-2xl border border-line/70 bg-foam/70 p-3">
+                  <div className="text-sm font-medium text-ink">{formatWorkflowStatus(state.active_workflow)}</div>
+                  <div className="text-sm text-slate-600">
+                    {formatWorkflowDetail(state.active_workflow) || "No query yet"}
+                  </div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                    {state.active_workflow.status || "running"}{state.workflow_stop_requested ? " | stop requested" : ""}
+                  </div>
+                  {(() => {
+                    const pageUrl = state.active_tab?.url || state.active_workflow?.current_url || state.active_workflow?.target_url || "";
+                    return pageUrl ? (
+                      <a
+                        href={pageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block rounded-xl border border-sky-200 bg-white/80 px-3 py-2 text-sm text-sky-800 transition hover:bg-sky-50"
+                      >
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-sky-500">Current page</div>
+                        <div className="mt-1 break-all">{pageUrl}</div>
+                      </a>
+                    ) : null;
+                  })()}
+                  {state.active_workflow.last_step ? (
+                    <div className="rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">Last step</div>
+                      <div className="mt-1">{state.active_workflow.last_step.message || state.active_workflow.last_step.step_name || "Running"}</div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : workflow ? (
                 <>
-                  <div className="mt-2 text-sm font-medium text-ink">{workflow.recipe_name || "Browser workflow"}</div>
-                  <div className="mt-1 text-sm text-slate-600">{workflow.response_text || workflow.message || "Waiting for workflow updates."}</div>
+                  <div className="mt-2 text-sm font-medium text-ink">{formatWorkflowStatus(workflow)}</div>
+                  <div className="mt-1 text-sm text-slate-600">{formatWorkflowDetail(workflow) || workflow.response_text || workflow.message || "Waiting for workflow updates."}</div>
                   <div className="mt-2 text-xs uppercase tracking-[0.18em] text-slate-500">
                     {workflow.status || "running"}
                   </div>
@@ -379,6 +534,27 @@ export function BrowserPanel() {
               ) : (
                 <div className="mt-2 text-sm text-slate-500">No browser workflow has run yet.</div>
               )}
+              {workflowEvents.length > 0 ? (
+                <div className="mt-4 space-y-2">
+                  <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-sky-500">Live step</div>
+                    <div className="mt-1">{formatWorkflowStatus(workflowEvents[0])}</div>
+                    <div className="mt-1 text-xs text-sky-700">
+                      {formatWorkflowDetail(workflowEvents[0]) || workflowEvents[0]?.message || workflowEvents[0]?.response_text || ""}
+                    </div>
+                  </div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">Recent steps</div>
+                  {workflowEvents.map((entry, index) => (
+                    <div key={`${entry.reason || "workflow"}-${index}-${entry.step_name || "step"}`} className="rounded-xl border border-line/60 bg-white/85 px-3 py-2 text-sm text-slate-600">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium text-ink">{entry.step_name || entry.recipe_name || "workflow"}</div>
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400">{entry.reason || entry.status || "update"}</div>
+                      </div>
+                      <div className="mt-1">{entry.message || entry.response_text || "Workflow update"}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="overflow-hidden rounded-[1.35rem] border border-line/80 bg-slate-950">

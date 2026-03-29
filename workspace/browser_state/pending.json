@@ -2,6 +2,13 @@
   "pending_login": null,
   "pending_protected_action": null,
   "pending_otp": null,
-  "pending_captcha": null,
-  "updated_at": "2026-03-29T14:41:08.785357+00:00"
+  "pending_captcha": {
+    "site_name": "youtube",
+    "prompt": "Please solve the CAPTCHA and reply with the answer.",
+    "target_url": "https://www.youtube.com/",
+    "screenshot_path": "C:\\Users\\ashis\\OneDrive\\Desktop\\SonarBot\\workspace\\browser\\captcha-20260329T183807743186Z.png",
+    "tab_id": null,
+    "created_at": "2026-03-29T18:38:11.066498+00:00"
+  },
+  "updated_at": "2026-03-29T20:01:04.696839+00:00"
 }

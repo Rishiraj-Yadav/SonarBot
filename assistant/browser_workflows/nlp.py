@@ -20,6 +20,78 @@ def _normalize_quotes(value: str) -> str:
     return value.strip().strip("\"'")
 
 
+_SEARCH_FILLER_WORDS = {
+    "a",
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "appear",
+    "appears",
+    "because",
+    "browser",
+    "can",
+    "could",
+    "do",
+    "does",
+    "et",
+    "for",
+    "from",
+    "go",
+    "goahead",
+    "goahead",
+    "happen",
+    "have",
+    "here",
+    "hey",
+    "i",
+    "if",
+    "into",
+    "is",
+    "it",
+    "just",
+    "know",
+    "look",
+    "looks",
+    "me",
+    "my",
+    "now",
+    "of",
+    "on",
+    "please",
+    "result",
+    "search",
+    "see",
+    "shows",
+    "so",
+    "that",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "up",
+    "we",
+    "web",
+    "website",
+    "will",
+    "with",
+    "you",
+    "youll",
+    "youre",
+    "youve",
+    "your",
+    "youre",
+    "searching",
+    "find",
+    "found",
+    "looking",
+    "open",
+}
+
+
 def normalize_site_name(value: str | None) -> str | None:
     if not value:
         return None
@@ -70,6 +142,32 @@ def infer_site_from_runtime(runtime_state: dict[str, Any] | None) -> str | None:
         if host:
             return host
     return None
+
+
+def _strip_search_filler(fragment: str) -> str:
+    text = _normalize_spaces(fragment)
+    if not text:
+        return ""
+    text = re.sub(
+        r"^(?:please\s+|just\s+|do\s+it\s+|go\s+ahead\s+|now\s+|then\s+|and\s+then\s+|so\s+|because\s+)+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(?:\s+(?:then|and then|because|so that|after that|afterwards|you will see|you'll see|you can see|so you can|so you will).*)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = _normalize_spaces(text)
+    if not text:
+        return ""
+    tokens = re.findall(r"[a-z0-9][a-z0-9._-]*", text.lower())
+    if not tokens:
+        return ""
+    kept = [token for token in tokens if token not in _SEARCH_FILLER_WORDS]
+    return " ".join(kept).strip() or text
 
 
 class BrowserWorkflowNLP:
@@ -222,6 +320,24 @@ class BrowserWorkflowNLP:
                 details=details,
             )
 
+        contextual_open = self._extract_contextual_open_followup(
+            message,
+            inferred_site=inferred_site,
+            active_task=active_task,
+            task_state=task_state,
+        )
+        if contextual_open is not None:
+            return contextual_open
+
+        contextual_query = self._extract_contextual_site_query(
+            message,
+            inferred_site=inferred_site,
+            active_task=active_task,
+            task_state=task_state,
+        )
+        if contextual_query is not None:
+            return contextual_query
+
         browser_open = self._extract_open_browser_request(
             message,
             runtime_state=runtime_state,
@@ -347,6 +463,17 @@ class BrowserWorkflowNLP:
                 details={"task_state": task_state},
             )
 
+        generic_search = self._extract_generic_web_search(message)
+        if generic_search:
+            return BrowserWorkflowMatch(
+                recipe_name="google_search_open",
+                confidence=0.82,
+                site_name="google",
+                query=generic_search,
+                action="open_result",
+                details={"task_state": task_state},
+            )
+
         # ── New Phase D deterministic patterns ───────────────────────────────────
 
         # youtube_media_control
@@ -463,6 +590,7 @@ class BrowserWorkflowNLP:
         normalized = _normalize_spaces(message)
         patterns = (
             r"^(?:please\s+)?open\s+youtube(?:\.com)?(?:\s+and)?\s+(?:play|watch|open|run)\s+(.+)$",
+            r"^(?:please\s+)?(?:on\s+)?youtube(?:\.com)?(?:\s+and)?\s+(?:search(?:\s+for)?|find|look for)\s+(.+)$",
             r"^(?:please\s+)?search\s+youtube(?:\.com)?\s+for\s+(.+?)(?:\s+and\s+(?:play|watch|open)(?:\s+the)?\s*(?:best match|first result)?)?$",
             r"^(?:please\s+)?(?:play|watch)\s+(.+?)\s+(?:on|in)\s+youtube(?:\.com)?$",
         )
@@ -535,12 +663,38 @@ class BrowserWorkflowNLP:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if not match:
                 continue
-            query = _normalize_quotes(match.group(1))
+            query = self._clean_search_query(match.group(1))
             if not query:
                 continue
             open_directive = (match.group(2) or "").lower()
             return query, "first result" in open_directive
+        lowered = normalized.lower()
+        if "google" in lowered and any(token in lowered for token in ("search", "find", "look for", "look up")):
+            tail = normalized[lowered.rfind("google") + len("google") :]
+            query = self._clean_search_query(tail)
+            if query:
+                return query, False
+        github_of_match = re.search(r"\bgithub(?:\s+page|\s+repo(?:sitory)?)?\s+(?:of|for)\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if github_of_match:
+            query = self._clean_search_query(f"{github_of_match.group(1)} github")
+            if query:
+                return query, False
         return None, False
+
+    def _clean_search_query(self, fragment: str) -> str:
+        cleaned = _strip_search_filler(fragment)
+        if not cleaned:
+            return ""
+        compact = re.sub(r"\b(?:search|find|look for|look up|open|play|watch)\b", " ", cleaned, flags=re.IGNORECASE)
+        compact = _normalize_spaces(compact)
+        if not compact:
+            return ""
+        tokens = [token for token in re.findall(r"[a-z0-9][a-z0-9._-]*", compact.lower()) if token not in _SEARCH_FILLER_WORDS]
+        if tokens:
+            if "github" in tokens and len(tokens) > 1 and "github" not in tokens[:-1]:
+                tokens = [token for token in tokens if token != "github"] + ["github"]
+            return " ".join(tokens).strip()
+        return compact
 
     def _extract_open_browser_request(
         self,
@@ -654,11 +808,11 @@ class BrowserWorkflowNLP:
             if pattern.startswith("^(?:please\\s+)?open"):
                 site_name = normalize_site_name(match.group(1))
                 raw_site, raw_url = normalize_browser_target(match.group(1))
-                query = _normalize_quotes(match.group(2) or "")
+                query = self._clean_search_query(match.group(2) or "")
             else:
                 site_name = normalize_site_name(match.group(2))
                 raw_site, raw_url = normalize_browser_target(match.group(2))
-                query = _normalize_quotes(match.group(1))
+                query = self._clean_search_query(match.group(1))
             if site_name or raw_site:
                 recipe_name = "site_open_exact_url_or_path" if raw_url and not query else "site_open_and_search"
                 return BrowserWorkflowMatch(
@@ -673,17 +827,147 @@ class BrowserWorkflowNLP:
         if inferred_site and any(token in normalized.lower() for token in ("search", "find", "look for")):
             search_match = re.search(r"\b(?:search|find|look for)\s+(.+)$", normalized, flags=re.IGNORECASE)
             if search_match:
-                query = _normalize_quotes(search_match.group(1))
+                query = self._clean_search_query(search_match.group(1))
                 if query:
                     return BrowserWorkflowMatch(
                         recipe_name="site_open_and_search",
-                        confidence=0.84,
+                        confidence=0.72,
                         site_name=inferred_site,
                         query=query,
                         action="search",
                         details={"task_state": task_state},
                     )
         return None
+
+    def _extract_generic_web_search(self, message: str) -> str | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        if not any(token in lowered for token in ("search", "find", "look for", "look up")):
+            return None
+        if any(site in lowered for site in ("google", "youtube", "amazon", "flipkart", "reddit", "twitter", "x.com", "github", "leetcode", "instagram", "facebook", "linkedin", "wikipedia")):
+            return None
+        match = re.search(r"\b(?:search|find|look for|look up)\s+(?:for\s+)?(.+)$", normalized, flags=re.IGNORECASE)
+        if not match:
+            return None
+        query = self._clean_search_query(match.group(1))
+        return query or None
+
+    def _extract_contextual_open_followup(
+        self,
+        message: str,
+        *,
+        inferred_site: str | None,
+        active_task: dict[str, Any],
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowMatch | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        if not active_task:
+            return None
+        if not any(token in lowered for token in ("open", "click", "go to", "show", "visit")):
+            return None
+        if not any(token in lowered for token in ("that", "it", "result", "github", "repo", "link", "page", "video")):
+            return None
+
+        query = _normalize_quotes(str(active_task.get("query", "")).strip() or str(active_task.get("last_result_title", "")).strip())
+        site_name = normalize_site_name(str(active_task.get("site_name", "")).strip()) or inferred_site
+        if not site_name and not query:
+            return None
+        open_first_result = any(token in lowered for token in ("that", "it", "result", "github", "repo", "link", "page"))
+        if not open_first_result and not query:
+            return None
+        return BrowserWorkflowMatch(
+            recipe_name="browser_continue_last_task",
+            confidence=0.94,
+            site_name=site_name,
+            query=query or None,
+            action="open",
+            open_first_result=open_first_result,
+            details={"task_state": task_state},
+        )
+
+    def _extract_contextual_site_query(
+        self,
+        message: str,
+        *,
+        inferred_site: str | None,
+        active_task: dict[str, Any],
+        task_state: dict[str, Any],
+    ) -> BrowserWorkflowMatch | None:
+        normalized = _normalize_spaces(message)
+        lowered = normalized.lower()
+        if not normalized or not active_task:
+            return None
+        if any(
+            token in lowered
+            for token in (
+                "://",
+                "www.",
+                "file ",
+                "folder",
+                "desktop",
+                "downloads",
+                "documents",
+                "document",
+                "path",
+            )
+        ):
+            return None
+        site_name = normalize_site_name(str(active_task.get("site_name", "")).strip()) or inferred_site
+        if site_name not in {"google", "youtube", "reddit", "twitter", "x.com"}:
+            return None
+        awaiting_followup = str(active_task.get("awaiting_followup", "")).strip().lower()
+        if awaiting_followup not in {"site_action", "continue", "workflow_plan", "site_search", "search"}:
+            return None
+        query = self._clean_search_query(normalized)
+        if not query:
+            return None
+        if len(query.split()) > 8 and not any(token in lowered for token in ("search", "find", "look for", "look up", "play", "watch")):
+            return None
+        if site_name == "google":
+            return BrowserWorkflowMatch(
+                recipe_name="google_search_open",
+                confidence=0.91,
+                site_name="google",
+                query=query,
+                action="open_result",
+                details={"task_state": task_state},
+            )
+        if site_name == "youtube":
+            return BrowserWorkflowMatch(
+                recipe_name="youtube_search_play",
+                confidence=0.91,
+                site_name="youtube",
+                query=query,
+                action="play",
+                details={"task_state": task_state},
+            )
+        if site_name == "reddit":
+            return BrowserWorkflowMatch(
+                recipe_name="reddit_search_open",
+                confidence=0.9,
+                site_name="reddit",
+                query=query,
+                action="search",
+                details={"task_state": task_state},
+            )
+        if site_name in {"twitter", "x.com"}:
+            return BrowserWorkflowMatch(
+                recipe_name="twitter_search_scroll",
+                confidence=0.9,
+                site_name="twitter",
+                query=query,
+                action="search_scroll",
+                details={"task_state": task_state},
+            )
+        return BrowserWorkflowMatch(
+            recipe_name="site_open_and_search",
+            confidence=0.88,
+            site_name=site_name,
+            query=query,
+            action="search",
+            details={"task_state": task_state},
+        )
 
     def _looks_browserish(
         self,
@@ -803,6 +1087,9 @@ class BrowserWorkflowNLP:
                     "web_form_fill_submit, calendar_book, email_compose_send, youtube_media_control, "
                     "train_search_book, flight_search_book, food_search_order, bill_payment_review, none."
                 ),
+                "Prefer the most explicit site mentioned by the user. Do not infer Amazon or Flipkart unless the user actually says Amazon or Flipkart.",
+                "If the user gives a messy search instruction, strip filler like 'then you will see' and keep the real search terms.",
+                "If the user asks to find a GitHub page or repo without an owner/repo pair, use google_search_open with a compact query like 'name github'.",
                 "For multi_tab_research: extract URLs into the urls[] array.",
                 "For web_form_fill_submit: extract field values into the fields{} object, target URL into site_name.",
                 "For calendar_book: set query to event title, action to time/date string.",
@@ -841,6 +1128,9 @@ class BrowserWorkflowNLP:
         site_name = normalized_site or raw_site or infer_site_from_runtime(runtime_state)
         query = _normalize_quotes(str(payload.get("query", "")).strip()) or None
         action = _normalize_quotes(str(payload.get("action", "")).strip()) or None
+        message_lower = message.lower()
+        if recipe_name == "amazon_search_buy" and not any(token in message_lower for token in ("amazon", "flipkart")):
+            return None
         details: dict[str, Any] = {"task_state": task_state}
         if raw_url:
             details["target_url"] = raw_url
@@ -1108,6 +1398,15 @@ class BrowserWorkflowNLP:
         """Detect Amazon/Flipkart product search intent."""
         normalized = _normalize_spaces(message)
         # Flipkart
+        flipkart_natural_m = re.search(
+            r"^(?:please\s+)?(?:on\s+)?flipkart(?:\.com)?(?:\s+(?:can\s+you|could\s+you|please))?\s+(?:search|find|look for|look up)(?:\s+for)?\s+(.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if flipkart_natural_m:
+            query = _normalize_quotes(flipkart_natural_m.group(1) or "")
+            if query:
+                return {"site_name": "flipkart", "query": query}
         flipkart_m = re.search(
             r"(?:search|find|look for|look up)\s+(.+?)\s+on\s+flipkart"
             r"|flipkart(?:\.com)?(?:\s+and\s+)?(?:search|find\s+for)?\s+(.+)",
@@ -1118,6 +1417,15 @@ class BrowserWorkflowNLP:
             if query:
                 return {"site_name": "flipkart", "query": query}
         # Amazon
+        amazon_natural_m = re.search(
+            r"^(?:please\s+)?(?:on\s+)?amazon(?:\.(?:com|in))?(?:\s+(?:can\s+you|could\s+you|please))?\s+(?:search|find|look for|look up)(?:\s+for)?\s+(.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if amazon_natural_m:
+            query = _normalize_quotes(amazon_natural_m.group(1) or "")
+            if query:
+                return {"site_name": "amazon", "query": query}
         amazon_m = re.search(
             r"(?:search|find|look for|look up)\s+(.+?)\s+on\s+amazon"
             r"|amazon(?:\.(?:com|in))?(?:\s+and)?\s+(?:search|find|look for)?\s+(.+)",

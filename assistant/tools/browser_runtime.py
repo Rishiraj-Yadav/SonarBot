@@ -8,6 +8,7 @@ import json
 import mimetypes
 import random
 import re
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -76,6 +77,9 @@ class BrowserRuntime:
     _pending_protected_action: dict[str, Any] | None = field(init=False, default=None)
     _pending_otp: dict[str, Any] | None = field(init=False, default=None)
     _pending_captcha: dict[str, Any] | None = field(init=False, default=None)
+    _active_workflow: dict[str, Any] | None = field(init=False, default=None)
+    _workflow_stop_requested: bool = field(init=False, default=False)
+    _active_workflow_task: asyncio.Task[None] | None = field(init=False, default=None)
     _mode_states: dict[str, BrowserModeState] = field(init=False, default_factory=dict)
     _active_mode: str = field(init=False, default="headless")
     _headed_idle_close_task: asyncio.Task[None] | None = field(init=False, default=None)
@@ -682,6 +686,8 @@ class BrowserRuntime:
             "pending_protected_action": dict(self._pending_protected_action) if self._pending_protected_action else None,
             "pending_otp": dict(self._pending_otp) if self._pending_otp else None,
             "pending_captcha": dict(self._pending_captcha) if self._pending_captcha else None,
+            "active_workflow": dict(self._active_workflow) if self._active_workflow else None,
+            "workflow_stop_requested": self._workflow_stop_requested,
         }
 
     def _profile_for_active_tab(
@@ -757,7 +763,7 @@ class BrowserRuntime:
     ) -> dict[str, Any]:
         await self._ensure_playwright()
         assert self.playwright is not None
-        browser = await self.playwright.chromium.launch(headless=headless)
+        browser = await self._launch_chromium_with_repair(headless=headless)
         context = await browser.new_context(accept_downloads=False)
         page = await context.new_page()
         try:
@@ -1608,11 +1614,11 @@ class BrowserRuntime:
         href = str(chosen.get("href", "")).strip()
         if href:
             await page.goto(href, wait_until=self.wait_state_for_navigation("domcontentloaded"))
-            await self.post_action_wait(page, "networkidle", timeout_seconds)
+            await self.post_action_wait(page, "domcontentloaded", timeout_seconds)
             return chosen
         locator, _strategy = await self.resolve_locator(page, str(chosen.get("title", "")), timeout_seconds=timeout_seconds)
         await locator.click(timeout=max(1000, timeout_seconds * 1000))
-        await self.post_action_wait(page, "networkidle", timeout_seconds)
+        await self.post_action_wait(page, "domcontentloaded", timeout_seconds)
         return chosen
 
     async def detect_blocking_state(self, page: Any) -> dict[str, Any] | None:
@@ -2005,7 +2011,7 @@ class BrowserRuntime:
             "description": description or action_type,
             "tab_id": headed.get("tab_id"),
             "url": headed.get("url"),
-            "wait_for": wait_for or "networkidle",
+            "wait_for": wait_for or "domcontentloaded",
             "timeout_seconds": max(1, int(timeout_seconds)),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "awaiting_followup": "confirmation",
@@ -2026,7 +2032,7 @@ class BrowserRuntime:
             await locator.click(timeout=10000)
             await self.post_action_wait(
                 page,
-                optional_string(action.get("wait_for")) or "networkidle",
+                optional_string(action.get("wait_for")) or "domcontentloaded",
                 int(action.get("timeout_seconds", 30)),
             )
             await self.refresh_active_tab(user_id or self.current_user_id)
@@ -2069,6 +2075,34 @@ class BrowserRuntime:
     async def emit_workflow_event(self, user_id: str, event_name: str, payload: dict[str, Any]) -> None:
         await self._emit_browser_event(user_id, event_name, payload)
 
+    def active_workflow_state(self) -> dict[str, Any] | None:
+        return dict(self._active_workflow) if self._active_workflow else None
+
+    def set_active_workflow(self, payload: dict[str, Any]) -> None:
+        self._active_workflow = dict(payload)
+        self._workflow_stop_requested = False
+
+    def update_active_workflow(self, **updates: Any) -> None:
+        if self._active_workflow is None:
+            self._active_workflow = {}
+        self._active_workflow.update(updates)
+
+    def clear_active_workflow(self) -> None:
+        self._active_workflow = None
+        self._workflow_stop_requested = False
+        self._active_workflow_task = None
+
+    def request_stop_active_workflow(self) -> bool:
+        self._workflow_stop_requested = True
+        task = self._active_workflow_task
+        if task is not None and not task.done():
+            task.cancel()
+            return True
+        return False
+
+    def workflow_stop_requested(self) -> bool:
+        return self._workflow_stop_requested
+
     async def ensure_workspace_file(self, relative_path: str) -> Path:
         candidate = Path(relative_path).expanduser()
         if not candidate.is_absolute():
@@ -2110,6 +2144,9 @@ class BrowserRuntime:
         self._tabs.clear()
         self._page_tab_ids.clear()
         self._pending_protected_action = None
+        self._active_workflow = None
+        self._workflow_stop_requested = False
+        self._active_workflow_task = None
 
     async def _ensure_playwright(self) -> None:
         if self.playwright is not None:
@@ -2121,6 +2158,41 @@ class BrowserRuntime:
                 "Playwright is not installed. Run `uv sync --extra dev` and `playwright install chromium`."
             ) from exc
         self.playwright = await async_playwright().start()
+
+    async def _launch_chromium_with_repair(self, *, headless: bool) -> Any:
+        assert self.playwright is not None
+        try:
+            return await self.playwright.chromium.launch(headless=headless)
+        except Exception as exc:
+            if not self._looks_like_missing_chromium_error(exc):
+                raise
+            if not await self._install_missing_chromium():
+                raise
+            return await self.playwright.chromium.launch(headless=headless)
+
+    def _looks_like_missing_chromium_error(self, exc: Exception) -> bool:
+        lowered = str(exc).lower()
+        return (
+            "executable doesn't exist" in lowered
+            or "chromium_headless_shell" in lowered
+            or "playwright install chromium" in lowered
+        )
+
+    async def _install_missing_chromium(self) -> bool:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "playwright",
+                "install",
+                "chromium",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await process.communicate()
+        except Exception:
+            return False
+        return process.returncode == 0
 
     async def _reset_context(
         self,
@@ -2138,7 +2210,7 @@ class BrowserRuntime:
             await self._cancel_headed_idle_close()
         if self.browser is None:
             assert self.playwright is not None
-            self.browser = await self.playwright.chromium.launch(headless=desired_headless)
+            self.browser = await self._launch_chromium_with_repair(headless=desired_headless)
         await self._stop_streaming()
         if self.context is not None:
             await self.context.close()

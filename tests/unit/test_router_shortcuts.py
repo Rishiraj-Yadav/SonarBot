@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from assistant.agent.queue import QueueMode
+from assistant.browser_workflows.models import BrowserWorkflowResult, WorkflowPlanStep
 from assistant.browser_workflows.state import BROWSER_TASK_STATE_KEY, browser_task_state_update
 from assistant.gateway.router import GatewayRouter
 
@@ -106,6 +107,26 @@ class DummyBrowserWorkflowEngine:
     async def maybe_run(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return None
+
+
+class ContextualBrowserWorkflowEngine:
+    def __init__(self) -> None:
+        self.calls = []
+        self.nlp = type("NlpStub", (), {"standalone_execution_override": staticmethod(lambda _message: None)})()
+
+    async def maybe_run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return BrowserWorkflowResult(
+            recipe_name="google_search_open",
+            status="completed",
+            response_text="Opened Google and searched for openclaw.",
+            progress_lines=["Opened Google.", "Searching Google for \"openclaw\"."],
+            steps=[
+                WorkflowPlanStep(name="open_site", detail="Open Google.", status="completed"),
+                WorkflowPlanStep(name="search", detail="Search Google for openclaw.", status="completed"),
+            ],
+            payload={"site_name": "google", "query": "openclaw"},
+        )
 
 
 class DummyToolRegistry:
@@ -2107,6 +2128,109 @@ async def test_router_plain_chat_no_pick_the_other_one_rejects_single_pending_ho
     assert response.ok is True
     assert "Rejected host approval 'approval-790'." in response.payload["command_response"]
     assert system_access_manager.decisions == [("approval-790", "rejected")]
+
+
+@pytest.mark.asyncio
+async def test_router_browser_plan_yes_prefers_browser_resume_over_host_approval(app_config) -> None:
+    system_access_manager = DummySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-999",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "move_host_file",
+                "target_summary": "C:/Users/ashis/Downloads/example.docx -> C:/Users/ashis/Desktop/example.docx",
+            }
+        ]
+    )
+    session_manager = DummySessionManager()
+    session_manager.session.metadata = browser_task_state_update(
+        active_task={
+            "recipe_name": "amazon_search_buy",
+            "site_name": "amazon",
+            "query": "shoes",
+            "execution_mode": "headless",
+            "awaiting_followup": "workflow_plan",
+        }
+    )
+    browser_engine = ChallengeEngineStub("Resumed the browser workflow.")
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-5",
+        request_id="req-command-5",
+        session_key="telegram:123",
+        message="yes",
+        metadata={"trace_id": "trace-command-5", "user_id": "default", "channel": "webchat"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["command_response"] == "Resumed the browser workflow."
+    assert system_access_manager.decisions == []
+    assert browser_engine.calls == [("yes", "default")]
+
+
+@pytest.mark.asyncio
+async def test_router_keeps_short_browser_queries_out_of_host_shortcuts(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    session_manager.session.metadata = browser_task_state_update(
+        active_task={
+            "recipe_name": "site_open_and_search",
+            "site_name": "google",
+            "query": "",
+            "execution_mode": "headed",
+            "awaiting_followup": "site_action",
+        }
+    )
+    browser_engine = ContextualBrowserWorkflowEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-browser-context",
+        request_id="req-browser-context",
+        session_key="telegram:123",
+        message="openclaw",
+        metadata={"trace_id": "trace-browser-context", "user_id": "default", "channel": "webchat"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "openclaw" in response.payload["command_response"].lower()
+    assert browser_engine.calls
+    assert not tool_registry.calls or tool_registry.calls[0][0] != "search_host_files"
 
 
 @pytest.mark.asyncio

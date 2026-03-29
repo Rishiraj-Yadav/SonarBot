@@ -26,6 +26,8 @@ def format_browser_exception(exc: Exception) -> str:
         return "The page took too long to load or the target element did not appear in time."
     if "err_name_not_resolved" in lowered:
         return "The website address could not be resolved from this machine."
+    if "executable doesn't exist" in lowered or "chromium_headless_shell" in lowered:
+        return "The browser runtime is missing its Chromium binary. I tried to repair it automatically, but if it still fails, run `playwright install chromium`."
     if "could not find an editable search input" in lowered:
         return "I couldn't find a usable search box on that page."
     if "could not find any clickable results" in lowered:

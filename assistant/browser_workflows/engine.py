@@ -6,8 +6,9 @@ import asyncio
 from contextvars import ContextVar
 from dataclasses import asdict
 import re
+from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from assistant.browser_workflows.models import BlockingState, BrowserWorkflowMatch, BrowserWorkflowResult, WorkflowPlanStep
 from assistant.browser_workflows.nlp import BrowserWorkflowNLP, infer_site_from_runtime, normalize_browser_target, normalize_site_name
@@ -32,6 +33,7 @@ class BrowserWorkflowEngine:
         self.nlp = BrowserWorkflowNLP(config, tool_registry)
         # chunk_emitter(connection_id, event_name, payload) — emits live progress to chat UI
         self._chunk_emitter = chunk_emitter
+        self._active_workflow_task: asyncio.Task[Any] | None = None
 
     def available_workflows(self) -> list[dict[str, Any]]:
         return [asdict(recipe) for recipe in RECIPES]
@@ -96,6 +98,24 @@ class BrowserWorkflowEngine:
         task_state = normalize_browser_task_state(previous_state or match.details.get("task_state"))
         active_task = active_browser_task(task_state)
         token = _CURRENT_BROWSER_CONNECTION_ID.set(str(connection_id or ""))
+        current_task = asyncio.current_task()
+        self._active_workflow_task = current_task
+        if hasattr(self.runtime, "set_active_workflow") and callable(getattr(self.runtime, "set_active_workflow", None)):
+            try:
+                self.runtime.set_active_workflow(
+                    {
+                        "recipe_name": match.recipe_name,
+                        "site_name": match.site_name,
+                        "query": match.query,
+                        "action": match.action,
+                        "execution_mode": self._desired_mode_for_match(match),
+                        "target_url": str(match.details.get("target_url", "") or ""),
+                        "current_url": str(match.details.get("target_url", "") or ""),
+                        "status": "running",
+                    }
+                )
+            except Exception:
+                pass
         await self._emit(
             user_id,
             "browser.workflow.started",
@@ -106,6 +126,17 @@ class BrowserWorkflowEngine:
                 "execution_mode": self._desired_mode_for_match(match),
             },
         )
+        if self._chunk_emitter is not None and connection_id:
+            try:
+                await self._chunk_emitter(
+                    str(connection_id),
+                    "agent.chunk",
+                    {
+                        "text": f"Starting {match.recipe_name.replace('_', ' ')} for {match.query or match.site_name or 'your request'}...",
+                    },
+                )
+            except Exception:
+                pass
         try:
             if match.recipe_name == "site_open_exact_url_or_path":
                 result = await self._run_site_open_exact_url_or_path(match, user_id=user_id)
@@ -191,7 +222,25 @@ class BrowserWorkflowEngine:
                 ),
                 payload={"raw_error": str(exc)},
             )
+        except asyncio.CancelledError:
+            if hasattr(self.runtime, "update_active_workflow") and callable(getattr(self.runtime, "update_active_workflow", None)):
+                try:
+                    self.runtime.update_active_workflow(status="cancelled", response_text="Browser task stopped.")
+                except Exception:
+                    pass
+            await self._emit(
+                user_id,
+                "browser.workflow.blocked",
+                {"recipe_name": match.recipe_name, "reason": "cancelled", "message": "Browser task stopped."},
+            )
+            raise
         finally:
+            if hasattr(self.runtime, "clear_active_workflow") and callable(getattr(self.runtime, "clear_active_workflow", None)):
+                try:
+                    self.runtime.clear_active_workflow()
+                except Exception:
+                    pass
+            self._active_workflow_task = None
             _CURRENT_BROWSER_CONNECTION_ID.reset(token)
         event_name = "browser.workflow.completed" if result.status == "completed" else "browser.workflow.blocked"
         await self._emit(
@@ -246,19 +295,31 @@ class BrowserWorkflowEngine:
                 status="needs_followup",
                 response_text="Tell me the YouTube video title you want me to play.",
             )
-        page = await self._open_site("youtube", user_id=user_id, headless=self._mode_headless(execution_mode))
+        page = await self._open_site(
+            "youtube",
+            user_id=user_id,
+            target_url="https://www.youtube.com",
+            headless=self._mode_headless(execution_mode),
+        )
         progress = ["Opened YouTube."]
         steps = [WorkflowPlanStep(name="open_site", detail="Open YouTube.", status="completed")]
         await self._emit_step(user_id, match.recipe_name, "open_site", progress[-1])
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
-        search_box, _strategy = await self._find_search_input(page, site_name="youtube")
-        await self._step_with_watchdog(search_box.fill(query))
-        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        await self._type_and_submit_search(page, user_id=user_id, recipe_name=match.recipe_name, site_name="youtube", query=query)
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
-        progress.append(f"Searching for \"{query}\".")
+        if not await self._step_with_watchdog(self.runtime.wait_for_url_match(page, r"youtube\.com/results\?search_query=", timeout_seconds=8)):
+            search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+            page = await self._open_site(
+                "youtube",
+                user_id=user_id,
+                target_url=search_url,
+                headless=self._mode_headless(execution_mode),
+            )
+            await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
+        progress.append(f"Searched YouTube for \"{query}\".")
         steps.append(WorkflowPlanStep(name="search", detail=f"Search YouTube for {query}.", status="completed"))
         await self._emit_step(user_id, match.recipe_name, "search", progress[-1])
         blocked = await self._detect_blocker(page)
@@ -330,7 +391,7 @@ class BrowserWorkflowEngine:
             recipe_name=match.recipe_name,
             status="completed",
             response_text=(
-                f"Opened YouTube, searched for \"{query}\", and opened the best matching video in "
+                f"Opened YouTube search results for \"{query}\" and opened the best matching video in "
                 f"{self.runtime.current_tab_id or 'the current tab'}."
             ),
             progress_lines=progress,
@@ -364,21 +425,36 @@ class BrowserWorkflowEngine:
                 response_text="Tell me which creator or channel you want the latest YouTube video from.",
             )
         search_query = query if any(token in query.lower() for token in ("latest", "newest", "recent")) else f"{query} latest video"
-        page = await self._open_site("youtube", user_id=user_id, headless=self._mode_headless(execution_mode))
+        page = await self._open_site(
+            "youtube",
+            user_id=user_id,
+            target_url="https://www.youtube.com",
+            headless=self._mode_headless(execution_mode),
+        )
         progress = ["Opened YouTube."]
         steps = [WorkflowPlanStep(name="open_site", detail="Open YouTube.", status="completed")]
         await self._emit_step(user_id, match.recipe_name, "open_site", progress[-1])
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
-        search_box, _strategy = await self._find_search_input(page, site_name="youtube")
-        await self._step_with_watchdog(search_box.fill(search_query))
-        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        await self._type_and_submit_search(page, user_id=user_id, recipe_name=match.recipe_name, site_name="youtube", query=search_query)
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
-        progress.append(f"Searching YouTube for the latest video from \"{query}\".")
+        if not await self._step_with_watchdog(self.runtime.wait_for_url_match(page, r"youtube\.com/results\?search_query=", timeout_seconds=8)):
+            search_url = f"https://www.youtube.com/results?search_query={quote_plus(search_query)}"
+            page = await self._open_site(
+                "youtube",
+                user_id=user_id,
+                target_url=search_url,
+                headless=self._mode_headless(execution_mode),
+            )
+            await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
+        progress.append(f"Searched YouTube for the latest video from \"{query}\".")
         steps.append(WorkflowPlanStep(name="search", detail=f"Search YouTube for {query}.", status="completed"))
         await self._emit_step(user_id, match.recipe_name, "search", progress[-1])
+        blocked = await self._detect_blocker(page)
+        if blocked:
+            return self._blocked_result(match, blocked, progress, steps)
         results = await self.runtime.extract_search_results(
             page,
             site_name="youtube",
@@ -445,7 +521,7 @@ class BrowserWorkflowEngine:
             recipe_name=match.recipe_name,
             status="completed",
             response_text=(
-                f"Opened YouTube, searched for the latest video from \"{query}\", and opened the top matching result in "
+                f"Opened YouTube search results for the latest video from \"{query}\" and opened the top matching result in "
                 f"{self.runtime.current_tab_id or 'the current tab'}."
             ),
             progress_lines=progress,
@@ -485,10 +561,8 @@ class BrowserWorkflowEngine:
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
-        search_box, _strategy = await self._find_search_input(page, site_name="google")
-        await self._step_with_watchdog(search_box.fill(query))
-        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        await self._type_and_submit_search(page, user_id=user_id, recipe_name=match.recipe_name, site_name="google", query=query)
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
         progress.append(f"Searching Google for \"{query}\".")
         steps.append(WorkflowPlanStep(name="search", detail=f"Search Google for {query}.", status="completed"))
@@ -550,6 +624,8 @@ class BrowserWorkflowEngine:
                     target_url=page.url,
                     execution_mode=execution_mode,
                     open_first_result=match.open_first_result,
+                    last_result_title=chosen.get("title", ""),
+                    last_result_url=chosen.get("href", ""),
                 )
             ),
             payload={"tab_id": self.runtime.current_tab_id, "site_name": "google", "query": query, "execution_mode": execution_mode},
@@ -651,7 +727,7 @@ class BrowserWorkflowEngine:
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
-        await self.runtime.post_action_wait(page, "networkidle", 30)
+        await self.runtime.post_action_wait(page, "domcontentloaded", 8)
         await self.runtime.refresh_active_tab(user_id)
         results = await self.runtime.extract_search_results(page, site_name="leetcode", max_results=self.config.browser_workflows.max_results_to_rank)
         if not results:
@@ -915,10 +991,8 @@ class BrowserWorkflowEngine:
                 ),
                 payload={"tab_id": self.runtime.current_tab_id, "site_name": site_name, "execution_mode": execution_mode},
             )
-        search_box, _strategy = await self._find_search_input(page, site_name=site_name)
-        await self._step_with_watchdog(search_box.fill(query))
-        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        await self._type_and_submit_search(page, user_id=user_id, recipe_name=match.recipe_name, site_name=site_name, query=query)
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
         progress.append(f"Searched {label} for \"{query}\".")
         steps.append(WorkflowPlanStep(name="search", detail=f"Search {label} for {query}.", status="completed"))
@@ -1225,8 +1299,18 @@ class BrowserWorkflowEngine:
         if not url:
             url = site_name if site_name.startswith("http") else f"https://{site_name}"
         page = await self._step_with_watchdog(self.runtime.get_page(target_url=url, user_id=user_id, headless=headless))
-        await self._step_with_watchdog(page.goto(url, wait_until=self.runtime.wait_state_for_navigation("domcontentloaded")))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        wait_state = self.runtime.wait_state_for_navigation("domcontentloaded")
+        try:
+            await self._step_with_watchdog(page.goto(url, wait_until=wait_state))
+        except Exception:
+            # Some retail sites stay noisy or slow during load; fall back to a lighter navigation wait.
+            try:
+                await self._step_with_watchdog(page.goto(url, wait_until="commit"))
+            except Exception:
+                current_url = str(getattr(page, "url", "") or "")
+                if not current_url or current_url == "about:blank":
+                    raise
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         # Auto-dismiss consent/cookie banners after navigation
         auto_dismiss = getattr(self.runtime, "auto_dismiss_consent", None)
         if getattr(self.config.browser_workflows, "auto_dismiss_consent", True) and callable(auto_dismiss):
@@ -1378,12 +1462,22 @@ class BrowserWorkflowEngine:
                 "prompt": "Please solve the CAPTCHA and reply with the answer.",
                 "screenshot_path": str(blocked.details.get("screenshot_path", "")),
             }
-            response_text = (
-                "The browser is blocked by a CAPTCHA or human-verification challenge. "
-                "Reply with the CAPTCHA answer to continue."
-            )
-            if str(blocked.details.get("screenshot_path", "")).strip():
-                response_text += f"\nCAPTCHA screenshot: {blocked.details['screenshot_path']}"
+            screenshot_path = str(blocked.details.get("screenshot_path", "")).strip()
+            screenshot_note = f" Screenshot saved as {Path(screenshot_path).name}." if screenshot_path else ""
+            if opened_visible:
+                response_text = (
+                    "YouTube opened, but a CAPTCHA blocked the page. "
+                    "I also opened a visible browser window on the host machine so you can solve it there. "
+                    "If it is a text CAPTCHA, reply with the answer here. "
+                    "If it is a checkbox or image challenge, solve it in the browser and then say `continue`."
+                )
+            else:
+                response_text = (
+                    "The browser is blocked by a CAPTCHA or human-verification challenge. "
+                    "If it is a text CAPTCHA, reply with the answer here. "
+                    "If it is a checkbox or image challenge, open the Browser tab, solve it there, and then say `continue`."
+                )
+            response_text += screenshot_note
         state = browser_task_state_update(
             active_task=self._build_workflow_state(
                 recipe_name=match.recipe_name,
@@ -1434,6 +1528,12 @@ class BrowserWorkflowEngine:
             return site_name if site_name.startswith("http") else f"https://{site_name}"
         return None
 
+    def _shopping_search_url(self, site_name: str, query: str) -> str:
+        encoded = quote_plus(query)
+        if site_name == "flipkart":
+            return f"https://www.flipkart.com/search?q={encoded}"
+        return f"https://www.amazon.com/s?k={encoded}"
+
     def _site_from_url(self, url: str | None) -> str | None:
         if not url:
             return None
@@ -1475,6 +1575,8 @@ class BrowserWorkflowEngine:
         if active_execution_mode in {"headless", "headed"} and active_site:
             if not match_site or self._sites_match(active_site, match_site):
                 return active_execution_mode
+        if match_site or str(match.query or "").strip() or str(match.action or "").strip():
+            return "headed"
         return "headless"
 
     def _mode_headless(self, mode: str) -> bool:
@@ -1589,6 +1691,11 @@ class BrowserWorkflowEngine:
             "browser.workflow.step",
             {"recipe_name": recipe_name, "step_name": step_name, "message": message, "status": "running"},
         )
+        if hasattr(self.runtime, "update_active_workflow") and callable(getattr(self.runtime, "update_active_workflow", None)):
+            try:
+                self.runtime.update_active_workflow(last_step={"step_name": step_name, "message": message, "status": "running"})
+            except Exception:
+                pass
         # Live progress chunk to the chat UI (Phase A)
         resolved_connection_id = connection_id or _CURRENT_BROWSER_CONNECTION_ID.get("")
         if getattr(self.config.browser_workflows, "live_progress_chunks", True) and self._chunk_emitter is not None and resolved_connection_id:
@@ -1599,10 +1706,31 @@ class BrowserWorkflowEngine:
 
     async def _step_with_watchdog(self, coro: Any) -> Any:
         """Run *coro* with a per-step timeout from config. Raises asyncio.TimeoutError on breach."""
+        if hasattr(self.runtime, "workflow_stop_requested") and callable(getattr(self.runtime, "workflow_stop_requested", None)):
+            if self.runtime.workflow_stop_requested():
+                raise asyncio.CancelledError()
         timeout = int(getattr(self.config.browser_execution, "step_timeout_seconds", 0) or 0)
         if timeout > 0:
-            return await asyncio.wait_for(coro, timeout=timeout)
-        return await coro
+            result = await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            result = await coro
+        if hasattr(self.runtime, "workflow_stop_requested") and callable(getattr(self.runtime, "workflow_stop_requested", None)):
+            if self.runtime.workflow_stop_requested():
+                raise asyncio.CancelledError()
+        return result
+
+    def request_stop_active_workflow(self) -> bool:
+        requested = False
+        if hasattr(self.runtime, "request_stop_active_workflow") and callable(getattr(self.runtime, "request_stop_active_workflow", None)):
+            try:
+                requested = bool(self.runtime.request_stop_active_workflow())
+            except Exception:
+                requested = False
+        task = self._active_workflow_task
+        if task is not None and not task.done():
+            task.cancel()
+            requested = True
+        return requested
 
     async def _find_search_input(self, page: Any, *, site_name: str | None = None) -> tuple[Any, str]:
         try:
@@ -1616,6 +1744,56 @@ class BrowserWorkflowEngine:
             if hinted is not None:
                 return hinted
             raise
+
+    def _search_fallback_url(self, site_name: str, query: str) -> str | None:
+        encoded = quote_plus(query)
+        normalized = normalize_site_name(site_name) or site_name.lower().strip()
+        if normalized == "google":
+            return f"https://www.google.com/search?q={encoded}"
+        if normalized == "youtube":
+            return f"https://www.youtube.com/results?search_query={encoded}"
+        if normalized in {"amazon", "amazon india"}:
+            domain = "amazon.in" if normalized == "amazon india" else "amazon.com"
+            return f"https://www.{domain}/s?k={encoded}"
+        if normalized == "flipkart":
+            return f"https://www.flipkart.com/search?q={encoded}"
+        if normalized == "reddit":
+            return f"https://www.reddit.com/search/?q={encoded}&sort=relevance"
+        if normalized in {"twitter", "x"}:
+            return f"https://twitter.com/search?q={encoded}&src=typed_query&f=live"
+        if normalized == "leetcode":
+            return f"https://leetcode.com/problemset/?search={encoded}"
+        return None
+
+    async def _type_and_submit_search(
+        self,
+        page: Any,
+        *,
+        user_id: str,
+        recipe_name: str,
+        site_name: str,
+        query: str,
+    ) -> None:
+        try:
+            search_box, _strategy = await self._find_search_input(page, site_name=site_name)
+        except Exception:
+            fallback_url = self._search_fallback_url(site_name, query)
+            if not fallback_url:
+                raise
+            await self._emit_step(
+                user_id,
+                recipe_name,
+                "search_fallback",
+                f"Search box not available, opening {site_name.title()} results for \"{query}\" directly.",
+            )
+            await self._step_with_watchdog(page.goto(fallback_url, wait_until=self.runtime.wait_state_for_navigation("domcontentloaded")))
+            await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
+            await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
+            return
+        await self._emit_step(user_id, recipe_name, "type_query", f'Typing "{query}" into {site_name.title()} search.')
+        await self._step_with_watchdog(search_box.fill(query))
+        await self._emit_step(user_id, recipe_name, "submit_query", f'Submitting {site_name.title()} search for "{query}".')
+        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
 
     def _describe_disambiguation_match(self, match: BrowserWorkflowMatch) -> str:
         query = str(match.query or "").strip()
@@ -2047,32 +2225,21 @@ class BrowserWorkflowEngine:
                 status="needs_followup",
                 response_text=f"Tell me what product you want me to search for on {site_name.title()}.",
             )
-        preview = self._maybe_preview_workflow_plan(
-            match,
-            task_state,
-            execution_mode=execution_mode,
-            target_url=SITE_URLS.get(site_name, ""),
-            steps=[
-                WorkflowPlanStep(name="open_store", detail=f"Open {site_name.title()}."),
-                WorkflowPlanStep(name="search_product", detail=f'Search for "{query}".'),
-                WorkflowPlanStep(name="review_results", detail="Summarize the top product results."),
-                WorkflowPlanStep(name="pause_before_purchase", detail="Pause before any purchase action."),
-            ],
-            resume_details={"site_name": site_name, "query": query},
+        search_url = self._shopping_search_url(site_name, query)
+        page = await self._open_site(
+            site_name,
+            user_id=user_id,
+            target_url=SITE_URLS.get(site_name, search_url),
+            headless=self._mode_headless(execution_mode),
         )
-        if preview is not None:
-            return preview
-        page = await self._open_site(site_name, user_id=user_id, headless=self._mode_headless(execution_mode))
         progress = [f"Opened {site_name.title()}."]
         steps = [WorkflowPlanStep(name="open_site", detail=f"Open {site_name.title()}.", status="completed")]
         await self._emit_step(user_id, match.recipe_name, "open_site", progress[-1])
         blocked = await self._detect_blocker(page)
         if blocked:
             return self._blocked_result(match, blocked, progress, steps)
-        search_box, _ = await self._find_search_input(page, site_name=site_name)
-        await self._step_with_watchdog(search_box.fill(query))
-        await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 30))
+        await self._type_and_submit_search(page, user_id=user_id, recipe_name=match.recipe_name, site_name=site_name, query=query)
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 8))
         await self._step_with_watchdog(self.runtime.refresh_active_tab(user_id))
         progress.append(f'Searched {site_name.title()} for "{query}".')
         steps.append(WorkflowPlanStep(name="search", detail="Search for product.", status="completed"))
@@ -2306,7 +2473,7 @@ class BrowserWorkflowEngine:
         search_box, _ = await self._find_search_input(page, site_name=site_name)
         await self._step_with_watchdog(search_box.fill(query))
         await self._step_with_watchdog(self.runtime.press_key(page, "Enter"))
-        await self._step_with_watchdog(self.runtime.post_action_wait(page, "networkidle", 20))
+        await self._step_with_watchdog(self.runtime.post_action_wait(page, "domcontentloaded", 6))
         await self.runtime.refresh_active_tab(user_id)
         progress.append(f'Searched {site_name.title()} for "{query}".')
         steps.append(WorkflowPlanStep(name="search_food", detail="Search for the requested food or restaurant.", status="completed"))

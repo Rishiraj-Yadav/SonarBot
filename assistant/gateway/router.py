@@ -147,7 +147,20 @@ class GatewayRouter:
         if shortcut is not None:
             return shortcut
 
-        host_shortcut = await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
+        browser_task_state = await self._get_browser_task_state(session_key)
+        browser_followup_turn = self._looks_like_browser_followup(stripped, browser_task_state)
+        browser_context_turn = browser_followup_turn or self._looks_like_browser_contextual_query(stripped, browser_task_state)
+        if browser_context_turn:
+            browser_workflow = await self._handle_browser_workflow(
+                connection_id=connection_id,
+                request_id=request_id,
+                session_key=session_key,
+                message=message,
+                metadata=metadata,
+            )
+            if browser_workflow is not None:
+                return browser_workflow
+        host_shortcut = None if browser_context_turn else await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
         if host_shortcut is not None:
             return host_shortcut
 
@@ -1517,34 +1530,51 @@ class GatewayRouter:
                     ok=True,
                     payload={"queued": False, "session_key": session_key, "command_response": response_text},
                 )
-            result = await self.browser_workflow_engine.maybe_run(
-                message,
-                user_id=user_id,
-                session_key=session_key,
-                channel=channel,
-                previous_state=task_state,
-                force=force,
-                connection_id=connection_id,
-            )
-            if result is None:
-                return None
-            await self._apply_browser_task_state(session_key, result)
-            response_text = self._compose_browser_workflow_response(result)
-            await self._persist_inline_exchange(session_key, message, response_text, metadata)
-            return ResponseFrame(
-                id=request_id,
-                ok=True,
-                payload={
-                    "queued": False,
-                    "session_key": session_key,
-                    "command_response": response_text,
-                    "browser_workflow": {
-                        "recipe_name": result.recipe_name,
-                        "status": result.status,
-                        "payload": result.payload,
+            try:
+                result = await self.browser_workflow_engine.maybe_run(
+                    message,
+                    user_id=user_id,
+                    session_key=session_key,
+                    channel=channel,
+                    previous_state=task_state,
+                    force=force,
+                    connection_id=connection_id,
+                )
+                if result is None:
+                    return None
+                await self._apply_browser_task_state(session_key, result)
+                response_text = self._compose_browser_workflow_response(result)
+                await self._persist_inline_exchange(session_key, message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": response_text,
+                        "browser_workflow": {
+                            "recipe_name": result.recipe_name,
+                            "status": result.status,
+                            "payload": result.payload,
+                        },
                     },
-                },
-            )
+                )
+            except asyncio.CancelledError:
+                if self.browser_workflow_engine is not None:
+                    runtime = getattr(self.browser_workflow_engine, "runtime", None)
+                    if runtime is not None and hasattr(runtime, "clear_active_workflow") and callable(getattr(runtime, "clear_active_workflow", None)):
+                        try:
+                            runtime.clear_active_workflow()
+                        except Exception:
+                            pass
+                await self._update_session_metadata(session_key, remove_keys=browser_task_state_clear_keys())
+                response_text = "Stopped the active browser task."
+                await self._persist_inline_exchange(session_key, message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
 
     async def _get_browser_task_state(self, session_key: str) -> dict[str, Any]:
         session = await self.session_manager.load_or_create(session_key)
@@ -1616,6 +1646,64 @@ class GatewayRouter:
             "no thats wrong",
             "not correct",
         }
+
+    def _looks_like_browser_followup(self, message: str, task_state: dict[str, Any]) -> bool:
+        normalized = re.sub(r"\s+", " ", message).strip().lower()
+        active = active_browser_task(task_state)
+        pending = any(
+            dict(task_state.get(key) or {})
+            for key in ("pending_confirmation", "pending_login", "pending_otp", "pending_captcha", "pending_disambiguation")
+        )
+        if not active and not pending:
+            return False
+        if not normalized:
+            return False
+        if normalized in {"continue", "yes", "ok", "okay", "go ahead", "open the first result", "open that", "open it"}:
+            return True
+        if re.match(r"^(?:open|click|show|visit|go to)\s+(?:that|it|the result|the github|the repo|github|repo|link|page)\b", normalized):
+            return True
+        if "browser" in normalized and any(token in normalized for token in ("continue", "open", "click", "show")):
+            return True
+        if active and any(token in normalized for token in ("that", "it", "result", "github", "repo", "link", "page")):
+            return True
+        return False
+
+    def _looks_like_browser_contextual_query(self, message: str, task_state: dict[str, Any]) -> bool:
+        normalized = re.sub(r"\s+", " ", message).strip().lower()
+        if not normalized:
+            return False
+        active = active_browser_task(task_state)
+        pending = any(
+            dict(task_state.get(key) or {})
+            for key in ("pending_confirmation", "pending_login", "pending_otp", "pending_captcha", "pending_disambiguation")
+        )
+        if not active and not pending:
+            return False
+        if any(
+            token in normalized
+            for token in (
+                "://",
+                "www.",
+                ".pptx",
+                ".pdf",
+                ".docx",
+                ".txt",
+                ".md",
+                "file ",
+                "folder",
+                "desktop",
+                "downloads",
+                "documents",
+                "document",
+                "path",
+            )
+        ):
+            return False
+        if self._looks_like_browser_followup(message, task_state):
+            return True
+        if len(normalized.split()) <= 5:
+            return True
+        return False
 
     async def _get_host_file_confirmation(self, session_key: str) -> dict[str, Any] | None:
         session = await self.session_manager.load_or_create(session_key)
@@ -3046,6 +3134,14 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         if self.system_access_manager is None:
+            return None
+        try:
+            browser_task_state = await self._get_browser_task_state(session_key)
+        except Exception:
+            browser_task_state = {}
+        active_task = active_browser_task(browser_task_state)
+        awaiting_followup = str(active_task.get("awaiting_followup", "")).strip().lower()
+        if awaiting_followup in {"workflow_plan", "confirmation"}:
             return None
         if not (self._looks_like_host_approval_reply(lowered) or self._looks_like_host_rejection_reply(lowered)):
             return None

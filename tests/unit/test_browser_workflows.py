@@ -29,6 +29,12 @@ class FakePage:
         self.url = url
         return None
 
+    async def content(self) -> str:
+        return "<html><body>Fake page</body></html>"
+
+    async def title(self) -> str:
+        return "Fake page"
+
 
 class FakeBrowserRuntime:
     def __init__(self) -> None:
@@ -37,6 +43,7 @@ class FakeBrowserRuntime:
         self.current_headless = True
         self.current_mode_value = "headless"
         self.current_user_id = "default"
+        self.visited_urls: list[str] = []
         self.tabs: list[dict[str, object]] = [
             {"tab_id": "tab-1", "url": self.page.url, "title": "Fake page", "mode": "headless", "active": True}
         ]
@@ -48,6 +55,7 @@ class FakeBrowserRuntime:
         self.pending_login: dict[str, object] | None = None
         self.pending_action: dict[str, object] | None = None
         self.requested_headless: list[bool | None] = []
+        self.pressed_keys: list[str] = []
 
     def current_state(self) -> dict[str, object]:
         active_tab = next((tab for tab in self.tabs if str(tab.get("tab_id")) == self.current_tab_id), None) or {
@@ -81,6 +89,7 @@ class FakeBrowserRuntime:
             self.current_headless = bool(headless)
             self.current_mode_value = "headless" if headless else "headed"
         if target_url:
+            self.visited_urls.append(target_url)
             self.page.url = target_url
         self._set_active_tab(self.current_tab_id, self.page.url, self.current_mode_value)
         return self.page
@@ -98,6 +107,7 @@ class FakeBrowserRuntime:
         return FakeLocator(self.page), "fake"
 
     async def press_key(self, _page, key: str, **_kwargs) -> None:
+        self.pressed_keys.append(key)
         if key.lower() == "enter":
             return None
 
@@ -106,6 +116,10 @@ class FakeBrowserRuntime:
 
     async def extract_search_results(self, _page, **_kwargs) -> list[dict[str, object]]:
         return list(self.results)
+
+    async def capture_dom_snapshot(self, _page) -> dict[str, object]:
+        text = " ".join(str(item.get("title", "")) for item in self.results).strip()
+        return {"text": text or "Fake page content"}
 
     async def click_best_match(self, page, query: str, candidates: list[dict[str, object]], **kwargs):
         chosen = candidates[0] if kwargs.get("open_first_result") else candidates[-1]
@@ -399,6 +413,19 @@ async def test_browser_workflow_nlp_matches_youtube_phrase(app_config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_browser_workflow_nlp_matches_on_youtube_search_phrase(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match("On YouTube and search for assistant")
+
+    assert match is not None
+    assert match.recipe_name == "youtube_search_play"
+    assert match.site_name == "youtube"
+    assert match.query == "assistant"
+
+
+@pytest.mark.asyncio
 async def test_browser_workflow_nlp_uses_classifier_for_ambiguous_request(app_config) -> None:
     runtime = FakeBrowserRuntime()
     nlp = BrowserWorkflowNLP(
@@ -461,6 +488,65 @@ async def test_browser_workflow_nlp_matches_youtube_latest_request(app_config) -
     assert match is not None
     assert match.recipe_name == "youtube_latest_video"
     assert match.query == "MrBeast"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_opens_youtube_search_results_directly(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [
+        {"title": "Assistant tutorial", "href": "https://www.youtube.com/watch?v=abc123"},
+    ]
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    result = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="youtube_search_play",
+            confidence=0.96,
+            site_name="youtube",
+            query="assistant",
+            action="play",
+            details={"task_state": {}},
+        ),
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+        previous_state={},
+    )
+
+    assert result.status == "completed"
+    assert "assistant" in result.response_text.lower()
+    assert any("results?search_query=assistant" in url for url in runtime.visited_urls)
+    assert runtime.page.last_filled == "assistant"
+    assert "Enter" in runtime.pressed_keys
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_types_and_submits_youtube_search_query(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [
+        {"title": "MrBeast latest upload", "href": "https://www.youtube.com/watch?v=xyz987"},
+    ]
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    result = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="youtube_latest_video",
+            confidence=0.96,
+            site_name="youtube",
+            query="MrBeast",
+            action="play",
+            details={"task_state": {}},
+        ),
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+        previous_state={},
+    )
+
+    assert result.status == "completed"
+    assert runtime.page.last_filled == "MrBeast latest video"
+    assert "Enter" in runtime.pressed_keys
+    assert any("results?search_query=MrBeast+latest+video" in url for url in runtime.visited_urls)
 
 
 @pytest.mark.asyncio
@@ -654,6 +740,111 @@ async def test_browser_workflow_engine_runs_google_search_open(app_config) -> No
     assert result.status == "completed"
     assert "Opened Google" in result.response_text
     assert runtime.page.url == "https://example.com/other"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_opens_amazon_search_results_directly(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.results = [
+        {"title": "Running shoes", "href": "https://www.amazon.com/dp/example"},
+    ]
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    result = await engine.run_match(
+        BrowserWorkflowMatch(
+            recipe_name="amazon_search_buy",
+            confidence=0.96,
+            site_name="amazon",
+            query="shoes",
+            action="search",
+            details={"task_state": {}},
+        ),
+        user_id="default",
+        session_key="webchat_main",
+        channel="webchat",
+        previous_state={},
+    )
+
+    assert result is not None
+    assert result.status == "blocked"
+    assert any("amazon.com" in url for url in runtime.visited_urls)
+    assert runtime.page.last_filled == "shoes"
+    assert "Enter" in runtime.pressed_keys
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_engine_prefers_headed_mode_for_amazon_search(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    engine = BrowserWorkflowEngine(app_config, FakeToolRegistry(runtime))
+
+    match = BrowserWorkflowMatch(
+        recipe_name="amazon_search_buy",
+        confidence=0.96,
+        site_name="amazon",
+        query="watch",
+        action="search",
+        details={"task_state": {}},
+    )
+
+    assert engine._desired_mode_for_match(match) == "headed"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_matches_natural_amazon_request(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match("on amazon can you search for shoes")
+
+    assert match is not None
+    assert match.recipe_name == "amazon_search_buy"
+    assert match.site_name == "amazon"
+    assert match.query == "shoes"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_cleans_messy_google_search_request(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match("do it google search then you will see the github appears")
+
+    assert match is not None
+    assert match.recipe_name == "google_search_open"
+    assert match.site_name == "google"
+    assert match.query == "github"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_turns_github_lookup_into_google_search(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match("find the github of openclaw")
+
+    assert match is not None
+    assert match.recipe_name == "google_search_open"
+    assert match.site_name == "google"
+    assert match.query == "openclaw github"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_does_not_inherit_active_amazon_for_generic_search(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    runtime.page.url = "https://www.amazon.com"
+    runtime._set_active_tab("tab-1", "https://www.amazon.com", "headed", title="Amazon")
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "search for openclaw",
+        runtime_state=runtime.current_state(),
+        previous_state={},
+    )
+
+    assert match is not None
+    assert match.recipe_name == "google_search_open"
+    assert match.site_name == "google"
+    assert match.query == "openclaw"
 
 
 @pytest.mark.asyncio
@@ -898,6 +1089,27 @@ async def test_browser_workflow_nlp_lowers_threshold_for_short_followup_with_act
     assert match is not None
     assert match.recipe_name == "google_search_open"
     assert match.action != "disambiguate"
+
+
+@pytest.mark.asyncio
+async def test_browser_workflow_nlp_treats_short_google_context_phrase_as_search(app_config) -> None:
+    runtime = FakeBrowserRuntime()
+    nlp = BrowserWorkflowNLP(app_config, FakeToolRegistry(runtime))
+
+    match = await nlp.match(
+        "openclaw",
+        previous_state={
+            "active_task": {
+                "recipe_name": "site_open_and_search",
+                "site_name": "google",
+                "awaiting_followup": "site_action",
+            }
+        },
+    )
+
+    assert match is not None
+    assert match.recipe_name == "google_search_open"
+    assert match.query == "openclaw"
 
 
 @pytest.mark.asyncio

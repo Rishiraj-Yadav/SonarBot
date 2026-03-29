@@ -603,6 +603,29 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             payload = None
         return {"screenshot": payload}
 
+    @app.post("/api/browser/workflow/stop")
+    async def stop_browser_workflow() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        engine = services.browser_workflow_engine
+        runtime = services.browser_runtime
+        if engine is None or runtime is None:
+            return {"ok": False, "error": "Browser workflow runtime not available."}
+        requested = False
+        try:
+            requested = bool(engine.request_stop_active_workflow())
+        except Exception:
+            requested = False
+        if not requested:
+            try:
+                runtime.clear_active_workflow()
+            except Exception:
+                pass
+        return {
+            "ok": True,
+            "requested": requested,
+            "active_workflow": runtime.active_workflow_state() if hasattr(runtime, "active_workflow_state") else None,
+        }
+
     @app.post("/webchat/browser/click")
     async def webchat_browser_click(request: Request) -> dict[str, Any]:
         """Click-passthrough from the browser screenshot panel in WebChat."""
