@@ -17,6 +17,24 @@ def format_user_facing_exception(exc: Exception) -> str:
     return sanitize_error_text(text)
 
 
+def format_browser_exception(exc: Exception) -> str:
+    text = str(exc).strip()
+    lowered = text.lower()
+    if "locator.fill" in lowered or "does not have a role allowing" in lowered or "not an <input>" in lowered:
+        return "I found a search or form control on the page, but it was not an editable input. I need a better site-specific selector for this page."
+    if "timeout" in lowered and "exceeded" in lowered:
+        return "The page took too long to load or the target element did not appear in time."
+    if "err_name_not_resolved" in lowered:
+        return "The website address could not be resolved from this machine."
+    if "could not find an editable search input" in lowered:
+        return "I couldn't find a usable search box on that page."
+    if "could not find any clickable results" in lowered:
+        return "I couldn't find a clear result to open on that page."
+    if "playwright is not installed" in lowered:
+        return text
+    return sanitize_error_text(text, fallback="I couldn't finish that browser task right now. Please try again.")
+
+
 def sanitize_error_text(text: str, *, fallback: str = "Something went wrong while processing your request. Please try again.") -> str:
     """Hide noisy transport/provider internals while preserving safe app errors."""
     normalized = text.strip()
@@ -25,6 +43,10 @@ def sanitize_error_text(text: str, *, fallback: str = "Something went wrong whil
 
     lower = normalized.lower()
     status_match = re.search(r"\b(4\d\d|5\d\d)\b", normalized)
+    if "reported as leaked" in lower and "api key" in lower:
+        return "The configured Gemini API key was revoked as leaked. Update llm.gemini_api_key and restart SonarBot."
+    if "gemini rejected the configured api key" in lower:
+        return "Gemini rejected the configured API key. Update llm.gemini_api_key and restart SonarBot."
     if any(
         marker in lower
         for marker in (

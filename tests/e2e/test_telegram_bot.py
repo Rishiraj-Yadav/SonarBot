@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from aiogram.enums import ContentType
 
-from assistant.channels.telegram.adapter import TelegramChannel
+from assistant.channels.telegram.adapter import TelegramChannel, TelegramStreamState
 
 
 class FakeSession:
@@ -193,3 +193,29 @@ async def test_telegram_ignores_not_modified_edit_errors(app_config, monkeypatch
     result = await channel._edit_text(message, "already set")
 
     assert result is message
+
+
+@pytest.mark.asyncio
+async def test_telegram_sanitizes_raw_model_error_chunks(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [123]
+    app_config.telegram.bot_token = "test-token"
+    channel = TelegramChannel(config=app_config, inbound_handler=lambda _message: None, bot=FakeBot())
+    source_message = FakeMessage(user_id=123, chat_id=456, text="hello")
+    state = TelegramStreamState(recipient_id="456", source_message=source_message)
+
+    await channel._apply_event(
+        "route-error",
+        state,
+        "agent.chunk",
+        {
+            "text": (
+                "[Model error] Client error '400 Bad Request' for url "
+                "'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent' "
+                "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+            )
+        },
+    )
+
+    assert state.response_message is not None
+    assert "generativelanguage.googleapis.com" not in state.response_message.text
+    assert "The model request could not be completed right now. Please try again." == state.response_message.text

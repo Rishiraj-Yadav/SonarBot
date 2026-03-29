@@ -6,7 +6,7 @@ rate_limit_per_minute = 20
 
 [agent]
 workspace_dir = "workspace"
-model = "gemini-2.0-flash"
+model = "gemini-2.5-pro"
 max_tokens = 2048
 context_window = 32768
 max_sessions_per_key = 20
@@ -17,6 +17,7 @@ enabled = true
 
 [llm]
 gemini_api_key = ""
+anthropic_api_key = ""
 openai_api_key = ""
 
 [channels]
@@ -35,6 +36,9 @@ auto_capture_enabled = true
 
 [automation]
 heartbeat_interval_minutes = 15
+# Static cron jobs support mode = "direct" for simple reminder delivery or mode = "ai"
+# for model-driven briefings and reasoning-heavy automations.
+# cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing", mode = "direct" }]
 cron_jobs = []
 
 [automation.delivery]
@@ -85,6 +89,23 @@ browser_screenshots_subdir = "browser"
 browser_downloads_subdir = "inbox/browser_downloads"
 browser_log_retention = 200
 browser_screenshot_stream_interval_seconds = 3
+
+[browser_workflows]
+enabled = true
+classifier_confidence_threshold = 0.82
+max_results_to_rank = 8
+allow_auto_play = true
+ask_before_high_impact = true
+llm_classifier_enabled = true
+
+[browser_execution]
+default_mode = "headless"
+headed_login_required = true
+headed_on_blockers = true
+headed_on_high_impact = true
+revert_to_headless_after_manual_step = true
+keep_headed_browser_alive_seconds = 60
+human_simulation = false
 
 [oauth.google]
 client_id = ""

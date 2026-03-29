@@ -10,7 +10,12 @@ from typing import Any, Awaitable, Callable, TypeVar
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 
-def async_retry(max_attempts: int = 3, base_delay: float = 0.5) -> Callable[[F], F]:
+def async_retry(
+    max_attempts: int = 3,
+    base_delay: float = 0.5,
+    *,
+    non_retry_exceptions: tuple[type[BaseException], ...] = (),
+) -> Callable[[F], F]:
     def decorator(func: F) -> F:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -21,6 +26,8 @@ def async_retry(max_attempts: int = 3, base_delay: float = 0.5) -> Callable[[F],
                 try:
                     return await func(*args, **kwargs)
                 except Exception as exc:  # pragma: no cover - defensive wrapper
+                    if non_retry_exceptions and isinstance(exc, non_retry_exceptions):
+                        raise
                     last_exc = exc
                     if attempt >= max_attempts:
                         raise

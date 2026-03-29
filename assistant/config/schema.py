@@ -29,7 +29,7 @@ class CompactionConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     workspace_dir: Path
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-2.5-pro"
     max_tokens: int = 2048
     context_window: int = 32768
     max_sessions_per_key: int = 20
@@ -45,6 +45,7 @@ class AgentConfig(BaseModel):
 class LlmConfig(BaseModel):
     gemini_api_key: str
     openai_api_key: str = ""
+    anthropic_api_key: str = ""
 
 
 class OAuthGoogleConfig(BaseModel):
@@ -109,6 +110,7 @@ class WebhookConfig(BaseModel):
 class CronJobConfig(BaseModel):
     schedule: str
     message: str
+    mode: Literal["direct", "ai"] = "direct"
 
 
 class AutomationRuleConfig(BaseModel):
@@ -165,6 +167,38 @@ class ContextEngineConfig(BaseModel):
     dedupe_days: int = 7
     snapshot_subdir: str = "context_engine/life_state"
     insights_subdir: str = "context_engine/insights"
+
+
+class BrowserWorkflowsConfig(BaseModel):
+    enabled: bool = True
+    classifier_confidence_threshold: float = 0.82
+    max_results_to_rank: int = 8
+    allow_auto_play: bool = True
+    ask_before_high_impact: bool = True
+    llm_classifier_enabled: bool = True
+    # Vision-assisted blocker detection via Gemini Vision (screenshot → LLM)
+    vision_check_enabled: bool = False
+    # Auto-dismiss known low-risk consent/cookie banners before each workflow step
+    auto_dismiss_consent: bool = True
+    # Emit live progress chunks to the chat UI during multi-step workflows
+    live_progress_chunks: bool = True
+    # Enable named browser macro shortcuts (/browser save / /browser macros)
+    macro_shortcuts_enabled: bool = True
+    # Disambiguation confidence band: ask user when confidence is in [low, high)
+    disambiguation_confidence_low: float = 0.50
+    disambiguation_confidence_high: float = 0.82
+
+
+class BrowserExecutionConfig(BaseModel):
+    default_mode: Literal["headless", "headed"] = "headless"
+    headed_login_required: bool = True
+    headed_on_blockers: bool = True
+    headed_on_high_impact: bool = True
+    revert_to_headless_after_manual_step: bool = True
+    keep_headed_browser_alive_seconds: int = 60
+    # Per-step watchdog timeout in seconds; 0 = disabled
+    step_timeout_seconds: int = 45
+    human_simulation: bool = False
 
 
 class ToolsConfig(BaseModel):
@@ -268,6 +302,8 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     automation: AutomationConfig = Field(default_factory=AutomationConfig)
     context_engine: ContextEngineConfig = Field(default_factory=ContextEngineConfig)
+    browser_workflows: BrowserWorkflowsConfig = Field(default_factory=BrowserWorkflowsConfig)
+    browser_execution: BrowserExecutionConfig = Field(default_factory=BrowserExecutionConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)

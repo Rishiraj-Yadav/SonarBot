@@ -31,6 +31,7 @@ def create_default_tool_registry(
     browser_viewer_checker=None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
+    registry.model_provider = model_provider
     for tool in build_file_tools(config.agent.workspace_dir):
         registry.register(tool)
     registry.register(

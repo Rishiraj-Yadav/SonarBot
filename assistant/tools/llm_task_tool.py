@@ -12,8 +12,12 @@ def build_llm_task_tool(model_provider) -> ToolDefinition:
     async def llm_task(payload: dict[str, Any]) -> dict[str, Any]:
         prompt = str(payload["prompt"])
         requested_model = str(payload.get("model", "cheap"))
+        provider = model_provider
+        getter = getattr(model_provider, "get_task_provider", None)
+        if callable(getter):
+            provider = getter(requested_model)
         chunks: list[str] = []
-        async for response in model_provider.complete(
+        async for response in provider.complete(
             messages=[{"role": "user", "content": prompt}],
             system=f"You are a fast helper. Use a concise {requested_model} response style.",
             tools=[],

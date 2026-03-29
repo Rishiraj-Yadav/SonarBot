@@ -12,7 +12,7 @@
 ### `[agent]`
 
 - `workspace_dir`: path, required
-- `model`: string, default `gemini-2.0-flash`
+- `model`: string, default `gemini-2.5-pro`
 - `max_tokens`: integer, default `2048`
 - `context_window`: integer, default `32768`
 - `max_sessions_per_key`: integer, default `20`
@@ -25,6 +25,7 @@
 ### `[llm]`
 
 - `gemini_api_key`: string, usually sourced from `.env`
+- `anthropic_api_key`: string, optional; enables Anthropic-backed cheap/background LLM routing when configured
 - `openai_api_key`: string, optional
 
 ### `[channels]`
@@ -47,7 +48,7 @@
 ### `[automation]`
 
 - `heartbeat_interval_minutes`: integer, default `15`
-- `cron_jobs`: list of `{ schedule, message }`
+- `cron_jobs`: list of `{ schedule, message, mode }`
 - `rules`: list of structured automation rules
 
 Static cron jobs live here in config. You can also create user-specific dynamic cron jobs from chat with:
@@ -107,8 +108,12 @@ This subsystem is read-mostly. It builds a separate life-state snapshot instead 
 
 Example:
 
+`mode` may be:
+- `direct`: deliver the reminder/notification immediately without routing through the model
+- `ai`: run the cron job through the automation reasoning flow, which may summarize, decide to notify, or return `NO_REPLY`
+
 ```toml
-cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing" }]
+cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing", mode = "direct" }]
 ```
 
 ### `[tools]`
@@ -120,6 +125,42 @@ cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing" }]
 - `browser_downloads_subdir`: path-like string, default `inbox/browser_downloads`
 - `browser_log_retention`: integer, default `200`
 - `browser_screenshot_stream_interval_seconds`: integer, default `3`
+
+### `[browser_workflows]`
+
+- `enabled`: boolean, default `true`; turns on the autonomous browser workflow layer
+- `classifier_confidence_threshold`: float, default `0.82`; minimum confidence required for the LLM classifier fallback to auto-run
+- `max_results_to_rank`: integer, default `8`; maximum visible search results ranked for Google/YouTube/site-search workflows
+- `allow_auto_play`: boolean, default `true`; allows low-risk media-play attempts after opening a YouTube watch page
+- `ask_before_high_impact`: boolean, default `true`; reserves account-changing browser actions for an explicit confirmation step
+- `llm_classifier_enabled`: boolean, default `true`; enables the lightweight classifier fallback when deterministic browser matching is uncertain
+
+This layer sits above the existing Playwright tools. It supports hybrid matching for natural-language browser tasks such as:
+
+- `open youtube and play Trapped On An Island Until I Build A Boat`
+- `search google for SonarBot GitHub and open the first result`
+- `open leetcode and search arrays problems`
+
+You can also inspect and force those workflows through slash commands:
+
+- `/browser workflows`
+- `/browser task <instruction>`
+
+### `[browser_execution]`
+
+- `default_mode`: `headless | headed`, default `headless`; the preferred browser mode for low-risk automation
+- `headed_login_required`: boolean, default `true`; open a visible browser window for manual login flows
+- `headed_on_blockers`: boolean, default `true`; switch blocked headless tasks into a visible intervention window for captcha, consent, and security pages
+- `headed_on_high_impact`: boolean, default `true`; reserve irreversible browser actions for visible review/confirmation
+- `revert_to_headless_after_manual_step`: boolean, default `true`; after login or review, return normal work to headless mode
+- `keep_headed_browser_alive_seconds`: integer, default `60`; how long to keep the visible browser open after manual intervention before closing it automatically
+- `human_simulation`: boolean, default `false`; enables slower, more human-like mouse movement, typing, scroll, and viewport variation for bot-sensitive sites
+
+This gives SonarBot a hybrid browser policy:
+
+- background search, read, extract, and compare tasks run headlessly
+- login, blocker handling, and protected review steps use a visible browser window
+- users can still override per task with natural-language hints like `show me what you're doing` or `run silently`
 
 ### `[oauth.google]`
 

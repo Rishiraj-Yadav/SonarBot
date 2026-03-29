@@ -7,6 +7,7 @@ import httpx
 
 from assistant.agent.loop import AgentLoop
 from assistant.agent.queue import AgentRequest
+from assistant.agent.session import create_message
 from assistant.agent.session_manager import SessionManager
 from assistant.agent.system_prompt import SystemPromptBuilder
 from assistant.models.base import ModelResponse, ToolCall
@@ -36,6 +37,28 @@ class RaisingProvider:
     async def complete(self, messages, system, tools, stream=True):
         raise self.exc
         yield  # pragma: no cover
+
+
+class RetryOnce400Provider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.actual_calls: list[list[dict[str, object]]] = []
+
+    async def complete(self, messages, system, tools, stream=True):
+        self.calls.append({"messages": messages, "system": system, "tools": tools, "stream": stream})
+        if messages and len(messages) == 1 and str(messages[0].get("content", "")).startswith(
+            "Summarize this conversation history concisely"
+        ):
+            yield ModelResponse(text="Compacted summary.", done=True)
+            return
+
+        self.actual_calls.append(messages)
+        if len(self.actual_calls) == 1:
+            request = httpx.Request("POST", "https://example.com")
+            response = httpx.Response(400, request=request, text='{"error":{"message":"bad request"}}')
+            raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+        yield ModelResponse(text="Recovered after retry.", done=True)
 
 
 @pytest.mark.asyncio
@@ -234,3 +257,92 @@ async def test_agent_loop_surfaces_friendly_model_error(app_config) -> None:
 
     chunks = [payload["text"] for event_name, payload in events if event_name == "agent.chunk"]
     assert chunks == ["The model is temporarily rate-limited. Please wait a minute and try again."]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_filters_prior_model_errors_from_context(app_config) -> None:
+    provider = FakeProvider([[ModelResponse(text="Clean context reply.", done=True)]])
+    prompt_builder = SystemPromptBuilder(app_config.agent.workspace_dir)
+    session_manager = SessionManager(app_config)
+    registry = ToolRegistry()
+    session = await session_manager.load_or_create("main")
+    await session_manager.append_message(
+        session,
+        create_message(
+            "assistant",
+            "[Model error] Client error '400 Bad Request' for url 'https://generativelanguage.googleapis.com/...'",
+        ),
+    )
+    await session_manager.append_message(
+        session,
+        create_message(
+            "assistant",
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400",
+        ),
+    )
+
+    done_event = asyncio.Event()
+
+    async def emit(_connection_id, event_name, _payload):
+        if event_name == "agent.done":
+            done_event.set()
+
+    loop = AgentLoop(
+        config=app_config,
+        model_provider=provider,
+        tool_registry=registry,
+        session_manager=session_manager,
+        system_prompt_builder=prompt_builder,
+        event_emitter=emit,
+    )
+    await prompt_builder.start()
+    await loop.start()
+    await loop.enqueue(AgentRequest(connection_id="conn-1", session_key="main", message="hello", request_id="req-clean"))
+    await asyncio.wait_for(done_event.wait(), timeout=5)
+    await loop.stop()
+    await prompt_builder.stop()
+
+    first_call_messages = provider.calls[0]["messages"]
+    assert all("[Model error]" not in str(message.get("content", "")) for message in first_call_messages)
+    assert all("developer.mozilla.org" not in str(message.get("content", "")) for message in first_call_messages)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_retries_once_with_trimmed_context_on_gemini_400(app_config) -> None:
+    app_config.agent.context_window = 99999
+    provider = RetryOnce400Provider()
+    prompt_builder = SystemPromptBuilder(app_config.agent.workspace_dir)
+    session_manager = SessionManager(app_config)
+    registry = ToolRegistry()
+    session = await session_manager.load_or_create("main")
+    for index in range(20):
+        await session_manager.append_message(session, create_message("user", f"history user {index}"))
+        await session_manager.append_message(session, create_message("assistant", f"history assistant {index}"))
+
+    events: list[tuple[str, dict[str, object]]] = []
+    done_event = asyncio.Event()
+
+    async def emit(_connection_id, event_name, payload):
+        events.append((event_name, payload))
+        if event_name == "agent.done":
+            done_event.set()
+
+    loop = AgentLoop(
+        config=app_config,
+        model_provider=provider,
+        tool_registry=registry,
+        session_manager=session_manager,
+        system_prompt_builder=prompt_builder,
+        event_emitter=emit,
+    )
+    await prompt_builder.start()
+    await loop.start()
+    await loop.enqueue(AgentRequest(connection_id="conn-1", session_key="main", message="fresh request", request_id="req-retry"))
+    await asyncio.wait_for(done_event.wait(), timeout=5)
+    await loop.stop()
+    await prompt_builder.stop()
+
+    assert len(provider.actual_calls) == 2
+    assert len(provider.actual_calls[1]) < len(provider.actual_calls[0])
+    chunks = [payload["text"] for event_name, payload in events if event_name == "agent.chunk"]
+    assert chunks == ["Recovered after retry."]

@@ -13,6 +13,10 @@ from assistant.models.base import ModelProvider, ModelResponse, ToolCall, UsageS
 from assistant.utils import CircuitBreaker, async_retry, get_logger
 
 
+class GeminiConfigurationError(RuntimeError):
+    """Raised when Gemini rejects the configured API credentials."""
+
+
 class GeminiProvider(ModelProvider):
     """Thin REST wrapper around the Gemini generateContent endpoint."""
 
@@ -40,6 +44,19 @@ class GeminiProvider(ModelProvider):
         try:
             data = await self._perform_request(url, payload)
             self.circuit_breaker.record_success()
+        except GeminiConfigurationError as exc:
+            self.circuit_breaker.record_failure()
+            self.logger.error("gemini_configuration_error", message=str(exc))
+            raise
+        except httpx.HTTPStatusError as exc:
+            self.circuit_breaker.record_failure()
+            self.logger.error(
+                "gemini_http_error",
+                status_code=exc.response.status_code if exc.response is not None else 0,
+                response_text=(exc.response.text[:2000] if exc.response is not None else ""),
+            )
+            self.logger.exception("gemini_request_failed")
+            raise
         except Exception:
             self.circuit_breaker.record_failure()
             self.logger.exception("gemini_request_failed")
@@ -54,10 +71,13 @@ class GeminiProvider(ModelProvider):
 
         yield ModelResponse(tool_calls=tool_calls, usage=usage, done=True)
 
-    @async_retry(max_attempts=3, base_delay=0.5)
+    @async_retry(max_attempts=3, base_delay=0.5, non_retry_exceptions=(GeminiConfigurationError,))
     async def _perform_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(url, params={"key": self.api_key}, json=payload)
+            configuration_error = self._configuration_error_for_response(response)
+            if configuration_error is not None:
+                raise configuration_error
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError:
@@ -68,6 +88,21 @@ class GeminiProvider(ModelProvider):
                 )
                 raise
         return response.json()
+
+    def _configuration_error_for_response(self, response: httpx.Response) -> GeminiConfigurationError | None:
+        status_code = int(response.status_code)
+        text = response.text.strip()
+        lowered = text.lower()
+        if status_code == 403 and "reported as leaked" in lowered:
+            return GeminiConfigurationError(
+                "Gemini rejected the configured API key because it was reported as leaked. "
+                "Replace llm.gemini_api_key in C:\\Users\\Ritesh\\.assistant\\config.toml and restart SonarBot."
+            )
+        if status_code in {401, 403} and any(marker in lowered for marker in ("api key", "permission_denied", "permission denied")):
+            return GeminiConfigurationError(
+                "Gemini rejected the configured API key. Update llm.gemini_api_key in C:\\Users\\Ritesh\\.assistant\\config.toml and restart SonarBot."
+            )
+        return None
 
     def _build_payload(
         self,
@@ -308,3 +343,33 @@ class GeminiProvider(ModelProvider):
 
     def _chunk_text(self, text: str, size: int = 120) -> list[str]:
         return [text[index : index + size] for index in range(0, len(text), size)] or [text]
+
+    async def complete_with_image(
+        self,
+        prompt: str,
+        *,
+        image_b64: str,
+        image_mime: str = "image/png",
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise RuntimeError("Missing GEMINI_API_KEY or llm.gemini_api_key configuration.")
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": image_mime,
+                                "data": image_b64,
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        data = await self._perform_request(url, payload)
+        text, tool_calls, usage = self._parse_response(data)
+        return {"text": text, "tool_calls": tool_calls, "usage": usage}

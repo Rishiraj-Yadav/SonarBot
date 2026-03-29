@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from assistant.agent.queue import QueueMode
+from assistant.browser_workflows.state import BROWSER_TASK_STATE_KEY, browser_task_state_update
 from assistant.gateway.router import GatewayRouter
 
 
@@ -295,6 +296,76 @@ class DummyToolRegistry:
         raise AssertionError(f"Unexpected tool: {tool_name}")
 
 
+class DummyBrowserMonitorService:
+    def __init__(self) -> None:
+        self.created: list[tuple[str, str, str]] = []
+        self.deleted: list[tuple[str, str]] = []
+
+    async def create_watch(self, user_id: str, url: str, condition: str) -> dict[str, object]:
+        self.created.append((user_id, url, condition))
+        return {
+            "watch_id": "watch-1",
+            "user_id": user_id,
+            "url": url,
+            "condition": condition,
+            "baseline_preview": "Initial baseline",
+        }
+
+    async def list_watches(self, user_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "watch_id": "watch-1",
+                "user_id": user_id,
+                "url": "https://example.com",
+                "condition": "price changes",
+            }
+        ]
+
+    async def delete_watch(self, user_id: str, watch_id: str) -> bool:
+        self.deleted.append((user_id, watch_id))
+        return watch_id == "watch-1"
+
+
+class ChallengeBrowserRuntimeStub:
+    def __init__(self) -> None:
+        self.submitted_otp: str | None = None
+        self.submitted_captcha: str | None = None
+
+    def current_state(self) -> dict[str, object]:
+        return {}
+
+    async def submit_pending_otp(self, otp: str, *, user_id: str | None = None) -> dict[str, object]:
+        self.submitted_otp = otp
+        return {"otp": otp, "user_id": user_id}
+
+    async def submit_pending_captcha(self, answer: str, *, user_id: str | None = None) -> dict[str, object]:
+        self.submitted_captcha = answer
+        return {"answer": answer, "user_id": user_id}
+
+
+class ChallengeEngineStub:
+    def __init__(self, response_text: str) -> None:
+        self.response_text = response_text
+        self.calls: list[tuple[str, str]] = []
+        self.nlp = type("NLPStub", (), {"standalone_execution_override": staticmethod(lambda _message: None)})()
+
+    async def maybe_run(self, message: str, *, user_id: str, **_kwargs):
+        self.calls.append((message, user_id))
+        return type(
+            "WorkflowResult",
+            (),
+            {
+                "recipe_name": "browser_continue_last_task",
+                "status": "completed",
+                "payload": {},
+                "progress_lines": [],
+                "response_text": self.response_text,
+                "state_update": browser_task_state_update(active_task={}),
+                "clear_state": False,
+            },
+        )()
+
+
 class DummyAutomationEngine:
     async def list_notifications(self, _user_id: str):
         return []
@@ -323,12 +394,13 @@ class DummyAutomationEngine:
     def __init__(self) -> None:
         self.dynamic_jobs: list[dict[str, object]] = []
 
-    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
+    async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str, mode: str = "direct") -> dict[str, object]:
         job = {
             "cron_id": "cron-user-1",
             "user_id": user_id,
             "schedule": schedule,
             "message": message,
+            "mode": mode,
             "paused": False,
         }
         self.dynamic_jobs = [job]
@@ -1165,6 +1237,165 @@ async def test_router_browser_commands_are_available_for_channel_use(app_config)
 
 
 @pytest.mark.asyncio
+async def test_router_browser_macros_respect_disabled_flag(app_config) -> None:
+    app_config.browser_workflows.macro_shortcuts_enabled = False
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-browser-macro-disabled",
+        request_id="req-browser-macro-disabled",
+        session_key="telegram:123",
+        message="/browser macros",
+        metadata={"trace_id": "trace-browser-macro-disabled", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is False
+    assert "disabled" in response.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_router_browser_watch_commands_are_available(app_config) -> None:
+    monitor_service = DummyBrowserMonitorService()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_monitor_service=monitor_service,
+    )
+
+    created = await router.route_user_message(
+        connection_id="conn-browser-watch-1",
+        request_id="req-browser-watch-1",
+        session_key="telegram:123",
+        message="/browser watch example.com price changes",
+        metadata={"trace_id": "trace-browser-watch-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    listed = await router.route_user_message(
+        connection_id="conn-browser-watch-2",
+        request_id="req-browser-watch-2",
+        session_key="telegram:123",
+        message="/browser watches",
+        metadata={"trace_id": "trace-browser-watch-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    deleted = await router.route_user_message(
+        connection_id="conn-browser-watch-3",
+        request_id="req-browser-watch-3",
+        session_key="telegram:123",
+        message="/browser unwatch watch-1",
+        metadata={"trace_id": "trace-browser-watch-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert created.ok is True
+    assert "Created browser watch 'watch-1'." in created.payload["command_response"]
+    assert monitor_service.created == [("default", "https://example.com", "price changes")]
+    assert listed.ok is True
+    assert "Saved browser watches:" in listed.payload["command_response"]
+    assert deleted.ok is True
+    assert "Removed browser watch 'watch-1'." in deleted.payload["command_response"]
+
+
+@pytest.mark.asyncio
+async def test_router_intercepts_pending_otp_reply_before_generic_routing(app_config) -> None:
+    runtime = ChallengeBrowserRuntimeStub()
+    engine = ChallengeEngineStub("Filled the OTP and resumed the browser task.")
+    tool_registry = DummyToolRegistry()
+    tool_registry.browser_runtime = runtime
+    session_manager = DummySessionManager()
+    session_manager.session.metadata = browser_task_state_update(
+        active_task={"site_name": "irctc", "blocked_reason": "otp"},
+        pending_otp={"site_name": "irctc", "selector": "input[name=otp]"},
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-browser-otp",
+        request_id="req-browser-otp",
+        session_key="telegram:123",
+        message="123456",
+        metadata={"trace_id": "trace-browser-otp", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["command_response"] == "Filled the OTP and resumed the browser task."
+    assert runtime.submitted_otp == "123456"
+    assert engine.calls == [("continue", "default")]
+
+
+def test_router_compose_browser_workflow_response_dedupes_progress(app_config) -> None:
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+    result = type(
+        "WorkflowResultStub",
+        (),
+        {
+            "progress_lines": ["Opened YouTube."],
+            "response_text": "Opened YouTube in tab-1.",
+        },
+    )()
+
+    response = router._compose_browser_workflow_response(result)
+
+    assert response == "Opened YouTube in tab-1."
+
+
+@pytest.mark.asyncio
 async def test_router_cron_add_list_pause_resume_delete_flow(app_config) -> None:
     automation_engine = DummyAutomationEngine()
     router = GatewayRouter(
@@ -1205,7 +1436,7 @@ async def test_router_cron_add_list_pause_resume_delete_flow(app_config) -> None
     )
 
     assert list_response.ok is True
-    assert "cron-user-1: active | 0 8 * * * | Good morning briefing" in list_response.payload["command_response"]
+    assert "cron-user-1: active | direct | 0 8 * * * | Good morning briefing" in list_response.payload["command_response"]
 
     pause_response = await router.route_user_message(
         connection_id="conn-cron-3",

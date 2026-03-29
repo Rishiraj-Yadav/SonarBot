@@ -8,12 +8,13 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from assistant.agent.compaction import CompactionManager
-from assistant.agent.context import build_model_messages
+from assistant.agent.context import build_model_messages, estimate_model_payload_size
 from assistant.agent.queue import AgentQueue, AgentRequest
 from assistant.agent.session import create_message
 from assistant.agent.streaming import merge_text_chunks
 from assistant.models.base import ToolCall
 from assistant.utils.user_facing_errors import format_user_facing_exception
+import httpx
 
 EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 TypingEmitter = Callable[[str], Awaitable[None]]
@@ -151,18 +152,7 @@ class AgentLoop:
             usage = None
 
             try:
-                async for response in self.model_provider.complete(
-                    messages=build_model_messages(session.messages),
-                    system=system_prompt,
-                    tools=self.tool_registry.get_tools_schema(),
-                    stream=True,
-                ):
-                    if response.text:
-                        text_chunks.append(response.text)
-                    if response.tool_calls:
-                        tool_calls.extend(response.tool_calls)
-                    if response.usage is not None:
-                        usage = response.usage
+                text_chunks, tool_calls, usage = await self._collect_model_response(session, system_prompt)
             except Exception as exc:  # pragma: no cover - defensive runtime path
                 error_text = format_user_facing_exception(exc)
                 await self.session_manager.append_message(session, create_message("assistant", error_text))
@@ -259,6 +249,64 @@ class AgentLoop:
 
     def _chunk_for_delivery(self, text: str, size: int = 120) -> list[str]:
         return [text[index : index + size] for index in range(0, len(text), size)] or [text]
+
+    async def _collect_model_response(self, session, system_prompt: str) -> tuple[list[str], list[ToolCall], Any]:
+        model_messages = await self._prepare_model_messages(session, system_prompt)
+        try:
+            return await self._complete_once(model_messages, system_prompt)
+        except httpx.HTTPStatusError as exc:
+            if not self._should_retry_trimmed_context(exc):
+                raise
+            await self.compaction_manager.maybe_compact(session, system_prompt, aggressive=True, force=True)
+            retry_messages = build_model_messages(
+                session.messages,
+                max_messages=self._recovery_context_limit(session.session_key),
+            )
+            return await self._complete_once(retry_messages, system_prompt)
+
+    async def _prepare_model_messages(self, session, system_prompt: str) -> list[dict[str, Any]]:
+        max_messages = self._default_context_limit(session.session_key)
+        model_messages = build_model_messages(session.messages, max_messages=max_messages)
+        payload_size = estimate_model_payload_size(model_messages, system_prompt)
+        if payload_size > self._payload_guard_threshold(session.session_key):
+            await self.compaction_manager.maybe_compact(session, system_prompt, aggressive=True)
+            model_messages = build_model_messages(session.messages, max_messages=max_messages)
+        return model_messages
+
+    async def _complete_once(
+        self,
+        model_messages: list[dict[str, Any]],
+        system_prompt: str,
+    ) -> tuple[list[str], list[ToolCall], Any]:
+        text_chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+        usage = None
+        async for response in self.model_provider.complete(
+            messages=model_messages,
+            system=system_prompt,
+            tools=self.tool_registry.get_tools_schema(),
+            stream=True,
+        ):
+            if response.text:
+                text_chunks.append(response.text)
+            if response.tool_calls:
+                tool_calls.extend(response.tool_calls)
+            if response.usage is not None:
+                usage = response.usage
+        return text_chunks, tool_calls, usage
+
+    def _default_context_limit(self, session_key: str) -> int | None:
+        return 32 if session_key.startswith("automation:") else 64
+
+    def _recovery_context_limit(self, session_key: str) -> int:
+        return 12 if session_key.startswith("automation:") else 24
+
+    def _payload_guard_threshold(self, session_key: str) -> int:
+        base = int(self.config.agent.context_window * 2.8)
+        return min(base, 12000 if session_key.startswith("automation:") else base)
+
+    def _should_retry_trimmed_context(self, exc: Exception) -> bool:
+        return isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code == 400
 
     async def _dispatch_tool(
         self,

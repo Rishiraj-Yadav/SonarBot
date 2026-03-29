@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import httpx
+
 from assistant.models.gemini_provider import GeminiProvider
 
 
@@ -104,3 +106,19 @@ def test_gemini_provider_sanitizes_dynamic_object_schemas_for_gemini() -> None:
     assert "arbitrary string-keyed entries" in sanitized["properties"]["fields"]["description"]
     assert "minimum" not in sanitized["properties"]["timeout_seconds"]
     assert "default" not in sanitized["properties"]["timeout_seconds"]
+
+
+def test_gemini_provider_detects_leaked_api_key_configuration_error() -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-test")
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent")
+    response = httpx.Response(
+        403,
+        request=request,
+        text='{"error":{"code":403,"message":"Your API key was reported as leaked. Please use another API key.","status":"PERMISSION_DENIED"}}',
+    )
+
+    error = provider._configuration_error_for_response(response)
+
+    assert error is not None
+    assert "reported as leaked" in str(error)
+    assert "llm.gemini_api_key" in str(error)
