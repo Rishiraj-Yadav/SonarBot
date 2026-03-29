@@ -37,7 +37,7 @@ class DummyConnectionManager:
 class DummySessionManager:
     def __init__(self) -> None:
         self.messages = []
-        self.session = type("Session", (), {"session_key": "webchat_main", "session_id": "sess-dummy"})()
+        self.session = type("Session", (), {"session_key": "webchat_main", "session_id": "sess-dummy", "metadata": {}})()
 
     async def load_or_create(self, session_key: str):
         self.session.session_key = session_key
@@ -99,6 +99,15 @@ class DummyOAuthFlowManager:
         return _TokenManager()
 
 
+class DummyBrowserWorkflowEngine:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def maybe_run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return None
+
+
 class DummyToolRegistry:
     def __init__(
         self,
@@ -142,6 +151,7 @@ class DummyToolRegistry:
             "search_host_files",
             "exec_shell",
             "write_host_file",
+            "read_host_document",
             "set_windows_brightness",
         }:
             return True
@@ -204,6 +214,34 @@ class DummyToolRegistry:
             query = str(payload.get("name_query", ""))
             query_compact = re.sub(r"[^a-z0-9]+", "", query.lower())
             root = str(payload.get("root", "@allowed"))
+            if root == "@allowed" and query_compact.startswith("proteinintroduction1whyitmatters"):
+                return {
+                    "root": root,
+                    "searched_roots": ["C:/Users/ashis/Downloads", "C:/Users/ashis/Documents"],
+                    "matches": [
+                        {
+                            "name": "Protein_Introduction_ 1 Why_It_Matters.pptx",
+                            "path": "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx",
+                            "is_dir": False,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if root == "@allowed" and query_compact.startswith("historyofprotein2discovery2ancienttoalphafold"):
+                return {
+                    "root": root,
+                    "searched_roots": ["C:/Users/ashis/Downloads", "C:/Users/ashis/Documents"],
+                    "matches": [
+                        {
+                            "name": "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx",
+                            "path": "C:/Users/ashis/Documents/History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx",
+                            "is_dir": False,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
             if query_compact == "5sem" and root == "R:/":
                 return {
                     "root": "R:/",
@@ -241,6 +279,15 @@ class DummyToolRegistry:
                 "approval_category": "ask_once",
                 "audit_id": "audit-1",
                 "host": True,
+            }
+        if tool_name == "read_host_document":
+            return {
+                "path": payload["path"],
+                "content": "# Slide 1\nProtein basics\n\n# Slide 2\nWhy it matters",
+                "bytes_read": 52,
+                "line_count": 4,
+                "file_format": "pptx",
+                "audit_id": "audit-doc",
             }
         if tool_name == "set_windows_brightness":
             return {
@@ -294,6 +341,98 @@ class DummyToolRegistry:
         if tool_name == "browser_login":
             return {"site_name": payload["site_name"], "profile_name": payload.get("profile_name", "default"), "status": "active", "url": f"https://{payload['site_name']}"}
         raise AssertionError(f"Unexpected tool: {tool_name}")
+
+
+class DummyWindowsSystemAccessManager:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def get_system_state(self, *, session_id: str, user_id: str, process_limit: int = 12, window_limit: int = 12):
+        self.calls.append(("get_system_state", {"session_id": session_id, "user_id": user_id, "process_limit": process_limit, "window_limit": window_limit}))
+        return {
+            "active_window": {"pid": 101, "process_name": "explorer", "title": "File Explorer", "handle": 1},
+            "clipboard": "copied text",
+            "processes": [{"pid": 1, "process_name": "System", "window_title": ""}],
+            "windows": [{"pid": 101, "process_name": "explorer", "title": "File Explorer", "handle": 1}],
+        }
+
+    async def list_processes(self, *, session_id: str, user_id: str, limit: int = 12):
+        self.calls.append(("list_processes", {"session_id": session_id, "user_id": user_id, "limit": limit}))
+        return {"processes": [{"pid": 11, "process_name": "explorer", "window_title": "File Explorer"}]}
+
+    async def list_windows(self, *, session_id: str, user_id: str, limit: int = 12):
+        self.calls.append(("list_windows", {"session_id": session_id, "user_id": user_id, "limit": limit}))
+        return {
+            "windows": [{"pid": 11, "process_name": "explorer", "title": "File Explorer"}],
+            "active_window": {"pid": 11, "process_name": "explorer", "title": "File Explorer"},
+        }
+
+    async def get_clipboard(self, *, session_id: str, user_id: str):
+        self.calls.append(("get_clipboard", {"session_id": session_id, "user_id": user_id}))
+        return {"text": "copied text"}
+
+    async def set_clipboard(self, *, text: str, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("set_clipboard", {"text": text, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"text": text, "exit_code": 0, "status": "completed"}
+
+    async def focus_process_window(self, *, pid: int, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("focus_process_window", {"pid": pid, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"pid": pid, "process_name": "explorer", "title": "File Explorer", "exit_code": 0, "status": "completed"}
+
+    async def terminate_process(self, *, pid: int, force: bool, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("terminate_process", {"pid": pid, "force": force, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"pid": pid, "exit_code": 0, "status": "completed"}
+
+    async def move_window(self, *, pid: int, x: int, y: int, width: int | None = None, height: int | None = None, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("move_window", {"pid": pid, "x": x, "y": y, "width": width, "height": height, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {
+            "pid": pid,
+            "process_name": "explorer",
+            "title": "File Explorer",
+            "action": "move",
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "exit_code": 0,
+            "status": "completed",
+        }
+
+    async def set_window_state(self, *, pid: int, state: str, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("set_window_state", {"pid": pid, "state": state, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {
+            "pid": pid,
+            "process_name": "explorer",
+            "title": "File Explorer",
+            "action": state,
+            "state": state,
+            "exit_code": 0,
+            "status": "completed",
+        }
+
+    async def send_keys(self, *, keys: str, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("send_keys", {"keys": keys, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"keys": keys, "exit_code": 0, "status": "completed"}
+
+    async def type_text(self, *, text: str, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("type_text", {"text": text, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"bytes": len(text.encode("utf-8")), "exit_code": 0, "status": "completed"}
+
+    async def click_mouse(self, *, x: int, y: int, button: str = "left", clicks: int = 1, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("click_mouse", {"x": x, "y": y, "button": button, "clicks": clicks, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"x": x, "y": y, "button": button, "clicks": clicks, "exit_code": 0, "status": "completed"}
+
+    async def move_mouse(self, *, x: int, y: int, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("move_mouse", {"x": x, "y": y, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"x": x, "y": y, "exit_code": 0, "status": "completed"}
+
+    async def scroll_mouse(self, *, delta: int, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("scroll_mouse", {"delta": delta, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"delta": delta, "exit_code": 0, "status": "completed"}
+
+    async def set_volume(self, *, direction: str, session_id: str, user_id: str, session_key: str | None = None):
+        self.calls.append(("set_volume", {"direction": direction, "session_id": session_id, "user_id": user_id, "session_key": session_key}))
+        return {"direction": direction, "exit_code": 0, "status": "completed"}
 
 
 class DummyBrowserMonitorService:
@@ -718,6 +857,243 @@ async def test_router_brightness_shortcut_invokes_tool(app_config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_system_shortcuts_cover_state_processes_windows_and_clipboard(app_config) -> None:
+    system_access_manager = DummyWindowsSystemAccessManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        system_access_manager=system_access_manager,
+    )
+
+    state_response = await router.route_user_message(
+        connection_id="conn-system-state",
+        request_id="req-system-state",
+        session_key="webchat_main",
+        message="/system state 4",
+        metadata={"trace_id": "trace-system-state", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    processes_response = await router.route_user_message(
+        connection_id="conn-system-processes",
+        request_id="req-system-processes",
+        session_key="webchat_main",
+        message="/system processes 3",
+        metadata={"trace_id": "trace-system-processes", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    windows_response = await router.route_user_message(
+        connection_id="conn-system-windows",
+        request_id="req-system-windows",
+        session_key="webchat_main",
+        message="/system windows 2",
+        metadata={"trace_id": "trace-system-windows", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    clipboard_get_response = await router.route_user_message(
+        connection_id="conn-system-clipboard-get",
+        request_id="req-system-clipboard-get",
+        session_key="webchat_main",
+        message="/system clipboard get",
+        metadata={"trace_id": "trace-system-clipboard-get", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    clipboard_set_response = await router.route_user_message(
+        connection_id="conn-system-clipboard-set",
+        request_id="req-system-clipboard-set",
+        session_key="webchat_main",
+        message="/system clipboard set hello clipboard",
+        metadata={"trace_id": "trace-system-clipboard-set", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    focus_response = await router.route_user_message(
+        connection_id="conn-system-focus",
+        request_id="req-system-focus",
+        session_key="webchat_main",
+        message="/system focus 101",
+        metadata={"trace_id": "trace-system-focus", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    terminate_response = await router.route_user_message(
+        connection_id="conn-system-terminate",
+        request_id="req-system-terminate",
+        session_key="webchat_main",
+        message="/system terminate 101",
+        metadata={"trace_id": "trace-system-terminate", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert state_response.ok is True
+    assert "System state:" in state_response.payload["command_response"]
+    assert processes_response.ok is True
+    assert "Running processes:" in processes_response.payload["command_response"]
+    assert windows_response.ok is True
+    assert "Visible windows:" in windows_response.payload["command_response"]
+    assert clipboard_get_response.ok is True
+    assert "Clipboard text:" in clipboard_get_response.payload["command_response"]
+    assert clipboard_set_response.ok is True
+    assert "Updated clipboard" in clipboard_set_response.payload["command_response"]
+    assert focus_response.ok is True
+    assert "Focused window" in focus_response.payload["command_response"]
+    assert terminate_response.ok is True
+    assert "Terminated process 101" in terminate_response.payload["command_response"]
+    assert [call[0] for call in system_access_manager.calls] == [
+        "get_system_state",
+        "list_processes",
+        "list_windows",
+        "get_clipboard",
+        "set_clipboard",
+        "focus_process_window",
+        "terminate_process",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_system_shortcuts_cover_window_actions_and_input(app_config) -> None:
+    system_access_manager = DummyWindowsSystemAccessManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        system_access_manager=system_access_manager,
+    )
+
+    minimize_response = await router.route_user_message(
+        connection_id="conn-system-minimize",
+        request_id="req-system-minimize",
+        session_key="webchat_main",
+        message="/system window minimize 101",
+        metadata={"trace_id": "trace-system-minimize", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    maximize_response = await router.route_user_message(
+        connection_id="conn-system-maximize",
+        request_id="req-system-maximize",
+        session_key="webchat_main",
+        message="/system window maximize 101",
+        metadata={"trace_id": "trace-system-maximize", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    restore_response = await router.route_user_message(
+        connection_id="conn-system-restore",
+        request_id="req-system-restore",
+        session_key="webchat_main",
+        message="/system window restore 101",
+        metadata={"trace_id": "trace-system-restore", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    move_response = await router.route_user_message(
+        connection_id="conn-system-move",
+        request_id="req-system-move",
+        session_key="webchat_main",
+        message="/system window move 101 10 20 800 600",
+        metadata={"trace_id": "trace-system-move", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    keys_response = await router.route_user_message(
+        connection_id="conn-system-keys",
+        request_id="req-system-keys",
+        session_key="webchat_main",
+        message="/system input keys ^c",
+        metadata={"trace_id": "trace-system-keys", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    text_response = await router.route_user_message(
+        connection_id="conn-system-text",
+        request_id="req-system-text",
+        session_key="webchat_main",
+        message="/system input text hello there",
+        metadata={"trace_id": "trace-system-text", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    click_response = await router.route_user_message(
+        connection_id="conn-system-click",
+        request_id="req-system-click",
+        session_key="webchat_main",
+        message="/system input click 200 300 right 2",
+        metadata={"trace_id": "trace-system-click", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    move_mouse_response = await router.route_user_message(
+        connection_id="conn-system-mouse-move",
+        request_id="req-system-mouse-move",
+        session_key="webchat_main",
+        message="/system input move 15 25",
+        metadata={"trace_id": "trace-system-mouse-move", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    scroll_response = await router.route_user_message(
+        connection_id="conn-system-scroll",
+        request_id="req-system-scroll",
+        session_key="webchat_main",
+        message="/system input scroll -240",
+        metadata={"trace_id": "trace-system-scroll", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    volume_response = await router.route_user_message(
+        connection_id="conn-system-volume",
+        request_id="req-system-volume",
+        session_key="webchat_main",
+        message="/system volume mute",
+        metadata={"trace_id": "trace-system-volume", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert minimize_response.ok is True
+    assert "Minimized window" in minimize_response.payload["command_response"]
+    assert maximize_response.ok is True
+    assert "Maximized window" in maximize_response.payload["command_response"]
+    assert restore_response.ok is True
+    assert "Restored window" in restore_response.payload["command_response"]
+    assert move_response.ok is True
+    assert "Moved window" in move_response.payload["command_response"]
+    assert keys_response.ok is True
+    assert "Sent keys" in keys_response.payload["command_response"]
+    assert text_response.ok is True
+    assert "Typed" in text_response.payload["command_response"]
+    assert click_response.ok is True
+    assert "Clicked right mouse button" in click_response.payload["command_response"]
+    assert move_mouse_response.ok is True
+    assert "Moved mouse pointer" in move_mouse_response.payload["command_response"]
+    assert scroll_response.ok is True
+    assert "Scrolled mouse" in scroll_response.payload["command_response"]
+    assert volume_response.ok is True
+    assert "muted" in volume_response.payload["command_response"].lower()
+    assert [call[0] for call in system_access_manager.calls][-9:] == [
+        "set_window_state",
+        "set_window_state",
+        "set_window_state",
+        "move_window",
+        "send_keys",
+        "type_text",
+        "click_mouse",
+        "move_mouse",
+        "scroll_mouse",
+    ]
+    assert system_access_manager.calls[-1][0] == "set_volume"
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_lists_downloads(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     session_manager = DummySessionManager()
@@ -785,6 +1161,53 @@ async def test_router_host_shortcut_lists_downloads_without_show_me_phrase(app_c
     assert response.payload["queued"] is False
     assert "Downloads" in response.payload["command_response"]
     assert tool_registry.calls[0][0] == "list_host_dir"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_lists_documents_and_downloads_with_list_down_phrase(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    downloads_response = await router.route_user_message(
+        connection_id="conn-host-downloads",
+        request_id="req-host-downloads",
+        session_key="telegram:123",
+        message="list down the folders in the downloads",
+        metadata={"trace_id": "trace-host-downloads", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    documents_response = await router.route_user_message(
+        connection_id="conn-host-documents",
+        request_id="req-host-documents",
+        session_key="telegram:123",
+        message="list down the folders in the documents",
+        metadata={"trace_id": "trace-host-documents", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert downloads_response.ok is True
+    assert "Downloads" in downloads_response.payload["command_response"]
+    assert documents_response.ok is True
+    assert "Documents" in documents_response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "~/Downloads"
+    assert tool_registry.calls[1][0] == "list_host_dir"
+    assert tool_registry.calls[1][1]["path"] == "~/Documents"
 
 
 @pytest.mark.asyncio
@@ -922,6 +1345,333 @@ async def test_router_host_shortcut_lists_folder_contents_when_user_asks_whats_i
     assert "I found the folder at" in response.payload["command_response"]
     assert "dbms/" in response.payload["command_response"]
     assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "list_host_dir"]
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_and_summarizes_explicit_pptx_path(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-pptx",
+        request_id="req-host-pptx",
+        session_key="telegram:123",
+        message=(
+            'Please read and summarize "C:\\Users\\ashis\\Downloads\\Protein_Introduction_ 1 Why_It_Matters.pptx" '
+            "for me."
+        ),
+        metadata={"trace_id": "trace-host-pptx", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Protein_Introduction_ 1 Why_It_Matters.pptx" in response.payload["command_response"]
+    assert "Summary:" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:2]] == ["read_host_document", "llm_task"]
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_filename_only_pptx_from_downloads(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    first_response = await router.route_user_message(
+        connection_id="conn-host-pptx-filename",
+        request_id="req-host-pptx-filename",
+        session_key="telegram:123",
+        message="please read and summarize Protein_Introduction_ 1 Why_It_Matters.pptx for me",
+        metadata={"trace_id": "trace-host-pptx-filename", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    second_response = await router.route_user_message(
+        connection_id="conn-host-pptx-filename",
+        request_id="req-host-pptx-filename-confirm",
+        session_key="telegram:123",
+        message="yes",
+        metadata={"trace_id": "trace-host-pptx-filename-confirm", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert first_response.ok is True
+    assert "Is this the correct file?" in first_response.payload["command_response"]
+    assert "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx" in first_response.payload["command_response"]
+    assert second_response.ok is True
+    assert "Summary:" in second_response.payload["command_response"]
+    assert "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx" in second_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_bare_title_pptx_without_browser_fallback(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    first_response = await router.route_user_message(
+        connection_id="conn-host-bare-title",
+        request_id="req-host-bare-title",
+        session_key="telegram:123",
+        message="find the file name History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold",
+        metadata={"trace_id": "trace-host-bare-title", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    second_response = await router.route_user_message(
+        connection_id="conn-host-bare-title",
+        request_id="req-host-bare-title-confirm",
+        session_key="telegram:123",
+        message="yes",
+        metadata={"trace_id": "trace-host-bare-title-confirm", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert first_response.ok is True
+    assert "Is this the correct file?" in first_response.payload["command_response"]
+    assert "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx" in first_response.payload["command_response"]
+    assert second_response.ok is True
+    assert "Summary:" in second_response.payload["command_response"]
+    assert "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx" in second_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_selects_pptx_from_pending_file_list(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    session_manager.session.metadata["host_file_confirmation"] = {
+        "mode": "file_selection",
+        "display_name": "Protein_Introduction_ 1 Why_It_Matters",
+        "candidates": [
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.docx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.docx",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "is_dir": False,
+            },
+        ],
+    }
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-pptx-select",
+        request_id="req-host-pptx-select",
+        session_key="telegram:123",
+        message="pptx",
+        metadata={"trace_id": "trace-host-pptx-select", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Summary:" in response.payload["command_response"]
+    assert "Protein_Introduction_ 1 Why_It_Matters.pptx" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:2]] == ["read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_selects_file_type_from_richer_reply(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    session_manager.session.metadata["host_file_confirmation"] = {
+        "mode": "file_selection",
+        "display_name": "Protein_Introduction_ 1 Why_It_Matters",
+        "candidates": [
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.docx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.docx",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "is_dir": False,
+            },
+        ],
+    }
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    pdf_response = await router.route_user_message(
+        connection_id="conn-host-file-pdf",
+        request_id="req-host-file-pdf",
+        session_key="telegram:123",
+        message="use the pdf",
+        metadata={"trace_id": "trace-host-file-pdf", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    session_manager.session.metadata["host_file_confirmation"] = {
+        "mode": "file_selection",
+        "display_name": "Protein_Introduction_ 1 Why_It_Matters",
+        "candidates": [
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.docx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.docx",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pdf",
+                "is_dir": False,
+            },
+            {
+                "name": "Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "path": "C:/Users/ashis/Downloads/Protein_Introduction_ 1 Why_It_Matters.pptx",
+                "is_dir": False,
+            },
+        ],
+    }
+    pptx_response = await router.route_user_message(
+        connection_id="conn-host-file-pptx",
+        request_id="req-host-file-pptx",
+        session_key="telegram:123",
+        message="pptx, move it to desktop",
+        metadata={"trace_id": "trace-host-file-pptx", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert pdf_response.ok is True
+    assert "Protein_Introduction_ 1 Why_It_Matters.pdf" in pdf_response.payload["command_response"]
+    assert "Summary:" in pdf_response.payload["command_response"]
+    assert pptx_response.ok is True
+    assert "Protein_Introduction_ 1 Why_It_Matters.pptx" in pptx_response.payload["command_response"]
+    assert "Summary:" in pptx_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:4]] == [
+        "read_host_document",
+        "llm_task",
+        "read_host_document",
+        "llm_task",
+    ]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_lists_desktop_folders_for_list_down_request(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-desktop",
+        request_id="req-host-desktop",
+        session_key="telegram:123",
+        message="list down the folders in the desktop",
+        metadata={"trace_id": "trace-host-desktop", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Resume.pdf" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "~/Desktop"
 
 
 @pytest.mark.asyncio
@@ -1181,6 +1931,182 @@ async def test_router_host_approve_without_id_uses_single_pending_approval(app_c
     assert response.ok is True
     assert "Approved host approval 'approval-123'." in response.payload["command_response"]
     assert system_access_manager.decisions == [("approval-123", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_router_plain_chat_i_approve_uses_single_pending_host_approval(app_config) -> None:
+    system_access_manager = DummySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-456",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "move_host_file",
+                "target_summary": "C:/Users/ashis/Downloads/Protein_Classification_5_Function_Shape_Source.docx -> C:/Users/ashis/OneDrive/Desktop/Protein_Classification_5_Function_Shape_Source.docx",
+            }
+        ]
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-3",
+        request_id="req-command-3",
+        session_key="telegram:123",
+        message="I approve",
+        metadata={"trace_id": "trace-command-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Approved host approval 'approval-456'." in response.payload["command_response"]
+    assert system_access_manager.decisions == [("approval-456", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_router_plain_chat_yes_move_it_uses_single_pending_host_approval(app_config) -> None:
+    system_access_manager = DummySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-457",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "move_host_file",
+                "target_summary": "C:/Users/ashis/Downloads/Protein_Classification_5_Function_Shape_Source.docx -> C:/Users/ashis/OneDrive/Desktop/Protein_Classification_5_Function_Shape_Source.docx",
+            }
+        ]
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-3b",
+        request_id="req-command-3b",
+        session_key="telegram:123",
+        message="yes, move it",
+        metadata={"trace_id": "trace-command-3b", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Approved host approval 'approval-457'." in response.payload["command_response"]
+    assert system_access_manager.decisions == [("approval-457", "approved")]
+
+
+@pytest.mark.asyncio
+async def test_router_plain_chat_no_rejects_single_pending_host_approval(app_config) -> None:
+    system_access_manager = DummySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-789",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "move_host_file",
+                "target_summary": "C:/Users/ashis/Downloads/Protein_Classification_5_Function_Shape_Source.docx -> C:/Users/ashis/OneDrive/Desktop/Protein_Classification_5_Function_Shape_Source.docx",
+            }
+        ]
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-4",
+        request_id="req-command-4",
+        session_key="telegram:123",
+        message="no",
+        metadata={"trace_id": "trace-command-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Rejected host approval 'approval-789'." in response.payload["command_response"]
+    assert system_access_manager.decisions == [("approval-789", "rejected")]
+
+
+@pytest.mark.asyncio
+async def test_router_plain_chat_no_pick_the_other_one_rejects_single_pending_host_approval(app_config) -> None:
+    system_access_manager = DummySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-790",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "move_host_file",
+                "target_summary": "C:/Users/ashis/Downloads/Protein_Classification_5_Function_Shape_Source.docx -> C:/Users/ashis/OneDrive/Desktop/Protein_Classification_5_Function_Shape_Source.docx",
+            }
+        ]
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-4b",
+        request_id="req-command-4b",
+        session_key="telegram:123",
+        message="no, pick the other one",
+        metadata={"trace_id": "trace-command-4b", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Rejected host approval 'approval-790'." in response.payload["command_response"]
+    assert system_access_manager.decisions == [("approval-790", "rejected")]
 
 
 @pytest.mark.asyncio

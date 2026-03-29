@@ -9,13 +9,28 @@ type ChatMessage = {
   id: string;
   role: string;
   content: string;
+  approvalId?: string;
+  approvalStatus?: string;
+  approvalActionKind?: string;
+  approvalTargetSummary?: string;
+  approvalCategory?: string;
 };
 
 type HistoryResponse = {
   messages: ChatMessage[];
 };
 
-// Uses native backend system microphone
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
 
 const deviceKey = "sonarbot-webchat-device-id";
 
@@ -45,6 +60,17 @@ function getDeviceId() {
   return created;
 }
 
+function getBrowserSpeechRecognitionCtor(): (new () => BrowserSpeechRecognition) | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const speechWindow = window as Window & {
+    SpeechRecognition?: new () => BrowserSpeechRecognition;
+    webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
+  };
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -55,7 +81,8 @@ export function ChatWindow() {
   const [micPanelOpen, setMicPanelOpen] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
-  // Removed recognitionRef
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const listeningRequestIdRef = useRef<string | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const queuedRequestIdsRef = useRef<string[]>([]);
   const requestReplyMapRef = useRef<Map<string, string>>(new Map());
@@ -131,6 +158,38 @@ export function ChatWindow() {
     setInput("");
   }
 
+  async function decideHostApproval(approvalId: string, decision: "approved" | "rejected") {
+    if (!approvalId) {
+      return;
+    }
+    try {
+      await fetch(`http://localhost:8765/api/system-access/approvals/${approvalId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      setMessages((current) =>
+        current.map((item) =>
+          item.approvalId === approvalId
+            ? {
+                ...item,
+                approvalStatus: decision,
+                content: decision === "approved" ? "Host action approved." : "Host action denied.",
+              }
+            : item,
+        ),
+      );
+    } catch {
+      setMessages((current) =>
+        current.map((item) =>
+          item.approvalId === approvalId
+            ? { ...item, content: "I couldn't update that approval. Please try again from Host Access." }
+            : item,
+        ),
+      );
+    }
+  }
+
   function speakMessage(text: string) {
     if (typeof window === "undefined" || !speakReplies || !text.trim()) {
       return;
@@ -142,39 +201,123 @@ export function ChatWindow() {
     window.speechSynthesis.speak(utterance);
   }
 
-  function toggleListening() {
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      alert("Not connected to the assistant backend.");
-      return;
+  function applyDictationText(text: string) {
+    const trimmed = text.trim();
+    setInput(trimmed);
+    setLiveTranscript(trimmed);
+  }
+
+  function stopRecognition() {
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    if (recognition) {
+      try {
+        recognition.onresult = null;
+        recognition.onerror = null;
+        recognition.onend = null;
+        recognition.abort();
+      } catch {
+        // Ignore cleanup failures when the browser already shut recognition down.
+      }
     }
-    
-    if (isListening) {
+  }
+
+  function startBrowserMic() {
+    const RecognitionCtor = getBrowserSpeechRecognitionCtor();
+    if (!RecognitionCtor) {
+      return false;
+    }
+
+    stopRecognition();
+    const recognition = new RecognitionCtor();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognitionRef.current = recognition;
+
+    let finalTranscript = "";
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = "";
+      const results = event?.results ?? [];
+      for (let index = event.resultIndex ?? 0; index < results.length; index += 1) {
+        const result = results[index];
+        const transcript = String(result?.[0]?.transcript ?? "");
+        if (!transcript) {
+          continue;
+        }
+        if (result?.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+      const combined = `${finalTranscript} ${interimTranscript}`.trim();
+      setLiveTranscript(combined || "Listening...");
+    };
+
+    recognition.onerror = (event: any) => {
+      const errorName = String(event?.error ?? "unknown_error");
+      setLiveTranscript(`Mic error: ${errorName}`);
       setIsListening(false);
       setMicPanelOpen(false);
+      stopRecognition();
+    };
+
+    recognition.onend = () => {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setMicPanelOpen(false);
+      const text = finalTranscript.trim();
+      if (text) {
+        applyDictationText(text);
+      } else {
+        setLiveTranscript("");
+      }
+    };
+
+    setIsListening(true);
+    setMicPanelOpen(true);
+    setLiveTranscript("Listening via browser microphone...");
+
+    try {
+      recognition.start();
+    } catch (error) {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setMicPanelOpen(false);
+      setLiveTranscript(`Mic error: ${error instanceof Error ? error.message : "failed to start"}`);
+      return false;
+    }
+
+    return true;
+  }
+
+  function toggleListening() {
+    if (isListening) {
+      stopRecognition();
+      setIsListening(false);
+      setMicPanelOpen(false);
+      setLiveTranscript("");
       return;
     }
-    
+
+    if (startBrowserMic()) {
+      return;
+    }
+
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      alert("Mic input needs a browser mic or a connected assistant backend.");
+      return;
+    }
+
     setIsListening(true);
     setMicPanelOpen(true);
     setLiveTranscript("Establishing secure backend mic link...");
-    
     const requestId = generateId();
-    const replyId = generateId();
-    requestReplyMapRef.current.set(requestId, replyId);
-    replyContentRef.current.set(replyId, "");
-    
-    if (activeRequestIdRef.current === null) {
-      activeRequestIdRef.current = requestId;
-    } else {
-      queuedRequestIdsRef.current.push(requestId);
-    }
-    
-    setMessages((current) => [
-      ...current,
-      { id: requestId + "-user", role: "user", content: "(Listening natively...)" },
-      { id: replyId, role: "assistant", content: "Thinking..." },
-    ]);
-    
+    listeningRequestIdRef.current = requestId;
+    activeRequestIdRef.current = requestId;
+
     socketRef.current.send(
       JSON.stringify({
         type: "req",
@@ -186,6 +329,8 @@ export function ChatWindow() {
   }
 
   function closeMicPanel() {
+    listeningRequestIdRef.current = null;
+    stopRecognition();
     setIsListening(false);
     setMicPanelOpen(false);
     setLiveTranscript("");
@@ -254,6 +399,24 @@ export function ChatWindow() {
         if (frame.type === "res") {
           const requestId = String(frame.id ?? "");
           const ok = Boolean(frame.ok);
+          if (listeningRequestIdRef.current && requestId === listeningRequestIdRef.current) {
+            const payload = (frame.payload as Record<string, unknown> | undefined) ?? {};
+            const transcript = typeof payload.transcript === "string" ? payload.transcript : "";
+            if (transcript) {
+              applyDictationText(transcript);
+            }
+            setIsListening(false);
+            setMicPanelOpen(false);
+            if (!transcript) {
+              setLiveTranscript(String(payload.error ?? payload.command_response ?? "No speech detected"));
+            } else {
+              setLiveTranscript("");
+            }
+            listeningRequestIdRef.current = null;
+            activeRequestIdRef.current = null;
+            cleanupRequest(requestId);
+            return;
+          }
           if (!ok) {
             const errorText = String(frame.error ?? "Unknown request error");
             const replyId = replyIdForRequest(requestId);
@@ -333,16 +496,17 @@ export function ChatWindow() {
         if (frame.type === "event" && frame.event === "agent.mic_inactive") {
           setIsListening(false);
           setMicPanelOpen(false);
-          setLiveTranscript("");
           const text = String((frame.payload as Record<string, unknown> | undefined)?.text ?? "");
-          if (text) {
-            setMessages((prev) => prev.map(m => m.content === "(Listening natively...)" ? { ...m, content: text } : m));
+          if (text.trim()) {
+            applyDictationText(text);
           } else {
-            setMessages((prev) => prev.filter(m => m.content !== "(Listening natively...)" && m.content !== "Thinking..."));
-            const lastId = activeRequestIdRef.current;
-            if (lastId) {
-              cleanupRequest(lastId);
-            }
+            setLiveTranscript("");
+          }
+          listeningRequestIdRef.current = null;
+          const lastId = activeRequestIdRef.current;
+          if (lastId) {
+            cleanupRequest(lastId);
+            activeRequestIdRef.current = null;
           }
         }
         if (frame.type === "event" && frame.event === "notification.created") {
@@ -375,9 +539,35 @@ export function ChatWindow() {
                 {
                   id: approvalId,
                   role: "system",
-                  content: `Host Action Required: The assistant wants to run a '${category}' system command ("${targetSummary}").\n\nPlease go to "Operations -> Host access" in the navigation menu to approve or deny this request.`,
+                  content: "Host action needs your approval.",
+                  approvalId,
+                  approvalStatus: "pending",
+                  approvalActionKind: "host action",
+                  approvalTargetSummary: targetSummary,
+                  approvalCategory: category,
                 },
               ]);
+            }
+          } else {
+            const approvalId = String(payload.approval_id ?? "");
+            const status = String(payload.status ?? "");
+            if (approvalId && status) {
+              setMessages((current) =>
+                current.map((item) =>
+                  item.approvalId === approvalId
+                    ? {
+                        ...item,
+                        approvalStatus: status,
+                        content:
+                          status === "approved"
+                            ? "Host action approved."
+                            : status === "rejected"
+                              ? "Host action denied."
+                              : item.content,
+                      }
+                    : item,
+                ),
+              );
             }
           }
           if (typeof window !== "undefined") {
@@ -419,6 +609,7 @@ export function ChatWindow() {
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }
+      stopRecognition();
       socketRef.current?.close();
     };
   }, [deviceId]);
@@ -469,9 +660,49 @@ export function ChatWindow() {
             task, or a slash command such as <span className="rounded bg-glow px-2 py-1 text-accent">/skills</span>.
           </div>
         ) : null}
-        {messages.map((message) => (
-          <MessageBubble key={message.id} role={message.role} content={message.content} />
-        ))}
+        {messages.map((message) =>
+          message.approvalId ? (
+            <div
+              key={message.id}
+              className="max-w-[90%] rounded-[1.65rem] border border-line bg-sand/80 px-4 py-4 shadow-card text-ink"
+            >
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-[11px] uppercase tracking-[0.24em] opacity-70">{message.role}</div>
+                <div className="rounded-full bg-white/60 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-600">
+                  Approval
+                </div>
+              </div>
+              <div className="text-sm leading-7">
+                <div className="font-medium text-ink">{message.content}</div>
+                <div className="mt-2 text-slate-600">{message.approvalTargetSummary}</div>
+                {message.approvalStatus === "pending" ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void decideHostApproval(message.approvalId!, "approved")}
+                      className="rounded-full bg-emerald-100 px-3 py-2 text-xs font-medium text-emerald-700"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void decideHostApproval(message.approvalId!, "rejected")}
+                      className="rounded-full bg-rose-100 px-3 py-2 text-xs font-medium text-rose-700"
+                    >
+                      Deny
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-4 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                    {message.approvalStatus}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <MessageBubble key={message.id} role={message.role} content={message.content} />
+          ),
+        )}
       </div>
 
       <div className="mt-5 rounded-[1.75rem] border border-line/70 bg-white/92 p-4">

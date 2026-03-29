@@ -27,6 +27,7 @@ from assistant.utils.logging import get_logger
 
 
 LOGGER = get_logger("skill_router")
+HOST_FILE_CONFIRMATION_KEY = "host_file_confirmation"
 
 
 @dataclass(slots=True)
@@ -72,7 +73,7 @@ class GatewayRouter:
         if request.method == "agent.listen":
             from assistant.gateway.protocol import AgentListenParams
             from assistant.utils.mic import listen_to_system_mic
-            
+
             params = AgentListenParams.model_validate(request.params)
             connection = self.connection_manager.get_connection(connection_id)
             metadata = {
@@ -80,23 +81,31 @@ class GatewayRouter:
                 "channel": getattr(connection, "channel_name", "ws"),
                 "device_id": getattr(connection, "device_id", ""),
             }
-            
+
             # Notify frontend that we are now actively capturing
             await self.connection_manager.send_event(connection_id, "agent.mic_active", {})
-            
+
             message = await listen_to_system_mic(timeout=7)
-            
+
             await self.connection_manager.send_event(connection_id, "agent.mic_inactive", {"text": message})
-            
+
             if not message:
-                return ResponseFrame(id=request.id, ok=True, payload={"queued": False, "session_key": params.session_key, "error": "No speech detected"})
-                
-            return await self.route_user_message(
-                connection_id=connection_id,
-                request_id=request.id,
-                session_key=params.session_key,
-                message=message,
-                metadata=metadata,
+                return ResponseFrame(
+                    id=request.id,
+                    ok=True,
+                    payload={"queued": False, "session_key": params.session_key, "error": "No speech detected", "transcript": ""},
+                )
+
+            return ResponseFrame(
+                id=request.id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": params.session_key,
+                    "transcript": message,
+                    "message": message,
+                    "status": "completed",
+                },
             )
 
         return ResponseFrame(id=request.id, ok=False, error=f"Unknown method '{request.method}'.")
@@ -137,6 +146,10 @@ class GatewayRouter:
         shortcut = await self._handle_tool_shortcut(request_id, session_key, stripped, metadata)
         if shortcut is not None:
             return shortcut
+
+        host_shortcut = await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
+        if host_shortcut is not None:
+            return host_shortcut
 
         browser_workflow = await self._handle_browser_workflow(
             connection_id=connection_id,
@@ -419,6 +432,229 @@ class GatewayRouter:
                 id=request_id,
                 ok=True,
                 payload={"queued": False, "session_key": session_key, "command_response": response_text, "notifications": notifications},
+            )
+
+        if command_name in {"system", "host", "os"}:
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._system_help_text()},
+                )
+            if self.system_access_manager is None:
+                return ResponseFrame(id=request_id, ok=False, error="System access is not configured.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            session = await self.session_manager.load_or_create(session_key)
+            session_id = getattr(session, "session_id", session_key)
+            try:
+                if subcommand == "state":
+                    result = await self.system_access_manager.get_system_state(
+                        session_id=session_id,
+                        user_id=user_id,
+                        process_limit=self._parse_browser_limit(subargs, default=8),
+                        window_limit=self._parse_browser_limit(subargs, default=8),
+                    )
+                    response_text = self._format_system_state_response(result)
+                elif subcommand in {"processes", "ps"}:
+                    limit = self._parse_browser_limit(subargs, default=12)
+                    result = await self.system_access_manager.list_processes(session_id=session_id, user_id=user_id, limit=limit)
+                    response_text = self._format_processes_response(result.get("processes", []))
+                elif subcommand in {"windows", "window", "win"}:
+                    if subcommand == "windows":
+                        limit = self._parse_browser_limit(subargs, default=12)
+                        result = await self.system_access_manager.list_windows(session_id=session_id, user_id=user_id, limit=limit)
+                        response_text = self._format_windows_response(result.get("windows", []), result.get("active_window"))
+                    else:
+                        window_command, window_args = self._split_command_arguments(subargs)
+                        window_command = window_command.lower()
+                        if window_command in {"minimize", "min", "maximize", "max", "restore"}:
+                            pid_text = window_args.strip()
+                            if not pid_text.isdigit():
+                                return ResponseFrame(id=request_id, ok=False, error="Use /system window <minimize|maximize|restore> <pid>.")
+                            state = "minimize" if window_command in {"minimize", "min"} else "maximize" if window_command in {"maximize", "max"} else "restore"
+                            result = await self.system_access_manager.set_window_state(
+                                pid=int(pid_text),
+                                state=state,
+                                session_id=session_id,
+                                user_id=user_id,
+                                session_key=session_key,
+                            )
+                            response_text = self._format_window_state_response(result, state)
+                        elif window_command == "move":
+                            parts = window_args.split()
+                            if len(parts) < 3:
+                                return ResponseFrame(id=request_id, ok=False, error="Use /system window move <pid> <x> <y> [width height].")
+                            try:
+                                pid = int(parts[0])
+                                x = int(parts[1])
+                                y = int(parts[2])
+                                width = int(parts[3]) if len(parts) > 3 else None
+                                height = int(parts[4]) if len(parts) > 4 else None
+                            except ValueError:
+                                return ResponseFrame(id=request_id, ok=False, error="Use /system window move <pid> <x> <y> [width height].")
+                            result = await self.system_access_manager.move_window(
+                                pid=pid,
+                                x=x,
+                                y=y,
+                                width=width,
+                                height=height,
+                                session_id=session_id,
+                                user_id=user_id,
+                                session_key=session_key,
+                            )
+                            response_text = self._format_window_move_response(result, pid, x, y, width, height)
+                        else:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system window <move|minimize|maximize|restore> ...")
+                elif subcommand in {"input", "keyboard", "mouse", "keys", "type"}:
+                    if subcommand == "input":
+                        input_command, input_args = self._split_command_arguments(subargs)
+                    else:
+                        input_command, input_args = subcommand, subargs
+                    if input_command in {"mouse", "keyboard"}:
+                        input_command, input_args = self._split_command_arguments(input_args)
+                    input_command = input_command.lower()
+                    if input_command in {"keys", "key", "hotkey"}:
+                        keys = input_args.strip()
+                        if not keys:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input keys <keys>.")
+                        result = await self.system_access_manager.send_keys(
+                            keys=keys,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_keys_response(result, keys)
+                    elif input_command in {"text", "type"}:
+                        text = input_args
+                        if not text.strip():
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input text <text>.")
+                        result = await self.system_access_manager.type_text(
+                            text=text,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_text_input_response(result, text)
+                    elif input_command == "click":
+                        parts = input_args.split()
+                        if len(parts) < 2:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input click <x> <y> [button] [count].")
+                        try:
+                            x = int(parts[0])
+                            y = int(parts[1])
+                            button = parts[2] if len(parts) > 2 else "left"
+                            clicks = int(parts[3]) if len(parts) > 3 else 1
+                        except ValueError:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input click <x> <y> [button] [count].")
+                        result = await self.system_access_manager.click_mouse(
+                            x=x,
+                            y=y,
+                            button=button,
+                            clicks=clicks,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_mouse_click_response(result, x, y, button, clicks)
+                    elif input_command == "move":
+                        parts = input_args.split()
+                        if len(parts) != 2:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input move <x> <y>.")
+                        try:
+                            x = int(parts[0])
+                            y = int(parts[1])
+                        except ValueError:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input move <x> <y>.")
+                        result = await self.system_access_manager.move_mouse(
+                            x=x,
+                            y=y,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_mouse_move_response(result, x, y)
+                    elif input_command == "scroll":
+                        delta_text = input_args.strip()
+                        try:
+                            delta = int(delta_text)
+                        except ValueError:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system input scroll <delta>.")
+                        result = await self.system_access_manager.scroll_mouse(
+                            delta=delta,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_mouse_scroll_response(result, delta)
+                    else:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /system input keys|text|click|move|scroll ...")
+                elif subcommand in {"volume", "sound", "audio"}:
+                    volume_command, volume_args = self._split_command_arguments(subargs)
+                    volume_command = volume_command.lower()
+                    if volume_command not in {"up", "down", "mute"}:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /system volume <up|down|mute>.")
+                    result = await self.system_access_manager.set_volume(
+                        direction=volume_command,
+                        session_id=session_id,
+                        user_id=user_id,
+                        session_key=session_key,
+                    )
+                    response_text = self._format_volume_response(result, volume_command)
+                elif subcommand in {"clipboard", "clip"}:
+                    clip_command, clip_args = self._split_command_arguments(subargs)
+                    clip_command = clip_command.lower()
+                    if clip_command in {"", "get"}:
+                        result = await self.system_access_manager.get_clipboard(session_id=session_id, user_id=user_id)
+                        response_text = self._format_clipboard_response(result.get("text", ""))
+                    elif clip_command == "set":
+                        clipboard_text = clip_args.strip()
+                        if not clipboard_text:
+                            return ResponseFrame(id=request_id, ok=False, error="Use /system clipboard set <text>.")
+                        result = await self.system_access_manager.set_clipboard(
+                            text=clipboard_text,
+                            session_id=session_id,
+                            user_id=user_id,
+                            session_key=session_key,
+                        )
+                        response_text = self._format_clipboard_set_response(result, clipboard_text)
+                    else:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /system clipboard get or /system clipboard set <text>.")
+                elif subcommand in {"focus", "activate"}:
+                    pid_text = subargs.strip()
+                    if not pid_text.isdigit():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /system focus <pid>.")
+                    result = await self.system_access_manager.focus_process_window(
+                        pid=int(pid_text),
+                        session_id=session_id,
+                        user_id=user_id,
+                        session_key=session_key,
+                    )
+                    response_text = self._format_focus_response(result)
+                elif subcommand in {"terminate", "kill", "stop"}:
+                    pid_text = subargs.strip()
+                    if not pid_text.isdigit():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /system terminate <pid>.")
+                    result = await self.system_access_manager.terminate_process(
+                        pid=int(pid_text),
+                        force=True,
+                        session_id=session_id,
+                        user_id=user_id,
+                        session_key=session_key,
+                    )
+                    response_text = self._format_terminate_response(result, int(pid_text))
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /system subcommand. Use /system help.")
+            except RuntimeError as exc:
+                response_text = str(exc)
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            await self._persist_inline_exchange(session_key, raw_command, response_text, {"user_id": user_id})
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
         if command_name in {"automation-runs", "automation_runs"}:
@@ -1332,6 +1568,151 @@ class GatewayRouter:
             "don't do that",
         }
 
+    def _looks_like_confirmation_reply(self, lowered: str) -> bool:
+        return self._looks_like_affirmative_reply(lowered) or self._looks_like_negative_reply(lowered)
+
+    def _extract_document_extension_choice(self, lowered: str) -> str | None:
+        synonyms = (
+            ("pptx", ("pptx", "ppt", "powerpoint", "presentation")),
+            ("docx", ("docx", "doc", "word", "document")),
+            ("pdf", ("pdf",)),
+            ("txt", ("txt", "text", "plain text")),
+            ("md", ("md", "markdown")),
+        )
+        for extension, tokens in synonyms:
+            for token in tokens:
+                if re.search(rf"\b{re.escape(token)}\b", lowered):
+                    return extension
+        return None
+
+    def _looks_like_affirmative_reply(self, lowered: str) -> bool:
+        normalized = lowered.strip()
+        return normalized in {
+            "yes",
+            "y",
+            "yep",
+            "yeah",
+            "correct",
+            "right",
+            "that's it",
+            "that is it",
+            "yes that's it",
+            "yes thats it",
+            "looks right",
+            "confirm",
+            "ok",
+            "okay",
+        }
+
+    def _looks_like_negative_reply(self, lowered: str) -> bool:
+        normalized = lowered.strip()
+        return normalized in {
+            "no",
+            "n",
+            "nope",
+            "not that",
+            "wrong",
+            "no that's wrong",
+            "no thats wrong",
+            "not correct",
+        }
+
+    async def _get_host_file_confirmation(self, session_key: str) -> dict[str, Any] | None:
+        session = await self.session_manager.load_or_create(session_key)
+        metadata = getattr(session, "metadata", {}) or {}
+        pending = metadata.get(HOST_FILE_CONFIRMATION_KEY)
+        return dict(pending) if isinstance(pending, dict) else None
+
+    async def _clear_host_file_confirmation(self, session_key: str) -> None:
+        await self._update_session_metadata(session_key, remove_keys=[HOST_FILE_CONFIRMATION_KEY])
+
+    async def _read_and_summarize_host_file(
+        self,
+        *,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        metadata: dict[str, Any],
+        path: str,
+        display_name: str,
+    ) -> ResponseFrame:
+        try:
+            if hasattr(self.tool_registry, "has") and callable(getattr(self.tool_registry, "has", None)) and self.tool_registry.has(
+                "read_host_document"
+            ):
+                result = await self.tool_registry.dispatch(
+                    "read_host_document",
+                    {
+                        "path": path,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            else:
+                result = await self.tool_registry.dispatch(
+                    "read_host_file",
+                    {
+                        "path": path,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+
+        content = str(result.get("content", ""))
+        if not content.strip():
+            response_text = str(result.get("error") or f"I could not extract text from {path}.")
+        else:
+            summary_text = content[:12000]
+            if hasattr(self.tool_registry, "has") and callable(getattr(self.tool_registry, "has", None)) and self.tool_registry.has("llm_task"):
+                try:
+                    summary_result = await self.tool_registry.dispatch(
+                        "llm_task",
+                        {
+                            "prompt": (
+                                "Summarize the following document in 5-7 bullet points, then give a one-sentence takeaway.\n"
+                                f"Document path: {path}\n\n"
+                                f"{summary_text}"
+                            ),
+                            "model": "cheap",
+                        },
+                    )
+                    summary_text = str(summary_result.get("content", summary_text)).strip() or summary_text
+                except Exception:
+                    pass
+            response_text = f"I read {display_name or path} at {path}. Summary:\n{summary_text}"
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    def _pick_candidate_by_extension(
+        self,
+        candidates: list[dict[str, Any]],
+        extension: str,
+    ) -> dict[str, Any] | None:
+        normalized_extension = extension.lower().lstrip(".")
+        exact = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("name", "")).lower().endswith(f".{normalized_extension}")
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            return exact[0]
+        return None
+
+    def _format_file_selection_prompt(self, file_name: str, matches: list[dict[str, Any]]) -> str:
+        lines = [f"I found {len(matches)} files named like {file_name}:"]
+        for match in matches[:10]:
+            lines.append(f"- {match.get('name', 'unknown')} -> {match.get('path', '')}")
+        lines.append("Which one should I use? You can reply with `pptx`, `pdf`, `docx`, or the full path.")
+        return "\n".join(lines)
+
     async def _apply_browser_task_state(self, session_key: str, result: Any) -> None:
         if getattr(result, "clear_state", False):
             await self._update_session_metadata(session_key, remove_keys=browser_task_state_clear_keys())
@@ -1473,6 +1854,16 @@ class GatewayRouter:
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
+
+        host_approval_shortcut = await self._handle_host_approval_reply(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if host_approval_shortcut is not None:
+            return host_approval_shortcut
 
         if self._looks_like_latest_email_request(lowered):
             try:
@@ -1783,6 +2174,71 @@ class GatewayRouter:
         if not self._has_host_tools():
             return None
 
+        pending_confirmation = await self._get_host_file_confirmation(session_key)
+        if pending_confirmation is not None:
+            pending_mode = str(pending_confirmation.get("mode", "")).strip().lower()
+            if pending_mode == "file_selection":
+                if self._looks_like_negative_reply(lowered):
+                    await self._clear_host_file_confirmation(session_key)
+                    response_text = "Okay, I cleared that file list. Send the filename again if you want me to search a different one."
+                    await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                    )
+                extension_choice = self._extract_document_extension_choice(lowered)
+                selected_path = None
+                candidates = list(pending_confirmation.get("candidates") or [])
+                if extension_choice:
+                    selected = self._pick_candidate_by_extension(candidates, extension_choice)
+                    if selected is not None:
+                        selected_path = str(selected.get("path", "")) or None
+                if selected_path is None and self._looks_like_affirmative_reply(lowered) and len(candidates) == 1:
+                    selected_path = str(candidates[0].get("path", "")) or None
+                if selected_path is not None:
+                    response = await self._read_and_summarize_host_file(
+                        request_id=request_id,
+                        session_key=session_key,
+                        original_message=original_message,
+                        metadata=metadata,
+                        path=selected_path,
+                        display_name=str(pending_confirmation.get("display_name", "")) or selected_path,
+                    )
+                    await self._clear_host_file_confirmation(session_key)
+                    return response
+                if extension_choice is not None:
+                    response_text = f"I couldn't find a {extension_choice} version in that list. Try `pptx`, `pdf`, `docx`, or paste the full path."
+                else:
+                    response_text = "Please reply with the file type you want, like `pptx`, `pdf`, or `docx`."
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            if self._looks_like_confirmation_reply(lowered):
+                if self._looks_like_negative_reply(lowered):
+                    await self._clear_host_file_confirmation(session_key)
+                    response_text = "Okay, I cleared that file reference. Send the filename or path again if you want a different one."
+                    await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                    )
+                if self._looks_like_affirmative_reply(lowered):
+                    response = await self._read_and_summarize_host_file(
+                        request_id=request_id,
+                        session_key=session_key,
+                        original_message=original_message,
+                        metadata=metadata,
+                        path=str(pending_confirmation.get("path", "")),
+                        display_name=str(pending_confirmation.get("display_name", "")),
+                    )
+                    await self._clear_host_file_confirmation(session_key)
+                    return response
+
         folder_name = self._match_known_host_folder(lowered)
         if folder_name and self._looks_like_list_folder_request(lowered):
             try:
@@ -1805,6 +2261,124 @@ class GatewayRouter:
             )
 
         explicit_root = self._extract_host_search_root(lowered)
+        explicit_file_path = self._extract_explicit_host_file_path(original_message)
+        if explicit_file_path and self._looks_like_document_read_request(lowered):
+            try:
+                if hasattr(self.tool_registry, "has") and callable(getattr(self.tool_registry, "has", None)) and self.tool_registry.has(
+                    "read_host_document"
+                ):
+                    result = await self.tool_registry.dispatch(
+                        "read_host_document",
+                        {
+                            "path": explicit_file_path,
+                            "session_key": session_key,
+                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        },
+                    )
+                else:
+                    result = await self.tool_registry.dispatch(
+                        "read_host_file",
+                        {
+                            "path": explicit_file_path,
+                            "session_key": session_key,
+                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        },
+                    )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+
+            content = str(result.get("content", ""))
+            if not content.strip():
+                response_text = str(result.get("error") or f"I could not extract text from {explicit_file_path}.")
+            else:
+                summary_text = content[:12000]
+                if hasattr(self.tool_registry, "has") and callable(getattr(self.tool_registry, "has", None)) and self.tool_registry.has("llm_task"):
+                    try:
+                        summary_result = await self.tool_registry.dispatch(
+                            "llm_task",
+                            {
+                                "prompt": (
+                                    "Summarize the following document in 5-7 bullet points, then give a one-sentence takeaway.\n"
+                                    f"Document path: {explicit_file_path}\n\n"
+                                    f"{summary_text}"
+                                ),
+                                "model": "cheap",
+                            },
+                        )
+                        summary_text = str(summary_result.get("content", summary_text)).strip() or summary_text
+                    except Exception:
+                        pass
+                response_text = f"I read {explicit_file_path}. Summary:\n{summary_text}"
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        filename_only_reference = self._extract_filename_only_document_reference(original_message)
+        if filename_only_reference is None and self._looks_like_document_read_request(lowered):
+            filename_only_reference = self._extract_bare_document_reference(original_message)
+        if filename_only_reference and self._looks_like_document_read_request(lowered):
+            try:
+                search_result = await self.tool_registry.dispatch(
+                    "search_host_files",
+                    {
+                        "root": "@allowed",
+                        "pattern": "*",
+                        "name_query": filename_only_reference,
+                        "files_only": True,
+                        "limit": 20,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+
+            file_match = self._pick_file_match(filename_only_reference, search_result)
+            if file_match is None:
+                matches = [match for match in search_result.get("matches", []) if not match.get("is_dir")]
+                if matches:
+                    response_text = self._format_file_selection_prompt(filename_only_reference, matches)
+                    await self._update_session_metadata(
+                        session_key,
+                        updates={
+                            HOST_FILE_CONFIRMATION_KEY: {
+                                "mode": "file_selection",
+                                "display_name": filename_only_reference,
+                                "candidates": matches,
+                            }
+                        },
+                    )
+                else:
+                    response_text = f"I couldn't find {filename_only_reference} anywhere in your allowed host locations."
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+
+            explicit_file_path = str(file_match.get("path", "")) or f"~/Downloads/{filename_only_reference}"
+            response_text = f"I found {filename_only_reference} at {explicit_file_path}. Is this the correct file?"
+            await self._update_session_metadata(
+                session_key,
+                updates={
+                    HOST_FILE_CONFIRMATION_KEY: {
+                        "mode": "file_confirmation",
+                        "path": explicit_file_path,
+                        "display_name": filename_only_reference,
+                    }
+                },
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
         if explicit_root is not None and self._looks_like_list_folder_request(lowered) and folder_name is None:
             label = self._describe_host_root(explicit_root)
             try:
@@ -1945,7 +2519,7 @@ class GatewayRouter:
                 result = await self.tool_registry.dispatch(
                     "write_host_file",
                     {
-                        "path": f"{target_dir.rstrip('/\\')}/{filename}",
+                        "path": str(Path(target_dir) / filename),
                         "content": content,
                         "session_key": session_key,
                         "user_id": metadata.get("user_id", self.config.users.default_user_id),
@@ -2019,8 +2593,22 @@ class GatewayRouter:
         if any(token in lowered for token in ("desktop", "downloads", "documents", "notepad", "folder", "drive", "r:")):
             hints.append(
                 "You have host-system access tools inside the configured allowed host roots: list_host_dir, search_host_files, "
-                "read_host_file, write_host_file, and exec_shell with host=true. Do not claim you are limited to the workspace "
+                "read_host_file, read_host_document, write_host_file, and exec_shell with host=true. Do not claim you are limited to the workspace "
                 "when the request is about Desktop, Downloads, Documents, allowed drives such as R:/, or opening simple Windows apps."
+            )
+        if any(token in lowered for token in ("process", "window", "clipboard", "task manager", "foreground")):
+            hints.append(
+                "Windows process, window, clipboard, and foreground-window requests have dedicated system-control tools. "
+                "Prefer those tools over generic shell commands."
+            )
+        if any(token in lowered for token in ("keyboard", "mouse", "click", "type text", "hotkey")):
+            hints.append(
+                "Windows keyboard and mouse requests have dedicated system-control tools for window movement, mouse clicks, "
+                "mouse movement, scrolling, key shortcuts, and literal text entry."
+            )
+        if any(token in lowered for token in ("volume", "sound", "mute", "speaker")):
+            hints.append(
+                "Windows audio requests have dedicated system-control tools for changing volume or muting the host machine."
             )
         if any(
             token in lowered
@@ -2100,6 +2688,28 @@ class GatewayRouter:
             "/browser unwatch <watch_id>"
         )
 
+    def _system_help_text(self) -> str:
+        return (
+            "System commands:\n"
+            "/system state [limit]\n"
+            "/system processes [limit]\n"
+            "/system windows [limit]\n"
+            "/system window move <pid> <x> <y> [width height]\n"
+            "/system window minimize <pid>\n"
+            "/system window maximize <pid>\n"
+            "/system window restore <pid>\n"
+            "/system input keys <keys>\n"
+            "/system input text <text>\n"
+            "/system input click <x> <y> [button] [count]\n"
+            "/system input move <x> <y>\n"
+            "/system input scroll <delta>\n"
+            "/system volume <up|down|mute>\n"
+            "/system clipboard get\n"
+            "/system clipboard set <text>\n"
+            "/system focus <pid>\n"
+            "/system terminate <pid>"
+        )
+
     def _parse_browser_limit(self, value: str, *, default: int = 8) -> int:
         stripped = value.strip()
         if not stripped:
@@ -2108,6 +2718,135 @@ class GatewayRouter:
             return max(1, min(int(stripped), 50))
         except ValueError:
             return default
+
+    def _format_system_state_response(self, state: dict[str, Any]) -> str:
+        active = state.get("active_window") or {}
+        clipboard = str(state.get("clipboard", "") or "").strip()
+        processes = state.get("processes", []) or []
+        windows = state.get("windows", []) or []
+        lines = ["System state:"]
+        if active:
+            lines.append(
+                f"- Active window: {active.get('title', '(unknown)')} "
+                f"({active.get('process_name', 'unknown')} / pid {active.get('pid', 'unknown')})"
+            )
+        else:
+            lines.append("- Active window: unavailable")
+        lines.append(f"- Clipboard: {clipboard[:120] or '(empty)'}")
+        lines.append(f"- Processes sampled: {len(processes)}")
+        lines.append(f"- Visible windows sampled: {len(windows)}")
+        return "\n".join(lines)
+
+    def _format_processes_response(self, processes: list[dict[str, Any]]) -> str:
+        if not processes:
+            return "No processes were returned."
+        lines = ["Running processes:"]
+        for item in processes[:12]:
+            title = str(item.get("window_title", "")).strip()
+            suffix = f" | {title}" if title else ""
+            lines.append(f"- {item.get('pid', '?')} | {item.get('process_name', 'unknown')}{suffix}")
+        if len(processes) > 12:
+            lines.append(f"...and {len(processes) - 12} more.")
+        return "\n".join(lines)
+
+    def _format_windows_response(self, windows: list[dict[str, Any]], active_window: dict[str, Any] | None) -> str:
+        if not windows and not active_window:
+            return "No visible windows were returned."
+        lines = ["Visible windows:"]
+        if active_window:
+            lines.append(
+                f"- Active: {active_window.get('title', '(unknown)')} "
+                f"({active_window.get('process_name', 'unknown')} / pid {active_window.get('pid', 'unknown')})"
+            )
+        for item in windows[:12]:
+            lines.append(f"- {item.get('pid', '?')} | {item.get('process_name', 'unknown')} | {item.get('title', '(untitled)')}")
+        if len(windows) > 12:
+            lines.append(f"...and {len(windows) - 12} more.")
+        return "\n".join(lines)
+
+    def _format_clipboard_response(self, text: str) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return "Clipboard is empty."
+        preview = cleaned if len(cleaned) <= 120 else f"{cleaned[:117]}..."
+        return f"Clipboard text:\n{preview}"
+
+    def _format_clipboard_set_response(self, result: dict[str, Any], text: str) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not update clipboard: {result.get('stderr', 'unknown error')}"
+        return f"Updated clipboard with {len(text.encode('utf-8'))} byte(s) of text."
+
+    def _format_focus_response(self, result: dict[str, Any]) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not focus the window: {result.get('stderr', 'unknown error')}"
+        return f"Focused window for process {result.get('process_name', 'unknown')} (pid {result.get('pid', 'unknown')})."
+
+    def _format_terminate_response(self, result: dict[str, Any], pid: int) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not terminate process {pid}: {result.get('stderr', 'unknown error')}"
+        return f"Terminated process {pid}."
+
+    def _format_window_state_response(self, result: dict[str, Any], state: str) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not {state} the window: {result.get('stderr', 'unknown error')}"
+        return f"{state.title()}d window for process {result.get('process_name', 'unknown')} (pid {result.get('pid', 'unknown')})."
+
+    def _format_window_move_response(
+        self,
+        result: dict[str, Any],
+        pid: int,
+        x: int,
+        y: int,
+        width: int | None,
+        height: int | None,
+    ) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not move the window: {result.get('stderr', 'unknown error')}"
+        size = f"{width}x{height}" if width is not None and height is not None else "current size"
+        return f"Moved window for process {result.get('process_name', 'unknown')} (pid {pid}) to {x}, {y} at {size}."
+
+    def _format_keys_response(self, result: dict[str, Any], keys: str) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not send keys: {result.get('stderr', 'unknown error')}"
+        return f"Sent keys to the active window: {keys}"
+
+    def _format_text_input_response(self, result: dict[str, Any], text: str) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not type text: {result.get('stderr', 'unknown error')}"
+        return f"Typed {len(text.encode('utf-8'))} byte(s) of text into the active window."
+
+    def _format_mouse_click_response(self, result: dict[str, Any], x: int, y: int, button: str, clicks: int) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not click the mouse: {result.get('stderr', 'unknown error')}"
+        suffix = "click" if clicks == 1 else "clicks"
+        return f"Clicked {button.lower()} mouse button at {x}, {y} ({clicks} {suffix})."
+
+    def _format_mouse_move_response(self, result: dict[str, Any], x: int, y: int) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not move the mouse: {result.get('stderr', 'unknown error')}"
+        return f"Moved mouse pointer to {x}, {y}."
+
+    def _format_mouse_scroll_response(self, result: dict[str, Any], delta: int) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not scroll the mouse: {result.get('stderr', 'unknown error')}"
+        return f"Scrolled mouse by {delta}."
+
+    def _format_volume_response(self, result: dict[str, Any], direction: str) -> str:
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            return f"Could not change the volume: {result.get('stderr', 'unknown error')}"
+        verbs = {"up": "increased", "down": "decreased", "mute": "muted"}
+        return f"{verbs.get(direction, 'changed')} the Windows volume."
 
     def _parse_browser_login_arguments(self, value: str) -> tuple[str, str | None]:
         parts = [item for item in value.split() if item]
@@ -2282,6 +3021,61 @@ class GatewayRouter:
             return None, f"The most recent host approval '{latest_id}' is already {latest_status}."
         return None, "No host approvals found."
 
+    def _looks_like_host_approval_reply(self, lowered: str) -> bool:
+        normalized = lowered.strip()
+        if re.match(r"^(?:i\s+)?(?:do\s+)?(?:yes|y|approve(?:d)?|confirm|ok(?:ay)?)(?:\b|[\s,;:.!?-].*)?$", normalized):
+            return True
+        return (
+            "approve" in normalized
+            and "browser" not in normalized
+            and "workflow" not in normalized
+        )
+
+    def _looks_like_host_rejection_reply(self, lowered: str) -> bool:
+        normalized = lowered.strip()
+        if re.match(r"^(?:i\s+)?(?:no|n|nope|reject(?:ed)?|deny(?:ed)?|cancel|stop|not now|never mind)(?:\b|[\s,;:.!?-].*)?$", normalized):
+            return True
+        return any(token in normalized for token in ("reject", "deny", "cancel")) and "browser" not in normalized
+
+    async def _handle_host_approval_reply(
+        self,
+        request_id: str,
+        session_key: str,
+        message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if self.system_access_manager is None:
+            return None
+        if not (self._looks_like_host_approval_reply(lowered) or self._looks_like_host_rejection_reply(lowered)):
+            return None
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        approval_id, info_text = await self._resolve_default_host_approval(user_id)
+        if approval_id is None:
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": session_key,
+                    "command_response": info_text or "No host approvals found.",
+                },
+            )
+        decision = "approved" if self._looks_like_host_approval_reply(lowered) else "rejected"
+        approval = await self.system_access_manager.decide_approval(approval_id, decision)
+        response_text = f"{decision.title()} host approval '{approval_id}'."
+        await self._persist_inline_exchange(session_key, message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "host_approval": approval,
+            },
+        )
+
     def _looks_like_latest_email_request(self, lowered: str) -> bool:
         has_email_word = "mail" in lowered or "email" in lowered
         has_latest_word = "last" in lowered or "latest" in lowered or "newest" in lowered
@@ -2309,12 +3103,17 @@ class GatewayRouter:
         return any(
             phrase in lowered
             for phrase in (
+                "list down",
                 "show me files",
                 "show files",
                 "list files",
+                "list folders",
                 "list the files",
+                "list the folders",
+                "show folders",
                 "what is in",
                 "what's in",
+                "what folders are in",
                 "open folder",
                 "show contents",
                 "show the contents",
@@ -2336,6 +3135,141 @@ class GatewayRouter:
                 return folder
         return None
 
+    def _extract_explicit_host_file_path(self, message: str) -> str | None:
+        quoted = re.search(
+            r'["\']((?:~|[A-Za-z]:[\\/])[^"\']+?\.(?:txt|md|csv|json|yaml|yml|xml|html?|rtf|pdf|docx|pptx))["\']',
+            message,
+            flags=re.IGNORECASE,
+        )
+        if quoted:
+            return quoted.group(1).strip().rstrip(",.;:")
+        bare = re.search(
+            r'((?:~|[A-Za-z]:[\\/])[^\n\r]+?\.(?:txt|md|csv|json|yaml|yml|xml|html?|rtf|pdf|docx|pptx))(?:[\s"\']|$)',
+            message,
+            flags=re.IGNORECASE,
+        )
+        if bare:
+            return bare.group(1).strip().rstrip(",.;:")
+        return None
+
+    def _extract_bare_host_file_reference(self, message: str) -> str | None:
+        normalized = _normalize_spaces(message)
+        patterns = (
+            r"\bfile name\s+(.+)$",
+            r"\bfile named\s+(.+)$",
+            r"\bfilename\s+(.+)$",
+            r"\bfind\s+(?:the\s+)?(?:file\s+)?(?:name\s+)?(.+)$",
+            r"\blook\s+for\s+(?:the\s+)?(?:file\s+)?(?:name\s+)?(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip().strip("\"'").rstrip(",.;:")
+            candidate = re.sub(r"\b(?:in|on|at|with|for|please|thanks?|thank you)\b.*$", "", candidate, flags=re.IGNORECASE).strip()
+            if candidate and len(candidate) >= 3:
+                return candidate
+        return None
+
+    def _extract_filename_only_document_reference(self, message: str) -> str | None:
+        quoted = re.search(
+            r'["\']([A-Za-z0-9._ -]+?\.(?:txt|md|csv|json|yaml|yml|xml|html?|rtf|pdf|docx|pptx))["\']',
+            message,
+            flags=re.IGNORECASE,
+        )
+        if quoted:
+            return quoted.group(1).strip().rstrip(",.;:")
+        lowered = message.lower()
+        cue_match: re.Match[str] | None = None
+        for cue in ("summarize", "summarise", "read", "open", "show", "find", "file", "document"):
+            matches = list(re.finditer(re.escape(cue), lowered))
+            if matches:
+                candidate = matches[-1]
+                if cue_match is None or candidate.end() > cue_match.end():
+                    cue_match = candidate
+        if cue_match is not None:
+            tail = message[cue_match.end() :]
+            cue_bare = re.search(
+                r'([A-Za-z0-9][A-Za-z0-9._ -]*?\.(?:txt|md|csv|json|yaml|yml|xml|html?|rtf|pdf|docx|pptx))(?:[\s"\']|$)',
+                tail,
+                flags=re.IGNORECASE,
+            )
+            if cue_bare:
+                return cue_bare.group(1).strip().rstrip(",.;:")
+        bare = re.search(
+            r'(?<![\\/])([A-Za-z0-9._ -]+?\.(?:txt|md|csv|json|yaml|yml|xml|html?|rtf|pdf|docx|pptx))(?:[\s"\']|$)',
+            message,
+            flags=re.IGNORECASE,
+        )
+        if bare:
+            return bare.group(1).strip().rstrip(",.;:")
+        return None
+
+    def _extract_bare_document_reference(self, message: str) -> str | None:
+        patterns = (
+            r"\b(?:the\s+)?file\s+name\s+(.+)$",
+            r"\bfilename\s+(.+)$",
+            r"\b(?:find|search(?:\s+for)?|look(?:\s+for|\s+up)?|read|open|show|summarize|summarise)\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip().strip("\"'").rstrip(",.;:")
+            candidate = re.sub(
+                r"\b(?:for me|please|thanks?|thank you|to summarize|to summarise)\b.*$",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            ).strip()
+            candidate = re.sub(r"\b(?:and\s+)?(?:summarize|summarise)\b.*$", "", candidate, flags=re.IGNORECASE).strip()
+            candidate = re.sub(r"\b(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE).strip()
+            if not candidate:
+                continue
+            if "." in Path(candidate).name:
+                continue
+            if len(candidate) >= 3 and any(ch.isalpha() for ch in candidate):
+                return candidate
+        return None
+
+    def _looks_like_document_read_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in (
+                "read",
+                "open",
+                "find",
+                "show me",
+                "show the content",
+                "show content",
+                "summarize",
+                "sumarize",
+                "summarise",
+                "summary",
+                "content from it",
+                "content of it",
+                "what is inside",
+                "what's inside",
+                "tell me about it",
+            )
+        )
+
+    def _pick_file_match(self, file_name: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        matches = [match for match in result.get("matches", []) if not match.get("is_dir")]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        compact_term = self._compact_search_name(file_name)
+        exactish = [
+            match
+            for match in matches
+            if self._compact_search_name(str(match.get("name", ""))) == compact_term
+        ]
+        if len(exactish) == 1:
+            return exactish[0]
+        return None
+
     def _extract_host_search_term(self, lowered: str) -> str | None:
         patterns = (
             r"\b(?:search|find)(?:\s+for)?\s+(.+?)\s+(?:folder|file|directory)\b",
@@ -2355,6 +3289,8 @@ class GatewayRouter:
         cleaned = re.sub(r"\b(?:called|named)\b", " ", cleaned)
         cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned.strip())
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned in {"the", "a", "an", "file", "folder", "directory", "document", "docs", "it", "this", "that", "there", "here"}:
+            return None
         return cleaned or None
 
     def _extract_host_search_root(self, lowered: str) -> str | None:

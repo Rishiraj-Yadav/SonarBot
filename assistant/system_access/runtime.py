@@ -12,6 +12,7 @@ import zipfile
 from html import escape as html_escape
 from pathlib import Path
 from uuid import uuid4
+from xml.etree import ElementTree as ET
 
 from assistant.system_access.policy import PathAccessRule, matches_protected_path, most_specific_rule
 
@@ -28,10 +29,13 @@ class SystemAccessRuntime:
         self.default_workdir = self._choose_default_workdir()
 
     def resolve_host_path(self, raw_path: str) -> Path:
-        candidate = Path(raw_path).expanduser()
+        if raw_path.startswith("~"):
+            candidate = self.home_root / raw_path[1:].lstrip("\\/")
+        else:
+            candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = self.home_root / candidate
-        return candidate.resolve()
+        return self._resolve_known_user_folder(candidate.resolve())
 
     def resolve_home_path(self, raw_path: str) -> Path:
         return self.resolve_host_path(raw_path)
@@ -55,6 +59,56 @@ class SystemAccessRuntime:
             readable = [existing for existing in readable if not self._is_path_inside(rule.path, existing)]
             readable.append(rule.path)
         return readable
+
+    def _known_user_folder_names(self) -> set[str]:
+        return {"desktop", "documents", "downloads", "pictures", "music", "videos"}
+
+    def _iter_one_drive_roots(self, base_home: Path) -> list[Path]:
+        if not base_home.exists():
+            return []
+        roots = []
+        for child in base_home.iterdir():
+            if child.is_dir() and child.name.lower().startswith("onedrive"):
+                roots.append(child)
+        return roots
+
+    def _iter_known_user_folder_candidates(self, base_home: Path, folder_name: str) -> list[Path]:
+        candidates = [base_home / folder_name]
+        for one_drive_root in self._iter_one_drive_roots(base_home):
+            candidates.append(one_drive_root / folder_name)
+        return candidates
+
+    def _preferred_known_user_folder(self, folder_name: str) -> Path:
+        bases: list[Path] = []
+        for base in (self.home_root, Path.home().resolve()):
+            resolved_base = base.resolve()
+            if resolved_base not in bases:
+                bases.append(resolved_base)
+        first_candidate: Path | None = None
+        for base in bases:
+            for candidate in self._iter_known_user_folder_candidates(base, folder_name):
+                if first_candidate is None:
+                    first_candidate = candidate
+                if candidate.exists():
+                    return candidate.resolve()
+        return (first_candidate or (self.home_root / folder_name)).resolve()
+
+    def _resolve_known_user_folder(self, candidate: Path) -> Path:
+        folder_name = candidate.name.lower()
+        if folder_name not in self._known_user_folder_names():
+            return candidate
+        if candidate.exists():
+            return candidate
+        bases: list[Path] = []
+        for base in (candidate.parent, self.home_root, Path.home().resolve()):
+            resolved_base = base.resolve()
+            if resolved_base not in bases:
+                bases.append(resolved_base)
+        for base in bases:
+            for alt in self._iter_known_user_folder_candidates(base, candidate.name):
+                if alt.exists():
+                    return alt.resolve()
+        return candidate
 
     def extract_command_paths(self, command: str) -> list[Path]:
         pattern = re.compile(
@@ -128,6 +182,26 @@ class SystemAccessRuntime:
             "content": content,
             "bytes_read": len(content.encode("utf-8")),
             "line_count": len(content.splitlines()),
+        }
+
+    async def read_document_text(self, path: Path, max_bytes: int = 10_000_000) -> dict[str, object]:
+        suffix = path.suffix.lower()
+        if suffix in {".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".rtf"}:
+            return await self.read_text(path, max_bytes=max_bytes)
+        if suffix == ".docx":
+            content = await asyncio.to_thread(self._extract_docx_text, path)
+        elif suffix == ".pptx":
+            content = await asyncio.to_thread(self._extract_pptx_text, path)
+        elif suffix == ".pdf":
+            content = await asyncio.to_thread(self._extract_pdf_text, path)
+        else:
+            raise ValueError(f"Unsupported document format: {suffix or path.suffix or path.name}")
+        return {
+            "path": str(path),
+            "content": content,
+            "bytes_read": len(content.encode("utf-8")),
+            "line_count": len(content.splitlines()),
+            "file_format": suffix.lstrip("."),
         }
 
     async def write_text(self, path: Path, content: str) -> dict[str, object]:
@@ -415,15 +489,14 @@ class SystemAccessRuntime:
                     delete="always_ask",
                     execute="ask_once",
                 )
-            ]
-        user_home = Path.home().resolve()
+        ]
         return [
-            PathAccessRule(path=(user_home / "Desktop").resolve()),
-            PathAccessRule(path=(user_home / "Documents").resolve()),
-            PathAccessRule(path=(user_home / "Downloads").resolve()),
-            PathAccessRule(path=(user_home / "Pictures").resolve()),
-            PathAccessRule(path=(user_home / "Music").resolve()),
-            PathAccessRule(path=(user_home / "Videos").resolve()),
+            PathAccessRule(path=self._preferred_known_user_folder("Desktop")),
+            PathAccessRule(path=self._preferred_known_user_folder("Documents")),
+            PathAccessRule(path=self._preferred_known_user_folder("Downloads")),
+            PathAccessRule(path=self._preferred_known_user_folder("Pictures")),
+            PathAccessRule(path=self._preferred_known_user_folder("Music")),
+            PathAccessRule(path=self._preferred_known_user_folder("Videos")),
             PathAccessRule(path=Path("R:/").resolve()),
         ]
 
@@ -527,3 +600,76 @@ class SystemAccessRuntime:
             archive.writestr("_rels/.rels", relationships)
             archive.writestr("word/document.xml", document_xml)
         return buffer.getvalue()
+
+    def _extract_pdf_text(self, path: Path) -> str:
+        try:
+            import pdfplumber  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("pdfplumber is not installed.") from exc
+
+        parts: list[str] = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                parts.append(page.extract_text() or "")
+        return "\n\n".join(part for part in parts if part.strip())
+
+    def _extract_docx_text(self, path: Path) -> str:
+        with zipfile.ZipFile(path) as archive:
+            xml_text = self._read_zip_xml(archive, "word/document.xml")
+        tree = ET.fromstring(xml_text)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs: list[str] = []
+        for paragraph in tree.findall(".//w:p", ns):
+            text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns)).strip()
+            if text:
+                paragraphs.append(text)
+        return "\n".join(paragraphs).strip()
+
+    def _extract_pptx_text(self, path: Path) -> str:
+        with zipfile.ZipFile(path) as archive:
+            presentation_xml = self._read_zip_xml(archive, "ppt/presentation.xml")
+            rels_xml = self._read_zip_xml(archive, "ppt/_rels/presentation.xml.rels")
+
+            rel_tree = ET.fromstring(rels_xml)
+            rel_ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
+            rel_map = {
+                rel.attrib.get("Id", ""): rel.attrib.get("Target", "")
+                for rel in rel_tree.findall(".//rel:Relationship", rel_ns)
+                if rel.attrib.get("Id") and rel.attrib.get("Target")
+            }
+
+            pres_tree = ET.fromstring(presentation_xml)
+            pres_ns = {
+                "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+                "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+            }
+            slide_ids = [
+                item.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+                for item in pres_tree.findall(".//p:sldId", pres_ns)
+            ]
+
+            slides: list[str] = []
+            for index, slide_id in enumerate(slide_ids, start=1):
+                target = rel_map.get(slide_id, "")
+                if not target:
+                    continue
+                slide_path = f"ppt/{target.lstrip('/')}"
+                try:
+                    slide_xml = self._read_zip_xml(archive, slide_path)
+                except KeyError:
+                    continue
+                slide_tree = ET.fromstring(slide_xml)
+                paragraphs: list[str] = []
+                for paragraph in slide_tree.findall(".//a:p", pres_ns):
+                    text = "".join(node.text or "" for node in paragraph.findall(".//a:t", pres_ns)).strip()
+                    if text:
+                        paragraphs.append(text)
+                slide_text = "\n".join(paragraphs).strip()
+                if slide_text:
+                    slides.append(f"Slide {index}\n{slide_text}")
+        return "\n\n".join(slides).strip()
+
+    def _read_zip_xml(self, archive: zipfile.ZipFile, xml_path: str) -> str:
+        with archive.open(xml_path) as handle:
+            return handle.read().decode("utf-8", errors="replace")

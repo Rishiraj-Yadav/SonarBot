@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -86,6 +87,167 @@ async def test_host_tools_redact_file_contents_and_restrict_paths(app_config, tm
     )
     assert denied_category == "deny"
     assert denied_reason == "outside_policy"
+
+
+@pytest.mark.asyncio
+async def test_read_host_document_extracts_pptx_text(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    home_root.mkdir(parents=True, exist_ok=True)
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.system_access.path_rules = [
+        {
+            "path": str(home_root),
+            "read": "auto_allow",
+            "write": "auto_allow",
+            "overwrite": "auto_allow",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    app_config.ensure_runtime_dirs()
+
+    pptx_path = home_root / "Protein_Introduction_ 1 Why_It_Matters.pptx"
+    with zipfile.ZipFile(pptx_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>
+""",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>
+""",
+        )
+        archive.writestr(
+            "ppt/presentation.xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/>
+    <p:sldId id="257" r:id="rId2"/>
+  </p:sldIdLst>
+</p:presentation>
+""",
+        )
+        archive.writestr(
+            "ppt/_rels/presentation.xml.rels",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+</Relationships>
+""",
+        )
+        archive.writestr(
+            "ppt/slides/slide1.xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp><p:txBody><a:p><a:r><a:t>Protein basics</a:t></a:r></a:p></p:txBody></p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+""",
+        )
+        archive.writestr(
+            "ppt/slides/slide2.xml",
+            """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp><p:txBody><a:p><a:r><a:t>Why it matters</a:t></a:r></a:p></p:txBody></p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+""",
+        )
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+    read_tool = next(tool for tool in build_host_file_tools(manager) if tool.name == "read_host_document")
+
+    result = await read_tool.handler({"path": str(pptx_path), "session_id": "sess-doc", "user_id": "default"})
+    persisted = read_tool.redactor({"path": str(pptx_path)}, result) if read_tool.redactor else result
+
+    assert "Protein basics" in result["content"]
+    assert "Why it matters" in result["content"]
+    assert result["file_format"] == "pptx"
+    assert "content" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_path_prefers_onedrive_desktop_when_redirected(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    desktop_root = home_root / "OneDrive" / "Desktop"
+    desktop_root.mkdir(parents=True, exist_ok=True)
+    (desktop_root / "notes.txt").write_text("hello", encoding="utf-8")
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    resolved = manager.runtime.resolve_host_path("~/Desktop")
+    assert resolved == desktop_root
+
+    listing = await manager.list_host_dir(path="~/Desktop", session_id="sess-desktop", user_id="default")
+    assert listing["path"] == str(desktop_root)
+    assert [item["name"] for item in listing["entries"]] == ["notes.txt"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_path_prefers_onedrive_downloads_and_documents_when_redirected(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    documents_root = home_root / "OneDrive" / "Documents"
+    downloads_root = home_root / "OneDrive" / "Downloads"
+    documents_root.mkdir(parents=True, exist_ok=True)
+    downloads_root.mkdir(parents=True, exist_ok=True)
+    (documents_root / "doc.txt").write_text("doc", encoding="utf-8")
+    (downloads_root / "download.txt").write_text("download", encoding="utf-8")
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    assert manager.runtime.resolve_host_path("~/Documents") == documents_root
+    assert manager.runtime.resolve_host_path("~/Downloads") == downloads_root
+
+    documents_listing = await manager.list_host_dir(path="~/Documents", session_id="sess-documents", user_id="default")
+    downloads_listing = await manager.list_host_dir(path="~/Downloads", session_id="sess-downloads", user_id="default")
+
+    assert documents_listing["path"] == str(documents_root)
+    assert downloads_listing["path"] == str(downloads_root)
+    assert [item["name"] for item in documents_listing["entries"]] == ["doc.txt"]
+    assert [item["name"] for item in downloads_listing["entries"]] == ["download.txt"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 import time
 from pathlib import Path
@@ -13,6 +15,7 @@ from assistant.system_access.models import HostAuditEntry
 from assistant.system_access.policy import classify_command, infer_command_path_action, max_category
 from assistant.system_access.runtime import SystemAccessRuntime
 from assistant.system_access.store import SystemAccessStore
+from assistant.system_access.windows_pc_actions import mouse_click_command, mouse_move_command, mouse_scroll_command, send_keys_command, type_text_command, volume_key_powershell, window_state_command
 
 
 class SystemAccessManager:
@@ -811,6 +814,387 @@ class SystemAccessManager:
         await self.audit.append(audit_entry)
         return {**result, "audit_id": audit_entry.audit_id}
 
+    async def read_host_document(self, *, path: str, session_id: str, user_id: str) -> dict[str, Any]:
+        self._ensure_enabled()
+        resolved = self.runtime.resolve_host_path(path)
+        category, reason = self.runtime.classify_path_action(resolved, "read")
+        if category == "deny":
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool="read_host_document",
+                action_kind="read_host_document",
+                target=str(resolved),
+                category=category,
+                approval_mode="blocked",
+                outcome=f"blocked:{reason}",
+                details={"stderr": f"Reading is not allowed for {resolved}", "exit_code": 1},
+            )
+        started = time.perf_counter()
+        result = await self.runtime.read_document_text(resolved)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="read_host_document",
+            action_kind="read_host_document",
+            target=str(resolved),
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed",
+            duration_ms=duration_ms,
+            details={"bytes_read": result.get("bytes_read", 0), "file_format": result.get("file_format", "")},
+        )
+        await self.audit.append(audit_entry)
+        return {**result, "audit_id": audit_entry.audit_id}
+
+    async def get_system_state(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        process_limit: int = 12,
+        window_limit: int = 12,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        process_limit = max(1, min(int(process_limit), 50))
+        window_limit = max(1, min(int(window_limit), 50))
+        started = time.perf_counter()
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            "Add-Type -TypeDefinition 'using System;using System.Text;using System.Runtime.InteropServices;"
+            "public static class Win32 {"
+            "[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();"
+            "[DllImport(\"user32.dll\", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);"
+            "[DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);"
+            "[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);"
+            "}'; "
+            "$h = [Win32]::GetForegroundWindow(); "
+            "$title = ''; "
+            "$pid = 0; "
+            "if ($h -ne [IntPtr]::Zero) { "
+            "$sb = New-Object System.Text.StringBuilder 512; "
+            "[Win32]::GetWindowText($h, $sb, $sb.Capacity) | Out-Null; "
+            "$title = $sb.ToString(); "
+            "[Win32]::GetWindowThreadProcessId($h, [ref]$pid) | Out-Null; "
+            "} "
+            "$active = $null; "
+            "if ($pid -ne 0) { "
+            "$p = Get-Process -Id $pid -ErrorAction SilentlyContinue; "
+            "$active = [pscustomobject]@{ pid = $pid; process_name = $p.ProcessName; title = $title; handle = $h.ToInt64() }; "
+            "} "
+            "$clipboard = ''; try { $clipboard = Get-Clipboard -Raw -Format Text -ErrorAction Stop } catch { $clipboard = '' }; "
+            "$processes = @(Get-Process | Sort-Object ProcessName | Select-Object -First "
+            f"{process_limit} "
+            "| ForEach-Object { [pscustomobject]@{ pid = $_.Id; process_name = $_.ProcessName; cpu = $_.CPU; working_set = $_.WorkingSet64; window_title = $_.MainWindowTitle } }); "
+            "$windows = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } | "
+            f"Sort-Object ProcessName | Select-Object -First {window_limit} "
+            "| ForEach-Object { [pscustomobject]@{ pid = $_.Id; process_name = $_.ProcessName; title = $_.MainWindowTitle; handle = $_.MainWindowHandle.ToInt64() } }); "
+            "@{ active_window = $active; clipboard = $clipboard; processes = $processes; windows = $windows } | ConvertTo-Json -Compress -Depth 4"
+        )
+        result = await self.runtime.exec_command(command, timeout=30, workdir=None)
+        stdout = str(result.get("stdout", "")).strip()
+        payload: dict[str, Any] = {}
+        if stdout:
+            try:
+                parsed = json.loads(stdout)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                payload = {"raw": stdout}
+        state = {
+            "active_window": payload.get("active_window"),
+            "clipboard": payload.get("clipboard", ""),
+            "processes": payload.get("processes", []),
+            "windows": payload.get("windows", []),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "exit_code": result.get("exit_code", 1),
+            "workdir": result.get("workdir", str(self.runtime.default_workdir)),
+        }
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="get_windows_state",
+            action_kind="get_windows_state",
+            target="windows_state",
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed" if int(state.get("exit_code", 1)) == 0 else "failed",
+            exit_code=int(state.get("exit_code", 1)),
+            duration_ms=duration_ms,
+            details={
+                "process_count": len(state.get("processes", [])),
+                "window_count": len(state.get("windows", [])),
+                "clipboard_length": len(str(state.get("clipboard", ""))),
+            },
+        )
+        await self.audit.append(audit_entry)
+        state["audit_id"] = audit_entry.audit_id
+        return state
+
+    async def list_processes(self, *, session_id: str, user_id: str, limit: int = 12) -> dict[str, Any]:
+        state = await self.get_system_state(session_id=session_id, user_id=user_id, process_limit=limit, window_limit=1)
+        return {
+            "processes": state.get("processes", []),
+            "exit_code": state.get("exit_code", 1),
+            "stderr": state.get("stderr", ""),
+            "workdir": state.get("workdir"),
+            "audit_id": state.get("audit_id"),
+        }
+
+    async def list_windows(self, *, session_id: str, user_id: str, limit: int = 12) -> dict[str, Any]:
+        state = await self.get_system_state(session_id=session_id, user_id=user_id, process_limit=1, window_limit=limit)
+        return {
+            "windows": state.get("windows", []),
+            "active_window": state.get("active_window"),
+            "exit_code": state.get("exit_code", 1),
+            "stderr": state.get("stderr", ""),
+            "workdir": state.get("workdir"),
+            "audit_id": state.get("audit_id"),
+        }
+
+    async def get_active_window(self, *, session_id: str, user_id: str) -> dict[str, Any]:
+        state = await self.get_system_state(session_id=session_id, user_id=user_id, process_limit=1, window_limit=1)
+        return {
+            "active_window": state.get("active_window"),
+            "exit_code": state.get("exit_code", 1),
+            "stderr": state.get("stderr", ""),
+            "workdir": state.get("workdir"),
+            "audit_id": state.get("audit_id"),
+        }
+
+    async def get_clipboard(self, *, session_id: str, user_id: str) -> dict[str, Any]:
+        self._ensure_enabled()
+        started = time.perf_counter()
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            "$value = ''; try { $value = Get-Clipboard -Raw -Format Text -ErrorAction Stop } catch { $value = '' }; "
+            "@{ text = $value } | ConvertTo-Json -Compress"
+        )
+        result = await self.runtime.exec_command(command, timeout=20, workdir=None)
+        stdout = str(result.get("stdout", "")).strip()
+        text = ""
+        if stdout:
+            try:
+                parsed = json.loads(stdout)
+                if isinstance(parsed, dict):
+                    text = str(parsed.get("text", ""))
+            except json.JSONDecodeError:
+                text = stdout
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="get_windows_clipboard",
+            action_kind="get_windows_clipboard",
+            target="clipboard",
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed" if int(result.get("exit_code", 1)) == 0 else "failed",
+            exit_code=int(result.get("exit_code", 1)),
+            duration_ms=duration_ms,
+            details={"text_length": len(text)},
+        )
+        await self.audit.append(audit_entry)
+        return {
+            "text": text,
+            "exit_code": result.get("exit_code", 1),
+            "stderr": result.get("stderr", ""),
+            "workdir": result.get("workdir", str(self.runtime.default_workdir)),
+            "audit_id": audit_entry.audit_id,
+        }
+
+    async def set_clipboard(self, *, text: str, session_id: str, user_id: str, session_key: str | None = None) -> dict[str, Any]:
+        self._ensure_enabled()
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            f"$value = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')); "
+            "Set-Clipboard -Value $value; "
+            "@{ bytes = [Text.Encoding]::UTF8.GetByteCount($value) } | ConvertTo-Json -Compress"
+        )
+        return await self.run_host_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def focus_process_window(self, *, pid: int, session_id: str, user_id: str, session_key: str | None = None) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            f"$p = Get-Process -Id {int(pid)} -ErrorAction Stop; "
+            "if ($p.MainWindowHandle -eq 0) { throw 'Process has no visible window.' }; "
+            "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;"
+            "public static class Win32 { [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); }'; "
+            "[Win32]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; "
+            "@{ pid = $p.Id; process_name = $p.ProcessName; title = $p.MainWindowTitle; handle = $p.MainWindowHandle.ToInt64() } | ConvertTo-Json -Compress"
+        )
+        return await self.run_host_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def terminate_process(self, *, pid: int, force: bool, session_id: str, user_id: str, session_key: str | None = None) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = f"$ErrorActionPreference='Stop'; Stop-Process -Id {int(pid)}{ ' -Force' if force else ''}"
+        return await self.run_host_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def move_window(
+        self,
+        *,
+        pid: int,
+        x: int,
+        y: int,
+        width: int | None = None,
+        height: int | None = None,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = window_state_command(pid, "move", x=x, y=y, width=width, height=height)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def set_window_state(
+        self,
+        *,
+        pid: int,
+        state: str,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = window_state_command(pid, state)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def send_keys(
+        self,
+        *,
+        keys: str,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = send_keys_command(keys)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def type_text(
+        self,
+        *,
+        text: str,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = type_text_command(text)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def click_mouse(
+        self,
+        *,
+        x: int,
+        y: int,
+        button: str = "left",
+        clicks: int = 1,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = mouse_click_command(x, y, button=button, clicks=clicks)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def move_mouse(
+        self,
+        *,
+        x: int,
+        y: int,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = mouse_move_command(x, y)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def scroll_mouse(
+        self,
+        *,
+        delta: int,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = mouse_scroll_command(delta)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+    async def set_volume(
+        self,
+        *,
+        direction: str,
+        session_id: str,
+        user_id: str,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        command = volume_key_powershell(direction)
+        return await self._run_windows_control_command(
+            command=command,
+            session_key=session_key or session_id,
+            session_id=session_id,
+            user_id=user_id,
+        )
+
     def redact_tool_result(self, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "exec_shell" and payload.get("host"):
             return {
@@ -843,6 +1227,15 @@ class SystemAccessManager:
                 "line_count": result.get("line_count", len(content.splitlines())),
                 "audit_id": result.get("audit_id"),
             }
+        if tool_name == "read_host_document":
+            content = str(result.get("content", ""))
+            return {
+                "path": result.get("path"),
+                "file_format": result.get("file_format"),
+                "bytes_read": result.get("bytes_read", len(content.encode("utf-8"))),
+                "line_count": result.get("line_count", len(content.splitlines())),
+                "audit_id": result.get("audit_id"),
+            }
         if tool_name in {"write_host_file", "copy_host_file", "move_host_file", "delete_host_file"}:
             return {key: value for key, value in result.items() if key != "content"}
         if tool_name == "list_host_dir":
@@ -851,11 +1244,116 @@ class SystemAccessManager:
         if tool_name == "search_host_files":
             matches = result.get("matches", [])
             return {"root": result.get("root"), "match_count": len(matches), "audit_id": result.get("audit_id")}
+        if tool_name == "get_windows_clipboard":
+            text = str(result.get("text", ""))
+            return {"text_preview": text[:80], "text_length": len(text), "audit_id": result.get("audit_id")}
+        if tool_name == "set_windows_clipboard":
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+            }
+        if tool_name == "list_windows_processes":
+            processes = result.get("processes", [])
+            return {"process_count": len(processes), "audit_id": result.get("audit_id")}
+        if tool_name == "list_windows":
+            windows = result.get("windows", [])
+            return {"window_count": len(windows), "audit_id": result.get("audit_id")}
+        if tool_name == "get_windows_state":
+            return {
+                "active_window": result.get("active_window"),
+                "process_count": len(result.get("processes", [])),
+                "window_count": len(result.get("windows", [])),
+                "clipboard_preview": str(result.get("clipboard", ""))[:80],
+                "audit_id": result.get("audit_id"),
+            }
+        if tool_name in {"focus_windows_process", "terminate_windows_process"}:
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+            }
+        if tool_name in {"move_windows_window", "set_windows_window_state"}:
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+            }
+        if tool_name == "send_windows_keys":
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+                "keys_length": len(str(payload.get("keys", ""))),
+            }
+        if tool_name == "type_windows_text":
+            text = str(payload.get("text", ""))
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+                "text_length": len(text),
+            }
+        if tool_name in {"click_windows_point", "move_windows_pointer", "scroll_windows_pointer"}:
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+            }
+        if tool_name == "set_windows_volume":
+            return {
+                "status": result.get("status", "completed"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+            }
         return result
 
     def _ensure_enabled(self) -> None:
         if not self.config.system_access.enabled:
             raise RuntimeError("System access is disabled in config.toml.")
+
+    async def _run_windows_control_command(
+        self,
+        *,
+        command: str,
+        session_key: str,
+        session_id: str,
+        user_id: str,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        result = await self.run_host_command(
+            command=command,
+            session_key=session_key,
+            session_id=session_id,
+            user_id=user_id,
+            timeout=timeout,
+        )
+        stdout = str(result.get("stdout", "")).strip()
+        if not stdout:
+            return result
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            return result
+        if not isinstance(parsed, dict):
+            return result
+        merged = {**result, **parsed}
+        merged.setdefault("status", result.get("status"))
+        return merged
 
     async def _record_blocked_action(
         self,

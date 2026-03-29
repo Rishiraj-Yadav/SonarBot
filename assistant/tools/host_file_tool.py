@@ -15,6 +15,13 @@ def build_host_file_tools(system_access_manager) -> list[ToolDefinition]:
             user_id=str(payload.get("user_id", "default")),
         )
 
+    async def read_host_document(payload: dict[str, Any]) -> dict[str, Any]:
+        return await system_access_manager.read_host_document(
+            path=str(payload["path"]),
+            session_id=str(payload.get("session_id", "host-session")),
+            user_id=str(payload.get("user_id", "default")),
+        )
+
     async def write_host_file(payload: dict[str, Any]) -> dict[str, Any]:
         return await system_access_manager.write_host_file(
             path=str(payload["path"]),
@@ -93,6 +100,14 @@ def build_host_file_tools(system_access_manager) -> list[ToolDefinition]:
             handler=read_host_file,
             persistence_policy="redacted",
             redactor=_redact("read_host_file"),
+        ),
+        ToolDefinition(
+            name="read_host_document",
+            description="Read and extract text from a host document such as .txt, .md, .pdf, .docx, or .pptx.",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            handler=read_host_document,
+            persistence_policy="redacted",
+            redactor=_redact("read_host_document"),
         ),
         ToolDefinition(
             name="write_host_file",

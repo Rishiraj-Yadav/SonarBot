@@ -15,6 +15,7 @@ from assistant.tools.oauth_tool import build_oauth_tools
 from assistant.tools.pdf_tool import build_pdf_tools
 from assistant.tools.registry import ToolRegistry
 from assistant.tools.search_tool import build_search_tools
+from assistant.tools.system_control_tool import build_windows_system_control_tools
 
 
 def create_default_tool_registry(
@@ -46,6 +47,8 @@ def create_default_tool_registry(
         for tool in build_host_file_tools(system_access_manager):
             registry.register(tool)
         registry.register(build_windows_brightness_tool(system_access_manager))
+        for tool in build_windows_system_control_tools(system_access_manager):
+            registry.register(tool)
     if memory_manager is not None:
         for tool in build_memory_tools(memory_manager):
             registry.register(tool)
