@@ -49,6 +49,7 @@ type BrowserState = {
     selector?: string;
     target?: string;
   } | null;
+  pending_vision_click?: BrowserVisionTarget | null;
 };
 
 type BrowserWorkflow = {
@@ -64,6 +65,26 @@ type BrowserScreenshot = {
   url?: string;
   title?: string;
   mode?: string;
+};
+
+type BrowserVisionTarget = {
+  x?: number;
+  y?: number;
+  confidence?: number;
+  label?: string;
+  reason?: string;
+  screenshot_path?: string;
+  image_data_url?: string;
+  image_width?: number;
+  image_height?: number;
+  requires_confirmation?: boolean;
+  clicked?: boolean;
+  bbox?: {
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+  } | null;
 };
 
 function shortTime(value: string) {
@@ -85,6 +106,15 @@ export function BrowserPanel() {
   const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
   const [screenshot, setScreenshot] = useState("");
   const [workflow, setWorkflow] = useState<BrowserWorkflow | null>(null);
+  const [visionTarget, setVisionTarget] = useState<BrowserVisionTarget | null>(null);
+  const [imageMetrics, setImageMetrics] = useState({
+    naturalWidth: 0,
+    naturalHeight: 0,
+    displayWidth: 0,
+    displayHeight: 0,
+    offsetX: 0,
+    offsetY: 0,
+  });
   const screenshotRef = useRef<HTMLImageElement | null>(null);
   const loadInFlightRef = useRef(false);
   const loadAbortRef = useRef<AbortController | null>(null);
@@ -108,8 +138,38 @@ export function BrowserPanel() {
     setLogs(logsData.logs ?? []);
     setDownloads(downloadsData.downloads ?? []);
     setProfiles(profilesData.profiles ?? []);
+    setVisionTarget((stateData.state?.pending_vision_click as BrowserVisionTarget | null) ?? null);
     if (screenshotData.screenshot?.image_data_url) {
       setScreenshot(screenshotData.screenshot.image_data_url);
+    }
+  };
+
+  const computeImageMetrics = () => {
+    const element = screenshotRef.current;
+    if (!element) {
+      return null;
+    }
+    const bounds = element.getBoundingClientRect();
+    if (!bounds.width || !bounds.height || !element.naturalWidth || !element.naturalHeight) {
+      return null;
+    }
+    const scale = Math.min(bounds.width / element.naturalWidth, bounds.height / element.naturalHeight);
+    const displayWidth = element.naturalWidth * scale;
+    const displayHeight = element.naturalHeight * scale;
+    return {
+      naturalWidth: element.naturalWidth,
+      naturalHeight: element.naturalHeight,
+      displayWidth,
+      displayHeight,
+      offsetX: (bounds.width - displayWidth) / 2,
+      offsetY: (bounds.height - displayHeight) / 2,
+    };
+  };
+
+  const syncImageMetrics = () => {
+    const metrics = computeImageMetrics();
+    if (metrics) {
+      setImageMetrics(metrics);
     }
   };
 
@@ -119,11 +179,22 @@ export function BrowserPanel() {
       return;
     }
     const bounds = element.getBoundingClientRect();
-    if (!bounds.width || !bounds.height || !element.naturalWidth || !element.naturalHeight) {
+    const metrics = computeImageMetrics();
+    if (!bounds.width || !bounds.height || !metrics) {
       return;
     }
-    const x = Math.round(((event.clientX - bounds.left) / bounds.width) * element.naturalWidth);
-    const y = Math.round(((event.clientY - bounds.top) / bounds.height) * element.naturalHeight);
+    const localX = event.clientX - bounds.left - metrics.offsetX;
+    const localY = event.clientY - bounds.top - metrics.offsetY;
+    if (
+      localX < 0 ||
+      localY < 0 ||
+      localX > metrics.displayWidth ||
+      localY > metrics.displayHeight
+    ) {
+      return;
+    }
+    const x = Math.round((localX / metrics.displayWidth) * metrics.naturalWidth);
+    const y = Math.round((localY / metrics.displayHeight) * metrics.naturalHeight);
     try {
       const response = await fetch("http://localhost:8765/webchat/browser/click", {
         method: "POST",
@@ -170,11 +241,12 @@ export function BrowserPanel() {
       }
     };
 
-    const onBrowserState = (event: Event) => {
+      const onBrowserState = (event: Event) => {
       const detail = (event as CustomEvent<BrowserState>).detail;
       if (detail) {
         setState(detail);
         setTabs(detail.tabs ?? []);
+        setVisionTarget((detail.pending_vision_click as BrowserVisionTarget | null) ?? null);
       }
       void load();
     };
@@ -202,6 +274,16 @@ export function BrowserPanel() {
       }
     };
 
+    const onVisionTarget = (event: Event) => {
+      const detail = (event as CustomEvent<BrowserVisionTarget>).detail;
+      if (detail) {
+        setVisionTarget(detail);
+        if (detail.image_data_url) {
+          setScreenshot(detail.image_data_url);
+        }
+      }
+    };
+
     const onSessionExpired = () => {
       void load();
     };
@@ -214,10 +296,12 @@ export function BrowserPanel() {
     };
 
     void load();
+    window.addEventListener("resize", syncImageMetrics);
     window.addEventListener("sonarbot:browser.state", onBrowserState);
     window.addEventListener("sonarbot:browser.log", onBrowserLog);
     window.addEventListener("sonarbot:browser.download", onBrowserDownload);
     window.addEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
+    window.addEventListener("sonarbot:browser.vision_target", onVisionTarget);
     window.addEventListener("sonarbot:browser.session_expired", onSessionExpired);
     window.addEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
     window.addEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
@@ -229,10 +313,12 @@ export function BrowserPanel() {
       mounted = false;
       loadAbortRef.current?.abort();
       window.clearInterval(timer);
+      window.removeEventListener("resize", syncImageMetrics);
       window.removeEventListener("sonarbot:browser.state", onBrowserState);
       window.removeEventListener("sonarbot:browser.log", onBrowserLog);
       window.removeEventListener("sonarbot:browser.download", onBrowserDownload);
       window.removeEventListener("sonarbot:browser.screenshot", onBrowserScreenshot);
+      window.removeEventListener("sonarbot:browser.vision_target", onVisionTarget);
       window.removeEventListener("sonarbot:browser.session_expired", onSessionExpired);
       window.removeEventListener("sonarbot:browser.workflow.started", onWorkflowUpdate);
       window.removeEventListener("sonarbot:browser.workflow.step", onWorkflowUpdate);
@@ -297,18 +383,56 @@ export function BrowserPanel() {
           </div>
           <div className="overflow-hidden rounded-[1.35rem] border border-line/80 bg-slate-950">
             {screenshot ? (
-              <img
-                ref={screenshotRef}
-                src={screenshot}
-                alt="Live browser"
-                className="h-64 w-full cursor-crosshair object-cover"
-                onClick={handleScreenshotClick}
-              />
+              <div className="relative flex h-64 items-center justify-center overflow-hidden">
+                <img
+                  ref={screenshotRef}
+                  src={screenshot}
+                  alt="Live browser"
+                  className="h-64 w-full cursor-crosshair object-contain"
+                  onClick={handleScreenshotClick}
+                  onLoad={syncImageMetrics}
+                />
+                {visionTarget && imageMetrics.displayWidth > 0 ? (
+                  <div
+                    className="pointer-events-none absolute"
+                    style={{
+                      left: `${imageMetrics.offsetX}px`,
+                      top: `${imageMetrics.offsetY}px`,
+                      width: `${imageMetrics.displayWidth}px`,
+                      height: `${imageMetrics.displayHeight}px`,
+                    }}
+                  >
+                    <div
+                      className="absolute rounded-xl border-2 border-amber-300 shadow-[0_0_0_9999px_rgba(15,23,42,0.18)]"
+                      style={{
+                        left: `${(((visionTarget.bbox?.left ?? visionTarget.x ?? 0) as number) / imageMetrics.naturalWidth) * 100}%`,
+                        top: `${(((visionTarget.bbox?.top ?? visionTarget.y ?? 0) as number) / imageMetrics.naturalHeight) * 100}%`,
+                        width: `${(((visionTarget.bbox?.width ?? 28) as number) / imageMetrics.naturalWidth) * 100}%`,
+                        height: `${(((visionTarget.bbox?.height ?? 28) as number) / imageMetrics.naturalHeight) * 100}%`,
+                      }}
+                    />
+                    <div
+                      className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white bg-amber-300 shadow-lg"
+                      style={{
+                        left: `${(((visionTarget.x ?? 0) as number) / imageMetrics.naturalWidth) * 100}%`,
+                        top: `${(((visionTarget.y ?? 0) as number) / imageMetrics.naturalHeight) * 100}%`,
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </div>
             ) : (
               <div className="flex h-64 items-center justify-center text-sm text-slate-300">No live screenshot yet.</div>
             )}
           </div>
         </div>
+        {visionTarget ? (
+          <div className="mt-3 rounded-[1.15rem] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            Vision target: {visionTarget.label || "target"}
+            {typeof visionTarget.confidence === "number" ? ` (${visionTarget.confidence.toFixed(2)})` : ""}
+            {visionTarget.requires_confirmation ? ' — waiting for "confirm" or "cancel".' : " — clicked with vision fallback."}
+          </div>
+        ) : null}
       </section>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(320px,1.05fr)]">
