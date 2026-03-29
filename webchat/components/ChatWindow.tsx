@@ -15,7 +15,21 @@ type HistoryResponse = {
   messages: ChatMessage[];
 };
 
+// Uses native backend system microphone
+
 const deviceKey = "sonarbot-webchat-device-id";
+
+function generateId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
 
 function getDeviceId() {
   if (typeof window === "undefined") {
@@ -25,7 +39,7 @@ function getDeviceId() {
   if (existing) {
     return existing;
   }
-  const created = crypto.randomUUID();
+  const created = generateId();
   window.localStorage.setItem(deviceKey, created);
   document.cookie = `sonarbot_webchat=${created}; path=/`;
   return created;
@@ -35,11 +49,20 @@ export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [socketReady, setSocketReady] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [speakReplies, setSpeakReplies] = useState(true);
+  const [micPanelOpen, setMicPanelOpen] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  // Removed recognitionRef
   const activeRequestIdRef = useRef<string | null>(null);
   const queuedRequestIdsRef = useRef<string[]>([]);
   const requestReplyMapRef = useRef<Map<string, string>>(new Map());
+  const replyContentRef = useRef<Map<string, string>>(new Map());
   const ignoredInlineChunksRef = useRef<string[]>([]);
+  const latestTranscriptRef = useRef("");
+  const messagesRef = useRef<ChatMessage[]>([]);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const deviceId = useMemo(() => getDeviceId(), []);
   const quickPrompts = [
@@ -56,6 +79,118 @@ export function ChatWindow() {
     }
     transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    // Always supported via the backend python process
+    setSpeechSupported(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !speakReplies) {
+      return;
+    }
+    return () => {
+      window.speechSynthesis.cancel();
+    };
+  }, [speakReplies]);
+
+  function sendMessage(message: string) {
+    const trimmed = message.trim();
+    if (!trimmed || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (typeof window !== "undefined" && speakReplies) {
+      window.speechSynthesis.cancel();
+    }
+    const requestId = generateId();
+    const replyId = generateId();
+    requestReplyMapRef.current.set(requestId, replyId);
+    replyContentRef.current.set(replyId, "");
+    if (activeRequestIdRef.current === null) {
+      activeRequestIdRef.current = requestId;
+    } else {
+      queuedRequestIdsRef.current.push(requestId);
+    }
+    setMessages((current) => [
+      ...current,
+      { id: requestId, role: "user", content: trimmed },
+      { id: replyId, role: "assistant", content: "Thinking..." },
+    ]);
+    socketRef.current.send(
+      JSON.stringify({
+        type: "req",
+        id: requestId,
+        method: "agent.send",
+        params: { message: trimmed },
+      }),
+    );
+    setInput("");
+  }
+
+  function speakMessage(text: string) {
+    if (typeof window === "undefined" || !speakReplies || !text.trim()) {
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(text.trim());
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function toggleListening() {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      alert("Not connected to the assistant backend.");
+      return;
+    }
+    
+    if (isListening) {
+      setIsListening(false);
+      setMicPanelOpen(false);
+      return;
+    }
+    
+    setIsListening(true);
+    setMicPanelOpen(true);
+    setLiveTranscript("Establishing secure backend mic link...");
+    
+    const requestId = generateId();
+    const replyId = generateId();
+    requestReplyMapRef.current.set(requestId, replyId);
+    replyContentRef.current.set(replyId, "");
+    
+    if (activeRequestIdRef.current === null) {
+      activeRequestIdRef.current = requestId;
+    } else {
+      queuedRequestIdsRef.current.push(requestId);
+    }
+    
+    setMessages((current) => [
+      ...current,
+      { id: requestId + "-user", role: "user", content: "(Listening natively...)" },
+      { id: replyId, role: "assistant", content: "Thinking..." },
+    ]);
+    
+    socketRef.current.send(
+      JSON.stringify({
+        type: "req",
+        id: requestId,
+        method: "agent.listen",
+        params: { session_key: "main" },
+      }),
+    );
+  }
+
+  function closeMicPanel() {
+    setIsListening(false);
+    setMicPanelOpen(false);
+    setLiveTranscript("");
+    latestTranscriptRef.current = input.trim();
+  }
 
   useEffect(() => {
     let disposed = false;
@@ -96,6 +231,10 @@ export function ChatWindow() {
           if (!requestId) {
             return;
           }
+          const replyId = requestReplyMapRef.current.get(requestId);
+          if (replyId) {
+            replyContentRef.current.delete(replyId);
+          }
           requestReplyMapRef.current.delete(requestId);
           if (activeRequestIdRef.current === requestId) {
             activeRequestIdRef.current = queuedRequestIdsRef.current.shift() ?? null;
@@ -133,6 +272,9 @@ export function ChatWindow() {
           if (commandResponse) {
             ignoredInlineChunksRef.current.push(commandResponse);
             const replyId = replyIdForRequest(requestId);
+            if (replyId) {
+              replyContentRef.current.set(replyId, commandResponse);
+            }
             setMessages((current) => {
               const placeholder = [...current]
                 .reverse()
@@ -166,6 +308,9 @@ export function ChatWindow() {
           if (!replyId) {
             return;
           }
+          const previousContent = replyContentRef.current.get(replyId) ?? "";
+          const nextContent = previousContent === "" || previousContent === "Thinking..." ? text : previousContent + text;
+          replyContentRef.current.set(replyId, nextContent);
           setMessages((current) => {
             const existing = current.find((item) => item.id === replyId);
             if (!existing) {
@@ -181,6 +326,24 @@ export function ChatWindow() {
               item.id === replyId ? { ...item, content: existingContent + text } : item,
             );
           });
+        }
+        if (frame.type === "event" && frame.event === "agent.mic_active") {
+          setLiveTranscript("Listening via Python backend...");
+        }
+        if (frame.type === "event" && frame.event === "agent.mic_inactive") {
+          setIsListening(false);
+          setMicPanelOpen(false);
+          setLiveTranscript("");
+          const text = String((frame.payload as Record<string, unknown> | undefined)?.text ?? "");
+          if (text) {
+            setMessages((prev) => prev.map(m => m.content === "(Listening natively...)" ? { ...m, content: text } : m));
+          } else {
+            setMessages((prev) => prev.filter(m => m.content !== "(Listening natively...)" && m.content !== "Thinking..."));
+            const lastId = activeRequestIdRef.current;
+            if (lastId) {
+              cleanupRequest(lastId);
+            }
+          }
         }
         if (frame.type === "event" && frame.event === "notification.created") {
           if (typeof window !== "undefined") {
@@ -201,10 +364,26 @@ export function ChatWindow() {
           }
         }
         if (frame.type === "event" && (frame.event === "host_approval.created" || frame.event === "host_approval.updated")) {
+          const payload = (frame.payload as Record<string, unknown> | undefined) ?? {};
+          if (frame.event === "host_approval.created") {
+            const approvalId = String(payload.approval_id ?? "");
+            const targetSummary = String(payload.target_summary ?? "Unknown host action");
+            const category = String(payload.category ?? "ask_once");
+            if (approvalId) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: approvalId,
+                  role: "system",
+                  content: `Host Action Required: The assistant wants to run a '${category}' system command ("${targetSummary}").\n\nPlease go to "Operations -> Host access" in the navigation menu to approve or deny this request.`,
+                },
+              ]);
+            }
+          }
           if (typeof window !== "undefined") {
             window.dispatchEvent(
               new CustomEvent("sonarbot:host-approval", {
-                detail: (frame.payload as Record<string, unknown> | undefined) ?? {},
+                detail: payload,
               }),
             );
           }
@@ -212,13 +391,23 @@ export function ChatWindow() {
         if (frame.type === "event" && frame.event === "agent.done") {
           const requestId = activeRequestIdRef.current;
           const replyId = currentReplyId();
+          const finalContent = replyId ? (replyContentRef.current.get(replyId) ?? "") : "";
+          const resolvedContent =
+            finalContent.trim() && finalContent !== "Thinking..." ? finalContent : "(no response)";
           setMessages((current) =>
-            current.map((item) =>
-              item.id === replyId && item.content.trim() === ""
-                ? { ...item, content: "(no response)" }
-                : item,
-            ),
+            current.map((item) => {
+              if (item.id !== replyId) {
+                return item;
+              }
+              if (item.content.trim() === "" || item.content === "Thinking...") {
+                return { ...item, content: resolvedContent };
+              }
+              return item;
+            }),
           );
+          if (replyId) {
+            speakMessage(resolvedContent);
+          }
           cleanupRequest(requestId);
         }
       };
@@ -236,31 +425,7 @@ export function ChatWindow() {
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!input.trim() || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      return;
-    }
-    const requestId = crypto.randomUUID();
-    const replyId = crypto.randomUUID();
-    requestReplyMapRef.current.set(requestId, replyId);
-    if (activeRequestIdRef.current === null) {
-      activeRequestIdRef.current = requestId;
-    } else {
-      queuedRequestIdsRef.current.push(requestId);
-    }
-    setMessages((current) => [
-      ...current,
-      { id: requestId, role: "user", content: input.trim() },
-      { id: replyId, role: "assistant", content: "Thinking..." },
-    ]);
-    socketRef.current.send(
-      JSON.stringify({
-        type: "req",
-        id: requestId,
-        method: "agent.send",
-        params: { message: input.trim() },
-      }),
-    );
-    setInput("");
+    sendMessage(input);
   }
 
   return (
@@ -289,7 +454,7 @@ export function ChatWindow() {
           </div>
           <div className="rounded-[1.2rem] bg-sand px-4 py-3 text-sm text-slate-700">
             <div className="text-[11px] uppercase tracking-[0.2em] text-accent">Input mode</div>
-            <div className="mt-1">Slash + natural</div>
+            <div className="mt-1">{speechSupported ? "Voice + text" : "Slash + natural"}</div>
           </div>
         </div>
       </div>
@@ -323,7 +488,40 @@ export function ChatWindow() {
           >
             Send
           </button>
+          {speechSupported ? (
+            <button
+              className={`rounded-[1.25rem] px-6 py-3 text-sm font-medium transition ${
+                isListening
+                  ? "bg-rose-600 text-white hover:bg-rose-700"
+                  : "border border-line/70 bg-white text-slate-700 hover:border-accent hover:text-accent"
+              }`}
+              type="button"
+              onClick={toggleListening}
+            >
+              {isListening ? "Stop mic" : "Use mic"}
+            </button>
+          ) : null}
         </form>
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={speakReplies}
+              onChange={(event) => {
+                setSpeakReplies(event.target.checked);
+                if (!event.target.checked && typeof window !== "undefined") {
+                  window.speechSynthesis.cancel();
+                }
+              }}
+            />
+            Speak replies aloud
+          </label>
+          {speechSupported ? (
+            <span>{isListening ? "Listening for your next message..." : "Voice input ready."}</span>
+          ) : (
+            <span>Voice input is not supported in this browser.</span>
+          )}
+        </div>
         <div className="mt-4 flex flex-wrap gap-2">
           {quickPrompts.map((prompt) => (
             <button
@@ -337,6 +535,53 @@ export function ChatWindow() {
           ))}
         </div>
       </div>
+      {micPanelOpen ? (
+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
+          <div
+            className="pointer-events-auto w-auto min-w-56 rounded-full border border-white/80 bg-white/92 px-5 py-3 shadow-2xl backdrop-blur-xl"
+          >
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={toggleListening}
+                className={`relative flex h-12 w-12 items-center justify-center rounded-full text-white shadow-lg transition ${
+                  isListening ? "bg-rose-600 hover:bg-rose-700" : "bg-accent hover:bg-ink"
+                }`}
+              >
+                {isListening ? (
+                  <>
+                    <span className="voice-ring absolute inset-0 rounded-full border border-rose-300/70" />
+                    <span className="voice-ring voice-ring-delay absolute inset-0 rounded-full border border-rose-200/60" />
+                  </>
+                ) : null}
+                <span className="voice-orb-shadow absolute inset-1 rounded-full bg-white/12 blur-md" />
+                <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-white/16 text-[10px] font-semibold tracking-[0.16em]">
+                  {isListening ? "ON" : "MIC"}
+                </span>
+              </button>
+              <div className="flex flex-col items-center gap-2">
+                <div className="voice-bars" aria-hidden="true">
+                  <span className={isListening ? "voice-bar active" : "voice-bar"} />
+                  <span className={isListening ? "voice-bar active delay-1" : "voice-bar"} />
+                  <span className={isListening ? "voice-bar active delay-2" : "voice-bar"} />
+                  <span className={isListening ? "voice-bar active delay-3" : "voice-bar"} />
+                  <span className={isListening ? "voice-bar active delay-4" : "voice-bar"} />
+                </div>
+                <p className="max-w-40 text-center text-xs text-slate-500">
+                  {isListening ? "Listening. Stop manually when you are done." : "Mic paused."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeMicPanel}
+                className="rounded-full border border-line/70 px-4 py-2 text-xs text-slate-600 transition hover:border-accent hover:text-accent"
+              >
+                Hide
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

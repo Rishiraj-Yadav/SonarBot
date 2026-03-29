@@ -36,7 +36,7 @@ class DummyConnectionManager:
 class DummySessionManager:
     def __init__(self) -> None:
         self.messages = []
-        self.session = type("Session", (), {"session_key": "webchat_main"})()
+        self.session = type("Session", (), {"session_key": "webchat_main", "session_id": "sess-dummy"})()
 
     async def load_or_create(self, session_key: str):
         self.session.session_key = session_key
@@ -136,7 +136,13 @@ class DummyToolRegistry:
             "browser_login",
         }:
             return True
-        if self.host_tools_enabled and tool_name in {"list_host_dir", "search_host_files", "exec_shell", "write_host_file"}:
+        if self.host_tools_enabled and tool_name in {
+            "list_host_dir",
+            "search_host_files",
+            "exec_shell",
+            "write_host_file",
+            "set_windows_brightness",
+        }:
             return True
         return self.has_llm_task and tool_name == "llm_task"
 
@@ -233,6 +239,18 @@ class DummyToolRegistry:
                 "approval_mode": "session_cache",
                 "approval_category": "ask_once",
                 "audit_id": "audit-1",
+                "host": True,
+            }
+        if tool_name == "set_windows_brightness":
+            return {
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+                "brightness_percent": int(payload["percent"]),
+                "status": "completed",
+                "approval_mode": "auto",
+                "approval_category": "auto_allow",
+                "audit_id": "audit-bright",
                 "host": True,
             }
         if tool_name == "write_host_file":
@@ -350,6 +368,18 @@ class DummySystemAccessManager:
     def __init__(self, approvals: list[dict[str, object]] | None = None) -> None:
         self.approvals = approvals or []
         self.decisions: list[tuple[str, str]] = []
+        self.default_apps_calls: list[dict[str, object]] = []
+
+    async def open_ms_settings_default_apps(self, **kwargs: object) -> dict[str, object]:
+        self.default_apps_calls.append(dict(kwargs))
+        return {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "status": "completed",
+            "host": True,
+            "audit_id": "audit-default-apps",
+        }
 
     async def list_approvals(self, _user_id: str, limit: int = 20) -> list[dict[str, object]]:
         return list(self.approvals)[:limit]
@@ -541,6 +571,78 @@ async def test_router_shortcuts_win_before_skill_activation(app_config) -> None:
     assert response.ok is True
     assert response.payload["queued"] is False
     assert tool_registry.calls[0][0] == "gmail_latest_email"
+
+
+@pytest.mark.asyncio
+async def test_router_default_browser_shortcut_opens_settings(app_config) -> None:
+    app_config.system_access.enabled = True
+    sam = DummySystemAccessManager(approvals=[])
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=False),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        system_access_manager=sam,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-browser-1",
+        request_id="req-browser-1",
+        session_key="webchat_main",
+        message="can you change my default browser to brave",
+        metadata={"trace_id": "trace-browser-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert sam.default_apps_calls
+    assert "Brave" in response.payload["command_response"]
+    assert "Default apps" in response.payload["command_response"]
+
+
+@pytest.mark.asyncio
+async def test_router_brightness_shortcut_invokes_tool(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-bright-1",
+        request_id="req-bright-1",
+        session_key="webchat_main",
+        message="can you decrease the brightness to 10 percent",
+        metadata={"trace_id": "trace-bright-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert tool_registry.calls[0][0] == "set_windows_brightness"
+    assert tool_registry.calls[0][1]["percent"] == 10
+    assert "10%" in response.payload["command_response"]
 
 
 @pytest.mark.asyncio

@@ -40,16 +40,19 @@ def build_exec_tool(
         if host_mode:
             if system_access_manager is None:
                 return {"stdout": "", "stderr": "Host system access is not configured.", "exit_code": 1, "host": True}
-            return await system_access_manager.run_host_command(
-                command=command,
-                session_key=session_key,
-                session_id=str(payload.get("session_id", session_key)),
-                user_id=str(payload.get("user_id", "default")),
-                connection_id=str(payload.get("connection_id", "")),
-                channel_name=str(payload.get("channel_name", "")),
-                timeout=timeout,
-                workdir=str(payload.get("workdir", "")).strip() or None,
-            )
+            try:
+                return await system_access_manager.run_host_command(
+                    command=command,
+                    session_key=session_key,
+                    session_id=str(payload.get("session_id", session_key)),
+                    user_id=str(payload.get("user_id", "default")),
+                    connection_id=str(payload.get("connection_id", "")),
+                    channel_name=str(payload.get("channel_name", "")),
+                    timeout=timeout,
+                    workdir=str(payload.get("workdir", "")).strip() or None,
+                )
+            except RuntimeError as exc:
+                return {"stdout": "", "stderr": str(exc), "exit_code": 1, "host": True}
 
         process = await asyncio.create_subprocess_shell(
             command,

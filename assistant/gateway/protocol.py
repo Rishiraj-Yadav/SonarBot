@@ -45,3 +45,6 @@ class EventFrame(BaseModel):
 class AgentSendParams(BaseModel):
     message: str
     session_key: str = "main"
+    
+class AgentListenParams(BaseModel):
+    session_key: str = "main"

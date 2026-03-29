@@ -607,7 +607,11 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                     response = ResponseFrame(id=payload.get("id", "unknown"), ok=False, error=f"Malformed frame: {exc}")
                     await services.connection_manager.send_response(connection.connection_id, response)
                     continue
-                response = await services.router.handle_request(connection.connection_id, request)
+                try:
+                    response = await services.router.handle_request(connection.connection_id, request)
+                except Exception as exc:
+                    services.logger.exception("Unhandled error processing webchat request:")
+                    response = ResponseFrame(id=payload.get("id", "unknown"), ok=False, error=f"Internal Server Error: {exc}")
                 if not response.ok:
                     response.error = sanitize_error_text(response.error or "Request rejected.")
                 await services.connection_manager.send_response(connection.connection_id, response)
@@ -631,7 +635,12 @@ async def _process_websocket_request(
     except Exception as exc:
         request_id = payload.get("id", "unknown") if isinstance(payload, dict) else "unknown"
         return ResponseFrame(id=request_id, ok=False, error=f"Malformed frame: {exc}")
-    return await services.router.handle_request(connection_id, request)
+    try:
+        return await services.router.handle_request(connection_id, request)
+    except Exception as exc:
+        services.logger.exception("Unhandled error processing CLI request:")
+        request_id = payload.get("id", "unknown") if isinstance(payload, dict) else "unknown"
+        return ResponseFrame(id=request_id, ok=False, error=f"Internal Server Error: {exc}")
 
 
 def _build_channels(

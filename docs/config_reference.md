@@ -140,7 +140,7 @@ cron_jobs = [{ schedule = "0 8 * * *", message = "Good morning briefing" }]
 
 ### `[system_access]`
 
-- `enabled`: boolean, default `false`; enables host-system file and shell access
+- `enabled`: boolean, default `false` in code; `config.toml.example` sets `true`. Environment override: `SYSTEM_ACCESS_ENABLED` (`true` / `false`). When enabled, the agent may use host file tools and `exec_shell` with `host=true` subject to path rules and approvals.
 - `home_root`: path, default `~`; legacy fallback root used when no `path_rules` are configured
 - `shell`: string, default `powershell`
 - `approval_timeout_seconds`: integer, default `300`

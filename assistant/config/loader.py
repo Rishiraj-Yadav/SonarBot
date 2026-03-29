@@ -28,6 +28,7 @@ ENV_MAPPING: dict[str, tuple[str, ...]] = {
     "TELEGRAM_ALLOWED_USER_IDS": ("telegram", "allowed_user_ids"),
     "BRAVE_API_KEY": ("tools", "brave_api_key"),
     "SANDBOX_ENABLED": ("sandbox", "enabled"),
+    "SYSTEM_ACCESS_ENABLED": ("system_access", "enabled"),
     "GOOGLE_CLIENT_ID": ("oauth", "google", "client_id"),
     "GOOGLE_CLIENT_SECRET": ("oauth", "google", "client_secret"),
     "GITHUB_CLIENT_ID": ("oauth", "github", "client_id"),

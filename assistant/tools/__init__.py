@@ -2,6 +2,7 @@
 
 from assistant.tools.acp_tool import build_acp_tools
 from assistant.tools.agent_send_tool import build_agent_send_tool
+from assistant.tools.brightness_tool import build_windows_brightness_tool
 from assistant.tools.browser_tool import build_browser_tools
 from assistant.tools.exec_tool import build_exec_tool
 from assistant.tools.file_tool import build_file_tools
@@ -43,6 +44,7 @@ def create_default_tool_registry(
     if system_access_manager is not None:
         for tool in build_host_file_tools(system_access_manager):
             registry.register(tool)
+        registry.register(build_windows_brightness_tool(system_access_manager))
     if memory_manager is not None:
         for tool in build_memory_tools(memory_manager):
             registry.register(tool)

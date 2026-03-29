@@ -148,6 +148,118 @@ class SystemAccessManager:
             "audit_id": audit_entry.audit_id,
         }
 
+    async def set_windows_monitor_brightness(
+        self,
+        percent: int,
+        *,
+        session_id: str,
+        user_id: str,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        """Set built-in panel brightness via WMI (no user-controlled shell; percent clamped)."""
+        self._ensure_enabled()
+        pct = max(0, min(100, int(percent)))
+        # CIM instances from Get-CimInstance do not expose .WmiSetBrightness(); use Invoke-CimMethod.
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            "$m = Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightnessMethods | Select-Object -First 1; "
+            "if ($null -eq $m) { throw 'No WmiMonitorBrightnessMethods instance.' }; "
+            f"Invoke-CimMethod -InputObject $m -MethodName WmiSetBrightness -Arguments @{{ Timeout = 1; Brightness = {pct} }}"
+        )
+        started = time.perf_counter()
+        try:
+            result = await self.runtime.exec_command(command, timeout=timeout, workdir=None)
+        except PermissionError as exc:
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool="set_windows_brightness",
+                action_kind="set_windows_brightness",
+                target=f"brightness={pct}",
+                category="deny",
+                approval_mode="blocked",
+                outcome="blocked:outside_policy",
+                details={"stderr": str(exc), "exit_code": 1, "host": True},
+            )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        exit_code = int(result.get("exit_code", 1))
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="set_windows_brightness",
+            action_kind="set_windows_brightness",
+            target=f"brightness={pct}",
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed" if exit_code == 0 else "failed",
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            details={"workdir": result.get("workdir", str(self.runtime.default_workdir))},
+        )
+        await self.audit.append(audit_entry)
+        return {
+            **{k: v for k, v in result.items() if k in ("stdout", "stderr", "exit_code", "workdir")},
+            "host": True,
+            "brightness_percent": pct,
+            "status": audit_entry.outcome,
+            "approval_category": "auto_allow",
+            "approval_mode": "auto",
+            "audit_id": audit_entry.audit_id,
+        }
+
+    async def open_ms_settings_default_apps(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        """Open Windows Settings on Default apps (user can pick default browser)."""
+        self._ensure_enabled()
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            "Start-Process explorer.exe -ArgumentList 'ms-settings:defaultapps'"
+        )
+        started = time.perf_counter()
+        try:
+            result = await self.runtime.exec_command(command, timeout=timeout, workdir=None)
+        except PermissionError as exc:
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool="open_default_apps_settings",
+                action_kind="open_default_apps_settings",
+                target="ms-settings:defaultapps",
+                category="deny",
+                approval_mode="blocked",
+                outcome="blocked:outside_policy",
+                details={"stderr": str(exc), "exit_code": 1, "host": True},
+            )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        exit_code = int(result.get("exit_code", 1))
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="open_default_apps_settings",
+            action_kind="open_default_apps_settings",
+            target="ms-settings:defaultapps",
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed" if exit_code == 0 else "failed",
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            details={"workdir": result.get("workdir", str(self.runtime.default_workdir))},
+        )
+        await self.audit.append(audit_entry)
+        return {
+            **{k: v for k, v in result.items() if k in ("stdout", "stderr", "exit_code", "workdir")},
+            "host": True,
+            "status": audit_entry.outcome,
+            "approval_category": "auto_allow",
+            "approval_mode": "auto",
+            "audit_id": audit_entry.audit_id,
+        }
+
     async def read_host_file(self, *, path: str, session_id: str, user_id: str) -> dict[str, Any]:
         self._ensure_enabled()
         resolved = self.runtime.resolve_host_path(path)
@@ -711,6 +823,17 @@ class SystemAccessManager:
                 "stdout_lines": len(str(result.get("stdout", "")).splitlines()) if result.get("stdout") else 0,
                 "stderr_lines": len(str(result.get("stderr", "")).splitlines()) if result.get("stderr") else 0,
                 "workdir": result.get("workdir"),
+            }
+        if tool_name == "set_windows_brightness":
+            return {
+                "host": True,
+                "status": result.get("status", "completed"),
+                "brightness_percent": result.get("brightness_percent"),
+                "approval_category": result.get("approval_category"),
+                "approval_mode": result.get("approval_mode"),
+                "audit_id": result.get("audit_id"),
+                "exit_code": result.get("exit_code"),
+                "stderr_lines": len(str(result.get("stderr", "")).splitlines()) if result.get("stderr") else 0,
             }
         if tool_name == "read_host_file":
             content = str(result.get("content", ""))

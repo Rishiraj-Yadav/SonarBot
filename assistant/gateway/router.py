@@ -56,6 +56,36 @@ class GatewayRouter:
                 metadata=metadata,
             )
 
+        if request.method == "agent.listen":
+            from assistant.gateway.protocol import AgentListenParams
+            from assistant.utils.mic import listen_to_system_mic
+            
+            params = AgentListenParams.model_validate(request.params)
+            connection = self.connection_manager.get_connection(connection_id)
+            metadata = {
+                "user_id": getattr(connection, "user_id", "") or self.config.users.default_user_id,
+                "channel": getattr(connection, "channel_name", "ws"),
+                "device_id": getattr(connection, "device_id", ""),
+            }
+            
+            # Notify frontend that we are now actively capturing
+            await self.connection_manager.send_event(connection_id, "agent.mic_active", {})
+            
+            message = await listen_to_system_mic(timeout=7)
+            
+            await self.connection_manager.send_event(connection_id, "agent.mic_inactive", {"text": message})
+            
+            if not message:
+                return ResponseFrame(id=request.id, ok=True, payload={"queued": False, "session_key": params.session_key, "error": "No speech detected"})
+                
+            return await self.route_user_message(
+                connection_id=connection_id,
+                request_id=request.id,
+                session_key=params.session_key,
+                message=message,
+                metadata=metadata,
+            )
+
         return ResponseFrame(id=request.id, ok=False, error=f"Unknown method '{request.method}'.")
 
     async def route_user_message(
@@ -951,6 +981,18 @@ class GatewayRouter:
         if cron_shortcut is not None:
             return cron_shortcut
 
+        brightness_shortcut = await self._handle_brightness_shortcut(
+            request_id, session_key, message, lowered, metadata
+        )
+        if brightness_shortcut is not None:
+            return brightness_shortcut
+
+        default_browser_shortcut = await self._handle_default_browser_settings_shortcut(
+            request_id, session_key, message, lowered, metadata
+        )
+        if default_browser_shortcut is not None:
+            return default_browser_shortcut
+
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
@@ -1012,6 +1054,212 @@ class GatewayRouter:
             )
 
         return None
+
+    async def _handle_brightness_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if not self.tool_registry.has("set_windows_brightness"):
+            return None
+        pct = self._parse_brightness_percent_from_message(lowered)
+        if pct is None:
+            return None
+        session = await self.session_manager.load_or_create(session_key)
+        session_id = getattr(session, "session_id", session_key)
+        try:
+            result = await self.tool_registry.dispatch(
+                "set_windows_brightness",
+                {
+                    "percent": pct,
+                    "session_id": session_id,
+                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                },
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_brightness_shortcut_response(result)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    def _parse_brightness_percent_from_message(self, lowered: str) -> int | None:
+        has_topic = "brightness" in lowered or ("screen" in lowered and "dim" in lowered)
+        if not has_topic:
+            return None
+        change_hints = (
+            "set ",
+            "change ",
+            "adjust ",
+            "lower ",
+            "raise ",
+            "decrease ",
+            "increase ",
+            "dim ",
+            "brighten ",
+            "turn down",
+            "turn up",
+            "make ",
+            "put ",
+        )
+        if not any(h in lowered for h in change_hints) and " to " not in lowered:
+            return None
+        patterns = (
+            r"\b(?:to|at)\s+(\d{1,3})\s*(?:percent|%)?\b",
+            r"\bbrightness\s*(?:to|at|=|:)\s*(\d{1,3})\b",
+            r"\b(\d{1,3})\s*%\s*(?:for\s+)?(?:screen\s+)?brightness\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            value = int(match.group(1))
+            if 0 <= value <= 100:
+                return value
+            return None
+        return None
+
+    def _format_brightness_shortcut_response(self, result: dict[str, Any]) -> str:
+        status = str(result.get("status", "completed"))
+        if status.startswith("blocked") or status in {"rejected", "expired"}:
+            return (
+                "I couldn't change brightness because that host action was blocked or timed out. "
+                "Enable system access and check the Host access page for pending approvals."
+            )
+        stderr = str(result.get("stderr", "")).strip()
+        exit_code = int(result.get("exit_code", 1))
+        if exit_code != 0:
+            lowered_err = stderr.lower()
+            if "disabled" in lowered_err:
+                return (
+                    "Brightness control needs host system access. Set system_access.enabled = true "
+                    "(or SYSTEM_ACCESS_ENABLED=true), then restart the gateway."
+                )
+            return f"I couldn't change the brightness: {stderr or 'unknown error'}"
+        pct = result.get("brightness_percent")
+        return f"Set display brightness to {pct}%."
+
+    async def _handle_default_browser_settings_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if not self._looks_like_default_browser_change_request(lowered):
+            return None
+        if self.system_access_manager is None:
+            response_text = (
+                "I can open Windows Default apps for you once host system access is wired up on this gateway."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        if not self.config.system_access.enabled:
+            response_text = (
+                "To open Windows default-app settings from chat, enable host system access "
+                "(system_access.enabled or SYSTEM_ACCESS_ENABLED=true), then restart the gateway."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        session = await self.session_manager.load_or_create(session_key)
+        session_id = getattr(session, "session_id", session_key)
+        user_id = str(metadata.get("user_id", self.config.users.default_user_id))
+        try:
+            result = await self.system_access_manager.open_ms_settings_default_apps(
+                session_id=session_id,
+                user_id=user_id,
+            )
+        except RuntimeError as exc:
+            response_text = str(exc)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        hint = self._extract_preferred_browser_name(lowered)
+        response_text = self._format_open_default_apps_response(result, hint)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    def _looks_like_default_browser_change_request(self, lowered: str) -> bool:
+        if "browser" not in lowered:
+            return False
+        if "default" not in lowered:
+            return False
+        if lowered.lstrip().startswith(("what ", "how ", "why ", "which ", "when ", "who ")):
+            return False
+        return any(
+            phrase in lowered
+            for phrase in (
+                "change ",
+                " set ",
+                "switch ",
+                "make ",
+                "turn ",
+                "use ",
+                "pick ",
+                "choose ",
+                " put ",
+                " as default",
+                "open ",
+                "show ",
+                "launch ",
+            )
+        ) or re.search(r"\bto\s+(brave|chrome|edge|firefox|opera|vivaldi)\b", lowered) is not None
+
+    def _extract_preferred_browser_name(self, lowered: str) -> str | None:
+        known = {
+            "brave": "Brave",
+            "chrome": "Chrome",
+            "edge": "Edge",
+            "firefox": "Firefox",
+            "opera": "Opera",
+            "vivaldi": "Vivaldi",
+        }
+        for key, label in known.items():
+            if re.search(rf"\b{re.escape(key)}\b", lowered):
+                return label
+        return None
+
+    def _format_open_default_apps_response(self, result: dict[str, Any], browser_hint: str | None) -> str:
+        status = str(result.get("status", "completed"))
+        if status.startswith("blocked") or status in {"rejected", "expired"}:
+            return "Could not open Default apps settings (host action blocked). Check Host access for pending approvals."
+        if int(result.get("exit_code", 1)) != 0:
+            err = str(result.get("stderr", "") or result.get("stdout", "")).strip()
+            return f"Could not open Default apps settings: {err or 'unknown error'}"
+        pick = (
+            f" Then under Web browser, choose {browser_hint}."
+            if browser_hint
+            else " Then under Web browser, pick the browser you want."
+        )
+        return (
+            "Opened Settings (Default apps). "
+            f"{pick} "
+            "Windows still needs you to confirm the default; I cannot set it silently."
+        )
 
     async def _handle_natural_language_cron_shortcut(
         self,
