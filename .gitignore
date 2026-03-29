@@ -38,6 +38,10 @@ pip-wheel-metadata/
 # Test and debug outputs
 debug_tmp/
 debug_subagent/
+.pytest_tmp/
+.pytest_tmp2/
+.pytest_tmp3/
+workspace/tmp*/
 *.tmp
 *.temp
 *.bak
@@ -55,6 +59,7 @@ debug_subagent/
 # Local assistant runtime state
 .assistant/
 chroma/
+workspace/browser_state/pending.json
 
 # Generated workspace artifacts
 workspace/inbox/
@@ -62,9 +67,9 @@ workspace/hooks/
 workspace/browser/
 workspace/sandbox/
 workspace/memory/
-workspace/browser/
 workspace/browser_sessions/
 workspace/context_engine/
+workspace/browser/captcha-*.png
 
 
 # WebChat / Node / Next.js
