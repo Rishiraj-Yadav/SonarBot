@@ -69,12 +69,24 @@ class HostApprovalManager:
     async def decide(self, approval_id: str, decision: str) -> dict[str, Any]:
         normalized = "approved" if decision == "approved" else "rejected"
         await self.store.update_approval_status(approval_id, normalized)
-        future = self._pending.get(approval_id)
-        if future is not None and not future.done():
-            future.set_result(normalized)
         approval = await self.store.get_approval(approval_id)
         if approval is None:
             raise KeyError(f"Unknown host approval '{approval_id}'.")
+        if (
+            normalized == "approved"
+            and approval.get("category") == "ask_once"
+            and self.config.system_access.ask_once_session_cache
+        ):
+            self._session_cache.add(
+                (
+                    str(approval.get("user_id", "")),
+                    str(approval.get("session_id", "")),
+                    str(approval.get("category", "")),
+                )
+            )
+        future = self._pending.get(approval_id)
+        if future is not None and not future.done():
+            future.set_result(normalized)
         if self.on_updated is not None:
             await self.on_updated(approval)
         return approval

@@ -12,7 +12,6 @@ class AutomationScheduler:
     async def start(self) -> None:
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore
-            from apscheduler.triggers.cron import CronTrigger  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("APScheduler is not installed.") from exc
 
@@ -29,13 +28,16 @@ class AutomationScheduler:
         for job in await self.automation_engine.list_all_dynamic_cron_jobs():
             if bool(job.get("paused")):
                 continue
+            trigger_type = str(job.get("trigger_type", "cron"))
             self._add_job(
                 job_id=self._dynamic_job_id(str(job["cron_id"])),
-                schedule=str(job["schedule"]),
-                rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+                rule_name=self._dynamic_rule_name(str(job["cron_id"]), trigger_type=trigger_type),
                 message=str(job["message"]),
                 mode=str(job.get("mode", "direct")),
                 user_id=str(job["user_id"]),
+                trigger_type=trigger_type,
+                schedule=str(job.get("schedule", "")),
+                run_at=str(job.get("run_at", "")),
             )
         self.scheduler.start()
 
@@ -57,11 +59,13 @@ class AutomationScheduler:
             return
         self._add_job(
             job_id=self._dynamic_job_id(str(job["cron_id"])),
-            schedule=str(job["schedule"]),
-            rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+            rule_name=self._dynamic_rule_name(str(job["cron_id"]), trigger_type=str(job.get("trigger_type", "cron"))),
             message=str(job["message"]),
             mode=str(job.get("mode", "direct")),
             user_id=str(job["user_id"]),
+            trigger_type=str(job.get("trigger_type", "cron")),
+            schedule=str(job.get("schedule", "")),
+            run_at=str(job.get("run_at", "")),
         )
 
     async def pause_dynamic_job(self, cron_id: str) -> None:
@@ -76,11 +80,13 @@ class AutomationScheduler:
             return
         self._add_job(
             job_id=self._dynamic_job_id(str(job["cron_id"])),
-            schedule=str(job["schedule"]),
-            rule_name=self._dynamic_rule_name(str(job["cron_id"])),
+            rule_name=self._dynamic_rule_name(str(job["cron_id"]), trigger_type=str(job.get("trigger_type", "cron"))),
             message=str(job["message"]),
             mode=str(job.get("mode", "direct")),
             user_id=str(job["user_id"]),
+            trigger_type=str(job.get("trigger_type", "cron")),
+            schedule=str(job.get("schedule", "")),
+            run_at=str(job.get("run_at", "")),
         )
 
     async def remove_dynamic_job(self, cron_id: str) -> None:
@@ -94,15 +100,22 @@ class AutomationScheduler:
         self,
         *,
         job_id: str,
-        schedule: str,
         rule_name: str,
         message: str,
         mode: str,
         user_id: str | None,
+        trigger_type: str = "cron",
+        schedule: str = "",
+        run_at: str = "",
     ) -> None:
-        from apscheduler.triggers.cron import CronTrigger  # type: ignore
+        if trigger_type == "date":
+            from apscheduler.triggers.date import DateTrigger  # type: ignore
 
-        trigger = CronTrigger.from_crontab(schedule)
+            trigger = DateTrigger(run_date=run_at)
+        else:
+            from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+            trigger = CronTrigger.from_crontab(schedule)
         self.scheduler.add_job(
             self.enqueue_cron_message,
             trigger=trigger,
@@ -114,5 +127,7 @@ class AutomationScheduler:
     def _dynamic_job_id(self, cron_id: str) -> str:
         return f"dynamic-cron-{cron_id}"
 
-    def _dynamic_rule_name(self, cron_id: str) -> str:
+    def _dynamic_rule_name(self, cron_id: str, *, trigger_type: str = "cron") -> str:
+        if trigger_type == "date":
+            return f"dynamic-once:{cron_id}"
         return f"dynamic-cron:{cron_id}"

@@ -90,3 +90,16 @@ def test_load_config_accepts_utf8_bom(tmp_path: Path) -> None:
 
     assert config.gateway.token == "from-config"
     assert config.agent.model == "gemini-config"
+
+
+def test_load_config_falls_back_to_local_config_when_home_config_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_config = _minimal_config_toml(tmp_path)
+    monkeypatch.setenv("ASSISTANT_HOME", str(tmp_path / "missing-home"))
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config()
+
+    assert config.gateway.token == "t"
+    assert config.agent.workspace_dir == local_config.parent / "workspace"

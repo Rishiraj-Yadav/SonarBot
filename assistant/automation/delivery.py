@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -24,7 +26,6 @@ class NotificationDispatcher:
         for channel_name in delivery_channels:
             if await self._deliver_to_channel(notification, channel_name):
                 delivered = True
-                break
 
         if delivered:
             notification.status = "delivered"
@@ -75,15 +76,18 @@ class NotificationDispatcher:
         if channel_name == "telegram":
             identity = await self.user_profiles.get_identity(notification.user_id, "telegram")
             if identity is None:
-                await self.store.record_delivery(
-                    notification.notification_id,
-                    "telegram",
-                    notification.user_id,
-                    "failed",
-                    "No linked Telegram identity for this user.",
-                )
-                return False
-            recipient = str(identity.get("metadata", {}).get("chat_id") or identity.get("identity_value"))
+                recipient = self._fallback_telegram_recipient()
+                if not recipient:
+                    await self.store.record_delivery(
+                        notification.notification_id,
+                        "telegram",
+                        notification.user_id,
+                        "failed",
+                        "No linked Telegram identity for this user.",
+                    )
+                    return False
+            else:
+                recipient = str(identity.get("metadata", {}).get("chat_id") or identity.get("identity_value"))
             message_text = self._format_channel_message(notification, channel_name)
             try:
                 await self.connection_manager.send_channel_message("telegram", recipient, message_text)
@@ -92,6 +96,26 @@ class NotificationDispatcher:
             except Exception as exc:
                 await self.store.record_delivery(notification.notification_id, "telegram", recipient, "failed", str(exc))
                 return False
+
+        if channel_name in {"windows", "windows-toast", "toast"}:
+            recipient = "windows-toast"
+            if sys.platform != "win32":
+                await self.store.record_delivery(
+                    notification.notification_id,
+                    "windows",
+                    recipient,
+                    "failed",
+                    "Windows toast notifications are only available on Windows.",
+                )
+                return False
+            try:
+                shown = await self._show_windows_toast(notification.title, notification.body)
+            except Exception as exc:
+                await self.store.record_delivery(notification.notification_id, "windows", recipient, "failed", str(exc))
+                return False
+            status = "delivered" if shown else "failed"
+            await self.store.record_delivery(notification.notification_id, "windows", recipient, status)
+            return shown
 
         if channel_name == "webchat":
             active = self.connection_manager.active_user_connections(notification.user_id, channel_name="webchat")
@@ -138,3 +162,44 @@ class NotificationDispatcher:
         if source or notification.metadata.get("rule_name") or notification.metadata.get("event_id"):
             return f"[Automation] {body}" if body else "[Automation]"
         return body
+
+    async def _show_windows_toast(self, title: str, body: str) -> bool:
+        normalized_title = (title or "SonarBot").strip() or "SonarBot"
+        normalized_body = (body or "").strip() or normalized_title
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$message = '" + self._ps_escape(normalized_body[:280]) + "'; "
+            "$caption = '" + self._ps_escape(normalized_title) + "'; "
+            "[void][System.Windows.Forms.MessageBox]::Show($message, $caption, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information, [System.Windows.Forms.MessageBoxDefaultButton]::Button1, [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly)"
+        )
+        process = await asyncio.create_subprocess_exec(
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        return process.returncode == 0 and not str((stderr or b"").decode("utf-8", errors="ignore")).strip()
+
+    def _xml_escape(self, value: str) -> str:
+        return (
+            value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    def _ps_escape(self, value: str) -> str:
+        return value.replace("'", "''")
+
+    def _fallback_telegram_recipient(self) -> str:
+        allowed = getattr(self.config.telegram, "allowed_user_ids", []) or []
+        if len(allowed) == 1:
+            return str(allowed[0])
+        return ""

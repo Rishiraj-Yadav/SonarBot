@@ -117,16 +117,18 @@ class AutomationStore:
                     schedule TEXT NOT NULL,
                     message TEXT NOT NULL,
                     mode TEXT NOT NULL DEFAULT 'direct',
+                    trigger_type TEXT NOT NULL DEFAULT 'cron',
+                    run_at TEXT NOT NULL DEFAULT '',
                     paused INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
-            await self._ensure_dynamic_cron_mode_column(db)
+            await self._ensure_dynamic_cron_columns(db)
             await db.commit()
 
-    async def _ensure_dynamic_cron_mode_column(self, db: aiosqlite.Connection) -> None:
+    async def _ensure_dynamic_cron_columns(self, db: aiosqlite.Connection) -> None:
         async with db.execute("PRAGMA table_info(dynamic_cron_jobs)") as cursor:
             columns = [str(row[1]) async for row in cursor]
         if "mode" not in columns:
@@ -134,6 +136,20 @@ class AutomationStore:
                 """
                 ALTER TABLE dynamic_cron_jobs
                 ADD COLUMN mode TEXT NOT NULL DEFAULT 'direct'
+                """
+            )
+        if "trigger_type" not in columns:
+            await db.execute(
+                """
+                ALTER TABLE dynamic_cron_jobs
+                ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'cron'
+                """
+            )
+        if "run_at" not in columns:
+            await db.execute(
+                """
+                ALTER TABLE dynamic_cron_jobs
+                ADD COLUMN run_at TEXT NOT NULL DEFAULT ''
                 """
             )
 
@@ -576,8 +592,8 @@ class AutomationStore:
             await db.execute(
                 """
                 INSERT INTO dynamic_cron_jobs (
-                    cron_id, user_id, schedule, message, mode, paused, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    cron_id, user_id, schedule, message, mode, trigger_type, run_at, paused, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.cron_id,
@@ -585,6 +601,8 @@ class AutomationStore:
                     job.schedule,
                     job.message,
                     job.mode,
+                    job.trigger_type,
+                    job.run_at,
                     int(job.paused),
                     job.created_at,
                     job.updated_at,
@@ -598,7 +616,7 @@ class AutomationStore:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """
-                SELECT cron_id, schedule, message, mode, paused, created_at, updated_at
+                SELECT cron_id, schedule, message, mode, trigger_type, run_at, paused, created_at, updated_at
                 FROM dynamic_cron_jobs
                 WHERE user_id = ?
                 ORDER BY created_at DESC
@@ -614,9 +632,11 @@ class AutomationStore:
                             "schedule": row[1],
                             "message": row[2],
                             "mode": row[3] or "direct",
-                            "paused": bool(row[4]),
-                            "created_at": row[5],
-                            "updated_at": row[6],
+                            "trigger_type": row[4] or "cron",
+                            "run_at": row[5] or "",
+                            "paused": bool(row[6]),
+                            "created_at": row[7],
+                            "updated_at": row[8],
                         }
                     )
         return rows
@@ -625,7 +645,7 @@ class AutomationStore:
         await self.initialize()
         rows: list[dict[str, Any]] = []
         query = """
-                SELECT cron_id, user_id, schedule, message, mode, paused, created_at, updated_at
+                SELECT cron_id, user_id, schedule, message, mode, trigger_type, run_at, paused, created_at, updated_at
                 FROM dynamic_cron_jobs
             """
         params: tuple[Any, ...]
@@ -645,9 +665,11 @@ class AutomationStore:
                             "schedule": row[2],
                             "message": row[3],
                             "mode": row[4] or "direct",
-                            "paused": bool(row[5]),
-                            "created_at": row[6],
-                            "updated_at": row[7],
+                            "trigger_type": row[5] or "cron",
+                            "run_at": row[6] or "",
+                            "paused": bool(row[7]),
+                            "created_at": row[8],
+                            "updated_at": row[9],
                         }
                     )
         return rows
@@ -657,7 +679,7 @@ class AutomationStore:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """
-                SELECT cron_id, schedule, message, mode, paused, created_at, updated_at
+                SELECT cron_id, schedule, message, mode, trigger_type, run_at, paused, created_at, updated_at
                 FROM dynamic_cron_jobs
                 WHERE user_id = ? AND cron_id = ?
                 """,
@@ -672,9 +694,11 @@ class AutomationStore:
                 "schedule": row[1],
                 "message": row[2],
                 "mode": row[3] or "direct",
-                "paused": bool(row[4]),
-                "created_at": row[5],
-                "updated_at": row[6],
+                "trigger_type": row[4] or "cron",
+                "run_at": row[5] or "",
+                "paused": bool(row[6]),
+                "created_at": row[7],
+                "updated_at": row[8],
             }
 
     async def set_dynamic_cron_job_paused(self, user_id: str, cron_id: str, paused: bool) -> dict[str, Any] | None:

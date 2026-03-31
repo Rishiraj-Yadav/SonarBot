@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -566,6 +566,20 @@ class DummyAutomationEngine:
         self.dynamic_jobs = [job]
         return job
 
+    async def create_one_time_reminder(self, user_id: str, run_at: str, message: str, mode: str = "direct") -> dict[str, object]:
+        job = {
+            "cron_id": "reminder-user-1",
+            "user_id": user_id,
+            "schedule": "",
+            "run_at": run_at,
+            "trigger_type": "date",
+            "message": message,
+            "mode": mode,
+            "paused": False,
+        }
+        self.dynamic_jobs = [job]
+        return job
+
     async def list_dynamic_cron_jobs(self, _user_id: str) -> list[dict[str, object]]:
         return list(self.dynamic_jobs)
 
@@ -601,6 +615,7 @@ class DummySystemAccessManager:
         self.approvals = approvals or []
         self.decisions: list[tuple[str, str]] = []
         self.default_apps_calls: list[dict[str, object]] = []
+        self.executed_approvals: list[dict[str, object]] = []
 
     async def open_ms_settings_default_apps(self, **kwargs: object) -> dict[str, object]:
         self.default_apps_calls.append(dict(kwargs))
@@ -625,7 +640,34 @@ class DummySystemAccessManager:
             "category": "ask_once",
             "status": decision,
             "payload": {"path": "C:/Users/Ritesh/Desktop/todo.txt"},
+            "user_id": "default",
+            "session_id": "webchat_main",
+            "session_key": "webchat_main",
         }
+
+    async def execute_approved_action(self, approval: dict[str, object]) -> dict[str, object] | None:
+        self.executed_approvals.append(dict(approval))
+        return None
+
+
+class DummyReplaySystemAccessManager(DummySystemAccessManager):
+    async def decide_approval(self, approval_id: str, decision: str) -> dict[str, object]:
+        self.decisions.append((approval_id, decision))
+        return {
+            "approval_id": approval_id,
+            "action_kind": "exec_shell",
+            "target_summary": "SendKeys([char]173) # VolumeUp",
+            "category": "ask_once",
+            "status": decision,
+            "payload": {"command": "volume-up"},
+            "user_id": "default",
+            "session_id": "webchat_main",
+            "session_key": "webchat_main",
+        }
+
+    async def execute_approved_action(self, approval: dict[str, object]) -> dict[str, object] | None:
+        self.executed_approvals.append(dict(approval))
+        return {"exit_code": 0, "stderr": "", "status": "completed"}
 
 
 class FakeSkill:
@@ -2043,6 +2085,51 @@ async def test_router_plain_chat_yes_move_it_uses_single_pending_host_approval(a
 
 
 @pytest.mark.asyncio
+async def test_router_plain_chat_yes_replays_approved_volume_action(app_config) -> None:
+    system_access_manager = DummyReplaySystemAccessManager(
+        approvals=[
+            {
+                "approval_id": "approval-volume-1",
+                "status": "pending",
+                "expired": False,
+                "action_kind": "exec_shell",
+                "target_summary": "SendKeys([char]173) # VolumeUp",
+            }
+        ]
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        system_access_manager=system_access_manager,
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-command-volume",
+        request_id="req-command-volume",
+        session_key="webchat_main",
+        message="yes",
+        metadata={"trace_id": "trace-command-volume", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "increased the windows volume" in response.payload["command_response"].lower()
+    assert system_access_manager.decisions == [("approval-volume-1", "approved")]
+    assert len(system_access_manager.executed_approvals) == 1
+
+
+@pytest.mark.asyncio
 async def test_router_plain_chat_no_rejects_single_pending_host_approval(app_config) -> None:
     system_access_manager = DummySystemAccessManager(
         approvals=[
@@ -2630,6 +2717,191 @@ async def test_router_creates_dynamic_cron_from_named_day_reminder_phrase(app_co
     assert response.payload["queued"] is False
     assert automation_engine.dynamic_jobs[0]["schedule"] == "30 21 * * 1"
     assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: submit attendance"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_one_time_reminder_for_today_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    future_time = (datetime.now().astimezone().replace(second=0, microsecond=0) + timedelta(minutes=10)).strftime("%I:%M %p")
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-once-1",
+        request_id="req-reminder-once-1",
+        session_key="telegram:123",
+        message=f"can you set a reminder at {future_time} today, of i have to message someone",
+        metadata={"trace_id": "trace-reminder-once-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created one-time reminder 'reminder-user-1'" in response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["trigger_type"] == "date"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: i have to message someone"
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_intercept_explicit_google_calendar_request(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-once-2",
+        request_id="req-reminder-once-2",
+        session_key="telegram:123",
+        message="set a reminder in Google Calendar at 3:02 pm today to message someone",
+        metadata={"trace_id": "trace-reminder-once-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert automation_engine.dynamic_jobs == []
+    assert response.ok is True
+    assert response.payload["queued"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_creates_one_time_reminder_from_relative_time_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-relative-1",
+        request_id="req-reminder-relative-1",
+        session_key="telegram:123",
+        message="Set a reminder at 10 minutes from now today to test popup",
+        metadata={"trace_id": "trace-reminder-relative-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created one-time reminder 'reminder-user-1'" in response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["trigger_type"] == "date"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: test popup"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_one_time_reminder_without_explicit_day(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    future_time = (datetime.now().astimezone().replace(second=0, microsecond=0) + timedelta(minutes=15)).strftime("%I:%M %p")
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-once-3",
+        request_id="req-reminder-once-3",
+        session_key="telegram:123",
+        message=f"set reminder at {future_time} of message someone",
+        metadata={"trace_id": "trace-reminder-once-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["trigger_type"] == "date"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: message someone"
+
+
+@pytest.mark.asyncio
+async def test_router_small_talk_does_not_resume_stale_browser_workflow(app_config) -> None:
+    session_manager = DummySessionManager()
+    session_manager.session.metadata = browser_task_state_update(
+        active_task={
+            "recipe_name": "calendar_book",
+            "site_name": "google calendar",
+            "query": "message someone",
+            "execution_mode": "headed",
+            "awaiting_followup": "workflow_plan",
+        }
+    )
+    browser_engine = ChallengeEngineStub("Resumed the browser workflow.")
+    agent_loop = DummyAgentLoop()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=agent_loop,
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-smalltalk-1",
+        request_id="req-smalltalk-1",
+        session_key="telegram:123",
+        message="hey",
+        metadata={"trace_id": "trace-smalltalk-1", "user_id": "default", "channel": "webchat"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is True
+    assert browser_engine.calls == []
+    assert len(agent_loop.enqueued) == 1
 
 
 @pytest.mark.asyncio

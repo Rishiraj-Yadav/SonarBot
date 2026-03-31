@@ -69,9 +69,17 @@ class AutomationEngine:
             dedupe_key=f"{rule.name}:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}",
             priority=40,
         )
-        if cron_mode == "direct":
-            return await self._run_direct_notification_event(event, rule, message)
-        return await self._run_event(event, rule, user_prompt=rule.prompt_or_skill or message)
+        try:
+            if cron_mode == "direct":
+                return await self._run_direct_notification_event(event, rule, message)
+            return await self._run_event(event, rule, user_prompt=rule.prompt_or_skill or message)
+        finally:
+            if rule_name.startswith("dynamic-once:"):
+                cron_id = rule_name.removeprefix("dynamic-once:")
+                try:
+                    await self.delete_dynamic_cron_job(target_user, cron_id)
+                except KeyError:
+                    pass
 
     async def handle_heartbeat(self, user_id: str | None = None) -> dict[str, Any]:
         target_user = user_id or self.config.users.default_user_id
@@ -155,9 +163,13 @@ class AutomationEngine:
             *[self._rule_to_payload(rule, state.get(rule.name, {})) for rule in await self.standing_orders_manager.compile_rules()],
         ]
         for job in dynamic_jobs:
-            dynamic_rule = self._dynamic_cron_rule(str(job["cron_id"]), str(job["message"]))
+            trigger_type = str(job.get("trigger_type", "cron"))
+            dynamic_rule_name = self._dynamic_once_rule_name(str(job["cron_id"])) if trigger_type == "date" else self._dynamic_cron_rule_name(str(job["cron_id"]))
+            dynamic_rule = self._cron_rule(dynamic_rule_name, str(job["message"]))
             payload = self._rule_to_payload(dynamic_rule, state.get(dynamic_rule.name, {}))
             payload["schedule"] = str(job["schedule"])
+            payload["run_at"] = str(job.get("run_at", ""))
+            payload["trigger_type"] = trigger_type
             payload["message"] = str(job["message"])
             payload["mode"] = str(job.get("mode", "direct"))
             payload["paused"] = bool(job["paused"])
@@ -185,11 +197,17 @@ class AutomationEngine:
         if rule_name.startswith("dynamic-cron:"):
             await self.pause_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
             return
+        if rule_name.startswith("dynamic-once:"):
+            await self.pause_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-once:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, True)
 
     async def resume_rule(self, user_id: str, rule_name: str) -> None:
         if rule_name.startswith("dynamic-cron:"):
             await self.resume_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
+            return
+        if rule_name.startswith("dynamic-once:"):
+            await self.resume_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-once:"))
             return
         await self.store.set_rule_paused(user_id, rule_name, False)
 
@@ -212,16 +230,43 @@ class AutomationEngine:
             message=cleaned_message,
             mode=normalized_mode,
         )
+        return await self._store_dynamic_job(job)
+
+    async def create_one_time_reminder(
+        self,
+        user_id: str,
+        run_at: str,
+        message: str,
+        mode: str = "direct",
+    ) -> dict[str, Any]:
+        cleaned_message = message.strip()
+        if not cleaned_message:
+            raise ValueError("Reminder message cannot be empty.")
+        normalized_mode = self._normalize_cron_mode(mode)
+        job = DynamicCronJob(
+            cron_id=uuid4().hex[:12],
+            user_id=user_id,
+            schedule="",
+            message=cleaned_message,
+            mode=normalized_mode,
+            trigger_type="date",
+            run_at=run_at.strip(),
+        )
+        return await self._store_dynamic_job(job)
+
+    async def _store_dynamic_job(self, job: DynamicCronJob) -> dict[str, Any]:
         await self.store.create_dynamic_cron_job(job)
-        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(job.cron_id), False)
+        await self.store.set_rule_paused(user_id=job.user_id, rule_name=self._dynamic_rule_name(job), paused=False)
         if self.scheduler is not None:
             await self.scheduler.register_dynamic_job(
                 {
                     "cron_id": job.cron_id,
-                    "user_id": user_id,
+                    "user_id": job.user_id,
                     "schedule": job.schedule,
                     "message": job.message,
                     "mode": job.mode,
+                    "trigger_type": job.trigger_type,
+                    "run_at": job.run_at,
                     "paused": False,
                 }
             )
@@ -231,6 +276,8 @@ class AutomationEngine:
             "schedule": job.schedule,
             "message": job.message,
             "mode": job.mode,
+            "trigger_type": job.trigger_type,
+            "run_at": job.run_at,
             "paused": job.paused,
             "created_at": job.created_at,
             "updated_at": job.updated_at,
@@ -246,7 +293,7 @@ class AutomationEngine:
         job = await self.store.set_dynamic_cron_job_paused(user_id, cron_id, True)
         if job is None:
             raise KeyError(f"Unknown cron job '{cron_id}'.")
-        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(cron_id), True)
+        await self.store.set_rule_paused(user_id, self._dynamic_rule_name(job), True)
         if self.scheduler is not None:
             await self.scheduler.pause_dynamic_job(cron_id)
         return job
@@ -255,7 +302,7 @@ class AutomationEngine:
         job = await self.store.set_dynamic_cron_job_paused(user_id, cron_id, False)
         if job is None:
             raise KeyError(f"Unknown cron job '{cron_id}'.")
-        await self.store.set_rule_paused(user_id, self._dynamic_cron_rule_name(cron_id), False)
+        await self.store.set_rule_paused(user_id, self._dynamic_rule_name(job), False)
         if self.scheduler is not None:
             await self.scheduler.resume_dynamic_job(job)
         return job
@@ -285,12 +332,21 @@ class AutomationEngine:
                 mode=str(event["payload"].get("mode", "direct")),
             )
         if rule_name.startswith("dynamic-cron:"):
-            return await self.handle_cron_job(
+            result = await self.handle_cron_job(
                 rule_name,
                 str(event["payload"].get("message", "")),
                 user_id=str(run["user_id"]),
                 mode=str(event["payload"].get("mode", "direct")),
             )
+            return result
+        if rule_name.startswith("dynamic-once:"):
+            result = await self.handle_cron_job(
+                rule_name,
+                str(event["payload"].get("message", "")),
+                user_id=str(run["user_id"]),
+                mode=str(event["payload"].get("mode", "direct")),
+            )
+            return result
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
                 rule_name.removeprefix("webhook:"),
@@ -627,6 +683,13 @@ class AutomationEngine:
     def _dynamic_cron_rule(self, cron_id: str, message: str) -> AutomationRule:
         return self._cron_rule(self._dynamic_cron_rule_name(cron_id), message)
 
+    def _dynamic_rule_name(self, job: dict[str, Any] | DynamicCronJob) -> str:
+        trigger_type = str(getattr(job, "trigger_type", None) or job.get("trigger_type", "cron"))
+        cron_id = str(getattr(job, "cron_id", None) or job.get("cron_id", ""))
+        if trigger_type == "date":
+            return self._dynamic_once_rule_name(cron_id)
+        return self._dynamic_cron_rule_name(cron_id)
+
     def _normalize_cron_mode(self, value: str | None) -> str:
         normalized = str(value or "direct").strip().lower()
         return "ai" if normalized == "ai" else "direct"
@@ -634,7 +697,7 @@ class AutomationEngine:
     def _resolve_cron_mode(self, rule_name: str, mode: str | None) -> str:
         if mode is not None:
             return self._normalize_cron_mode(mode)
-        if rule_name.startswith("dynamic-cron:"):
+        if rule_name.startswith("dynamic-cron:") or rule_name.startswith("dynamic-once:"):
             return "direct"
         if rule_name.startswith("cron:"):
             try:
@@ -678,6 +741,9 @@ class AutomationEngine:
 
     def _dynamic_cron_rule_name(self, cron_id: str) -> str:
         return f"dynamic-cron:{cron_id}"
+
+    def _dynamic_once_rule_name(self, cron_id: str) -> str:
+        return f"dynamic-once:{cron_id}"
 
     def _rule_to_payload(self, rule: AutomationRule, state: dict[str, Any]) -> dict[str, Any]:
         return {

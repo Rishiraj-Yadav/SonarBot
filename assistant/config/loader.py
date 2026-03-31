@@ -40,6 +40,16 @@ def default_assistant_home() -> Path:
     return Path(os.environ.get("ASSISTANT_HOME", Path.home() / ".assistant")).expanduser().resolve()
 
 
+def _default_config_path() -> Path:
+    assistant_home_config = default_assistant_home() / "config.toml"
+    if assistant_home_config.exists():
+        return assistant_home_config
+    local_config = Path.cwd() / "config.toml"
+    if local_config.exists():
+        return local_config.resolve()
+    return assistant_home_config
+
+
 def _deep_set(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     cursor = data
     for segment in path[:-1]:
@@ -56,7 +66,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 def load_config(config_path: Path | None = None, dotenv_path: Path | None = None) -> AppConfig:
-    config_path = (config_path or (default_assistant_home() / "config.toml")).expanduser().resolve()
+    config_path = (config_path or _default_config_path()).expanduser().resolve()
     dotenv_path = (dotenv_path or (Path.cwd() / ".env")).expanduser().resolve()
 
     raw_config = _load_toml(config_path)

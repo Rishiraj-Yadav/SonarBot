@@ -212,8 +212,8 @@ Default Windows policy in the example:
 ### `[users]`
 
 - `default_user_id`: string, default `default`
-- `primary_channel`: string, default `webchat`
-- `fallback_channels`: list of strings
+- `primary_channel`: string, default `webchat`; supported built-ins include `webchat`, `telegram`, `cli`, and `windows` for native Windows toast notifications
+- `fallback_channels`: list of strings using the same channel names as `primary_channel`
 - `quiet_hours_start`: string in `HH:MM` format
 - `quiet_hours_end`: string in `HH:MM` format
 - `notification_level`: string, default `normal`

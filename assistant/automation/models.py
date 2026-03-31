@@ -91,6 +91,8 @@ class DynamicCronJob:
     schedule: str
     message: str
     mode: str = "direct"
+    trigger_type: str = "cron"
+    run_at: str = ""
     paused: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)

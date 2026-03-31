@@ -41,6 +41,16 @@ class FakeConnectionManager:
         return ["webchat-connection"] if channel_name == "webchat" else []
 
 
+class FakeWindowsToastDispatcher(NotificationDispatcher):
+    def __init__(self, config, store, user_profiles, connection_manager) -> None:
+        super().__init__(config, store, user_profiles, connection_manager)
+        self.toasts: list[tuple[str, str]] = []
+
+    async def _show_windows_toast(self, title: str, body: str) -> bool:
+        self.toasts.append((title, body))
+        return True
+
+
 class FakeScheduler:
     def __init__(self) -> None:
         self.registered: list[dict[str, object]] = []
@@ -147,6 +157,71 @@ async def test_notification_dispatcher_prefixes_context_engine_messages_for_tele
 
     assert connection_manager.channel_messages == [
         ("telegram", "123", "[Life Context] You may want to follow up on the proposal.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notification_dispatcher_can_deliver_native_windows_toast(app_config, monkeypatch) -> None:
+    app_config.users.primary_channel = "windows"
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    await user_profiles.set_primary_channel(app_config.users.default_user_id, "windows")
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = FakeWindowsToastDispatcher(app_config, store, user_profiles, connection_manager)
+    monkeypatch.setattr("assistant.automation.delivery.sys.platform", "win32")
+
+    notification = Notification(
+        notification_id="notif-win-1",
+        user_id=app_config.users.default_user_id,
+        title="Study reminder",
+        body="Reminder: revise math at 6 PM",
+        source="cron:study",
+        severity="info",
+        delivery_mode="primary",
+        status="queued",
+        target_channels=[],
+    )
+
+    await dispatcher.dispatch(notification)
+
+    assert dispatcher.toasts == [("Study reminder", "Reminder: revise math at 6 PM")]
+    notifications = await store.list_notifications(app_config.users.default_user_id)
+    assert notifications[0]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_notification_dispatcher_fans_out_to_windows_and_telegram(app_config, monkeypatch) -> None:
+    app_config.users.primary_channel = "windows"
+    app_config.users.fallback_channels = ["telegram"]
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    await user_profiles.resolve_user_id("telegram", "123", {"channel": "telegram", "chat_id": "123"})
+    await user_profiles.set_primary_channel(app_config.users.default_user_id, "windows")
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = FakeWindowsToastDispatcher(app_config, store, user_profiles, connection_manager)
+    monkeypatch.setattr("assistant.automation.delivery.sys.platform", "win32")
+
+    notification = Notification(
+        notification_id="notif-win-telegram-1",
+        user_id=app_config.users.default_user_id,
+        title="Reminder test",
+        body="Reminder: send on both channels",
+        source="cron:test",
+        severity="info",
+        delivery_mode="primary",
+        status="queued",
+        target_channels=[],
+    )
+
+    await dispatcher.dispatch(notification)
+
+    assert dispatcher.toasts == [("Reminder test", "Reminder: send on both channels")]
+    assert connection_manager.channel_messages == [
+        ("telegram", "123", "[Automation] Reminder: send on both channels")
     ]
 
 

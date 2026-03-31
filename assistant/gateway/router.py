@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -147,9 +147,13 @@ class GatewayRouter:
         if shortcut is not None:
             return shortcut
 
+        normalized_lowered = re.sub(r"\s+", " ", stripped).strip().lower()
+        small_talk_turn = self._looks_like_small_talk(normalized_lowered)
         browser_task_state = await self._get_browser_task_state(session_key)
         browser_followup_turn = self._looks_like_browser_followup(stripped, browser_task_state)
-        browser_context_turn = browser_followup_turn or self._looks_like_browser_contextual_query(stripped, browser_task_state)
+        browser_context_turn = (not small_talk_turn) and (
+            browser_followup_turn or self._looks_like_browser_contextual_query(stripped, browser_task_state)
+        )
         if browser_context_turn:
             browser_workflow = await self._handle_browser_workflow(
                 connection_id=connection_id,
@@ -164,15 +168,16 @@ class GatewayRouter:
         if host_shortcut is not None:
             return host_shortcut
 
-        browser_workflow = await self._handle_browser_workflow(
-            connection_id=connection_id,
-            request_id=request_id,
-            session_key=session_key,
-            message=message,
-            metadata=metadata,
-        )
-        if browser_workflow is not None:
-            return browser_workflow
+        if not small_talk_turn:
+            browser_workflow = await self._handle_browser_workflow(
+                connection_id=connection_id,
+                request_id=request_id,
+                session_key=session_key,
+                message=message,
+                metadata=metadata,
+            )
+            if browser_workflow is not None:
+                return browser_workflow
 
         skill_activation = await self._resolve_skill_intent(stripped)
         if skill_activation is not None:
@@ -1672,6 +1677,8 @@ class GatewayRouter:
         normalized = re.sub(r"\s+", " ", message).strip().lower()
         if not normalized:
             return False
+        if self._looks_like_small_talk(normalized):
+            return False
         active = active_browser_task(task_state)
         pending = any(
             dict(task_state.get(key) or {})
@@ -1917,6 +1924,16 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         lowered = message.lower().strip()
+        one_time_reminder_shortcut = await self._handle_one_time_reminder_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if one_time_reminder_shortcut is not None:
+            return one_time_reminder_shortcut
+
         cron_shortcut = await self._handle_natural_language_cron_shortcut(
             request_id,
             session_key,
@@ -2010,6 +2027,54 @@ class GatewayRouter:
             )
 
         return None
+
+    async def _handle_one_time_reminder_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_one_time_reminder_request(original_message, lowered)
+        if parsed is None:
+            return None
+        run_at, reminder_message = parsed
+        if self._looks_like_calendar_request(lowered):
+            return None
+        now = datetime.now().astimezone()
+        if run_at <= now:
+            response_text = (
+                "That reminder time is in the past. Tell me a future time, or say Google Calendar if you want it added there."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        if run_at - now > timedelta(days=30):
+            return None
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        try:
+            job = await self.automation_engine.create_one_time_reminder(user_id, run_at.isoformat(), reminder_message)
+        except ValueError as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = (
+            f"Created one-time reminder '{job['cron_id']}' for {run_at.strftime('%B %d, %Y at %I:%M %p')}.\n"
+            f"Message: {job['message']}"
+        )
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "cron_job": job,
+            },
+        )
 
     async def _handle_brightness_shortcut(
         self,
@@ -3011,6 +3076,138 @@ class GatewayRouter:
                 return schedule, reminder_message
         return None
 
+    def _parse_one_time_reminder_request(self, message: str, lowered: str) -> tuple[datetime, str] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        normalized = normalized.replace(" ,", ",")
+        normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
+        if "remind" not in normalized and "set a reminder" not in normalized:
+            return None
+        relative_match = re.match(
+            r"^(?:set\s+(?:me\s+)?a\s+reminder|remind me)\s+(?:at\s+)?(?:in\s+)?(?P<amount>\d{1,3})\s+"
+            r"(?P<unit>minute|minutes|hour|hours)\s+(?:from now(?:\s+today)?|today)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if relative_match:
+            run_at = self._build_relative_one_time_reminder_datetime(
+                amount_text=str(relative_match.group("amount")),
+                unit_text=str(relative_match.group("unit")),
+            )
+            reminder_message = self._normalize_reminder_message(relative_match.group("message"))
+            if run_at is not None and reminder_message:
+                return run_at, reminder_message
+        patterns = (
+            r"^(?:set\s+(?:me\s+)?a?\s*reminder|remind me)\s+at\s+(?P<time>.+?)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+            r"^(?:set\s+(?:me\s+)?a\s+reminder|remind me)\s+at\s+(?P<time>.+?)\s+(?P<day>today|tomorrow)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+            r"^(?:set\s+(?:me\s+)?a\s+reminder|remind me)\s+(?P<day>today|tomorrow)\s+at\s+(?P<time>.+?)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+            r"^(?:set\s+(?:me\s+)?a\s+reminder|remind me)\s+on\s+(?P<date>[a-z]+\s+\d{1,2}(?:,\s*\d{4})?)\s+at\s+(?P<time>.+?)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+            r"^(?:set\s+(?:me\s+)?a\s+reminder|remind me)\s+for\s+(?P<date>[a-z]+\s+\d{1,2}(?:,\s*\d{4})?)\s+at\s+(?P<time>.+?)\s*(?:,)?\s*(?:to|of)\s+(?P<message>.+)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            run_at = self._build_one_time_reminder_datetime(
+                day_text=str(match.groupdict().get("day") or "").strip(),
+                date_text=str(match.groupdict().get("date") or "").strip(),
+                time_text=str(match.group("time")),
+            )
+            reminder_message = self._normalize_reminder_message(match.group("message"))
+            if run_at is not None and reminder_message:
+                return run_at, reminder_message
+        return None
+
+    def _build_one_time_reminder_datetime(
+        self,
+        *,
+        day_text: str = "",
+        date_text: str = "",
+        time_text: str,
+    ) -> datetime | None:
+        parsed_time = self._parse_reminder_time(time_text)
+        if parsed_time is None:
+            return None
+        hour, minute = parsed_time
+        now = datetime.now().astimezone()
+        target_date = now.date()
+        lowered_day = day_text.strip().lower()
+        if lowered_day == "tomorrow":
+            target_date = target_date + timedelta(days=1)
+        elif lowered_day == "today" or lowered_day == "":
+            target_date = target_date
+        elif date_text:
+            parsed_date = self._parse_one_time_reminder_date(date_text, now.year)
+            if parsed_date is None:
+                return None
+            target_date = parsed_date
+        elif day_text:
+            return None
+        return datetime(
+            year=target_date.year,
+            month=target_date.month,
+            day=target_date.day,
+            hour=hour,
+            minute=minute,
+            tzinfo=now.tzinfo,
+        )
+
+    def _parse_one_time_reminder_date(self, value: str, default_year: int) -> datetime.date | None:
+        cleaned = re.sub(r"\s+", " ", value.strip().lower())
+        for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d", "%b %d"):
+            try:
+                parsed = datetime.strptime(cleaned.title(), fmt)
+            except ValueError:
+                continue
+            year = parsed.year if "%Y" in fmt else default_year
+            try:
+                return parsed.replace(year=year).date()
+            except ValueError:
+                return None
+        return None
+
+    def _build_relative_one_time_reminder_datetime(self, *, amount_text: str, unit_text: str) -> datetime | None:
+        try:
+            amount = int(amount_text)
+        except ValueError:
+            return None
+        if amount <= 0:
+            return None
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        unit = unit_text.strip().lower()
+        if unit.startswith("minute"):
+            return now + timedelta(minutes=amount)
+        if unit.startswith("hour"):
+            return now + timedelta(hours=amount)
+        return None
+
+    def _looks_like_calendar_request(self, lowered: str) -> bool:
+        return any(
+            token in lowered
+            for token in (
+                "google calendar",
+                "calendar event",
+                "calendar reminder",
+                "add to calendar",
+                "put it on my calendar",
+            )
+        )
+
+    def _looks_like_small_talk(self, normalized: str) -> bool:
+        return normalized in {
+            "hey",
+            "hi",
+            "hello",
+            "yo",
+            "sup",
+            "thanks",
+            "thank you",
+            "ok thanks",
+            "okay thanks",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        }
+
     def _build_schedule_from_frequency_and_time(self, frequency: str, time_text: str) -> str | None:
         parsed_time = self._parse_reminder_time(time_text)
         if parsed_time is None:
@@ -3160,6 +3357,29 @@ class GatewayRouter:
         decision = "approved" if self._looks_like_host_approval_reply(lowered) else "rejected"
         approval = await self.system_access_manager.decide_approval(approval_id, decision)
         response_text = f"{decision.title()} host approval '{approval_id}'."
+        if decision == "approved" and hasattr(self.system_access_manager, "execute_approved_action"):
+            try:
+                replay_result = await self.system_access_manager.execute_approved_action(approval)
+            except Exception:
+                replay_result = None
+            if isinstance(replay_result, dict):
+                target_summary = str(approval.get("target_summary", ""))
+                action_kind = str(approval.get("action_kind", ""))
+                target_lower = target_summary.lower()
+                if "volume" in target_lower or "sendkeys" in target_lower:
+                    direction = "up"
+                    if "volumedown" in target_lower:
+                        direction = "down"
+                    elif "volumemute" in target_lower:
+                        direction = "mute"
+                    response_text = self._format_volume_response(replay_result, direction)
+                elif action_kind == "exec_shell" and int(replay_result.get("exit_code", 1)) == 0:
+                    response_text = f"Approved host approval '{approval_id}' and ran the requested host action."
+                elif action_kind == "exec_shell":
+                    response_text = (
+                        f"Approved host approval '{approval_id}', but the host action failed: "
+                        f"{replay_result.get('stderr', 'unknown error')}"
+                    )
         await self._persist_inline_exchange(session_key, message, response_text, metadata)
         return ResponseFrame(
             id=request_id,

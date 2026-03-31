@@ -788,6 +788,30 @@ class SystemAccessManager:
     async def decide_approval(self, approval_id: str, decision: str) -> dict[str, Any]:
         return await self.approvals.decide(approval_id, decision)
 
+    async def execute_approved_action(self, approval: dict[str, Any]) -> dict[str, Any] | None:
+        if str(approval.get("status", "")).lower() != "approved":
+            return None
+        action_kind = str(approval.get("action_kind", "")).strip().lower()
+        if action_kind != "exec_shell":
+            return None
+        payload = approval.get("payload", {})
+        if not isinstance(payload, dict):
+            return None
+        command = str(payload.get("command", "")).strip()
+        if not command:
+            return None
+        session_key = str(approval.get("session_key", "")).strip() or str(approval.get("session_id", "")).strip()
+        session_id = str(approval.get("session_id", "")).strip()
+        user_id = str(approval.get("user_id", "")).strip()
+        workdir = payload.get("workdir")
+        return await self._run_approved_host_command(
+            command=command,
+            session_key=session_key,
+            session_id=session_id,
+            user_id=user_id,
+            workdir=str(workdir).strip() if workdir else None,
+        )
+
     async def list_audit(self, *, session_id: str | None = None, today_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
         return await self.audit.list_entries(session_id=session_id, today_only=today_only, limit=limit)
 
@@ -1353,6 +1377,67 @@ class SystemAccessManager:
             return result
         merged = {**result, **parsed}
         merged.setdefault("status", result.get("status"))
+        return merged
+
+    async def _run_approved_host_command(
+        self,
+        *,
+        command: str,
+        session_key: str,
+        session_id: str,
+        user_id: str,
+        timeout: int = 30,
+        workdir: str | None = None,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            result = await self.runtime.exec_command(command, timeout=timeout, workdir=workdir)
+        except PermissionError as exc:
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool="exec_shell",
+                action_kind="exec_shell",
+                target=command,
+                category="ask_once",
+                approval_mode="explicit",
+                outcome="blocked:outside_policy",
+                details={"stderr": str(exc), "exit_code": 1, "host": True},
+            )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="exec_shell",
+            action_kind="exec_shell",
+            target=command,
+            category="ask_once",
+            approval_mode="explicit",
+            outcome="completed" if int(result.get("exit_code", 1)) == 0 else "failed",
+            exit_code=int(result.get("exit_code", 1)),
+            duration_ms=duration_ms,
+            details={"workdir": result.get("workdir", str(self.runtime.default_workdir))},
+        )
+        await self.audit.append(audit_entry)
+        stdout = str(result.get("stdout", "")).strip()
+        merged: dict[str, Any] = {
+            **result,
+            "host": True,
+            "status": audit_entry.outcome,
+            "approval_category": "ask_once",
+            "approval_mode": "explicit",
+            "audit_id": audit_entry.audit_id,
+        }
+        if not stdout:
+            return merged
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            return merged
+        if not isinstance(parsed, dict):
+            return merged
+        merged.update(parsed)
+        merged.setdefault("status", audit_entry.outcome)
         return merged
 
     async def _record_blocked_action(
