@@ -219,6 +219,58 @@ async def test_resolve_host_path_prefers_onedrive_desktop_when_redirected(app_co
 
 
 @pytest.mark.asyncio
+async def test_runtime_expands_tilde_home_root(app_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = Path("~")
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    assert manager.runtime.home_root == fake_home.resolve()
+    assert manager.runtime.resolve_host_path("~/Pictures") == (fake_home / "Pictures").resolve()
+
+
+@pytest.mark.asyncio
+async def test_effective_path_rules_include_redirected_known_folders(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    desktop_root = home_root / "OneDrive" / "Desktop"
+    documents_root = home_root / "OneDrive" / "Documents"
+    home_root.mkdir(parents=True, exist_ok=True)
+    desktop_root.mkdir(parents=True, exist_ok=True)
+    documents_root.mkdir(parents=True, exist_ok=True)
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.path_rules = [
+        {"path": "~/Desktop", "read": "auto_allow", "write": "ask_once", "overwrite": "always_ask", "delete": "always_ask"},
+        {"path": "~/Documents", "read": "auto_allow", "write": "ask_once", "overwrite": "always_ask", "delete": "always_ask"},
+    ]
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    desktop_category, _ = manager.runtime.classify_path_action(desktop_root / "note.txt", "write")
+    documents_category, _ = manager.runtime.classify_path_action(documents_root / "note.txt", "read")
+    resolved_desktop_file = manager.runtime.resolve_host_path("~/Desktop/webchat-test.txt")
+
+    assert desktop_category != "deny"
+    assert documents_category != "deny"
+    assert resolved_desktop_file == desktop_root / "webchat-test.txt"
+
+
+@pytest.mark.asyncio
 async def test_resolve_host_path_prefers_onedrive_downloads_and_documents_when_redirected(app_config, tmp_path: Path) -> None:
     home_root = tmp_path / "home"
     documents_root = home_root / "OneDrive" / "Documents"
@@ -246,6 +298,54 @@ async def test_resolve_host_path_prefers_onedrive_downloads_and_documents_when_r
 
     assert documents_listing["path"] == str(documents_root)
     assert downloads_listing["path"] == str(downloads_root)
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_path_prefers_onedrive_documents_over_local_folder_when_both_exist(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    local_documents = home_root / "Documents"
+    onedrive_documents = home_root / "OneDrive" / "Documents"
+    local_documents.mkdir(parents=True, exist_ok=True)
+    onedrive_documents.mkdir(parents=True, exist_ok=True)
+    (onedrive_documents / "important.txt").write_text("important", encoding="utf-8")
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    assert manager.runtime.resolve_host_path("~/Documents") == onedrive_documents
+    listing = await manager.list_host_dir(path="~/Documents", session_id="sess-documents", user_id="default")
+    assert listing["path"] == str(onedrive_documents)
+    assert [item["name"] for item in listing["entries"]] == ["important.txt"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_host_path_prefers_onedrive_pictures_when_redirected(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    pictures_root = home_root / "OneDrive" / "Pictures"
+    pictures_root.mkdir(parents=True, exist_ok=True)
+    (pictures_root / "photo.jpg").write_text("photo", encoding="utf-8")
+
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+
+    assert manager.runtime.resolve_host_path("~/Pictures") == pictures_root
+    listing = await manager.list_host_dir(path="~/Pictures", session_id="sess-pictures", user_id="default")
+    assert listing["path"] == str(pictures_root)
+    assert [item["name"] for item in listing["entries"]] == ["photo.jpg"]
     assert [item["name"] for item in documents_listing["entries"]] == ["doc.txt"]
     assert [item["name"] for item in downloads_listing["entries"]] == ["download.txt"]
 

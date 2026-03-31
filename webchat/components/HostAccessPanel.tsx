@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchJson } from "../lib/gateway_client";
+import { fetchJson, gatewayFetch } from "../lib/gateway_client";
 
 type HostApproval = {
   approval_id: string;
@@ -81,7 +81,7 @@ export function HostAccessPanel() {
   }, []);
 
   async function decide(approvalId: string, decision: "approved" | "rejected") {
-    await fetch(`http://localhost:8765/api/system-access/approvals/${approvalId}`, {
+    await gatewayFetch(`/api/system-access/approvals/${approvalId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision }),
@@ -92,7 +92,7 @@ export function HostAccessPanel() {
   }
 
   async function restore(backupId: string) {
-    await fetch(`http://localhost:8765/api/system-access/audit/${backupId}/restore`, {
+    await gatewayFetch(`/api/system-access/audit/${backupId}/restore`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),

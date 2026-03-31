@@ -1,13 +1,10 @@
+import { fetchJson } from "../../lib/gateway_client";
 import { SessionList } from "../../components/SessionList";
 import { WorkspaceHero } from "../../components/WorkspaceHero";
 
 async function getHistory() {
   try {
-    const response = await fetch("http://localhost:8765/webchat/history?session_key=main&limit=50", { cache: "no-store" });
-    if (!response.ok) {
-      return [];
-    }
-    const data = await response.json();
+    const data = await fetchJson<{ messages?: unknown[] }>("/webchat/history?session_key=main&limit=50");
     return data.messages ?? [];
   } catch {
     return [];

@@ -147,6 +147,10 @@ class GatewayRouter:
         if shortcut is not None:
             return shortcut
 
+        host_shortcut = await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
+        if host_shortcut is not None:
+            return host_shortcut
+
         browser_task_state = await self._get_browser_task_state(session_key)
         browser_followup_turn = self._looks_like_browser_followup(stripped, browser_task_state)
         browser_context_turn = browser_followup_turn or self._looks_like_browser_contextual_query(stripped, browser_task_state)
@@ -160,9 +164,6 @@ class GatewayRouter:
             )
             if browser_workflow is not None:
                 return browser_workflow
-        host_shortcut = None if browser_context_turn else await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
-        if host_shortcut is not None:
-            return host_shortcut
 
         browser_workflow = await self._handle_browser_workflow(
             connection_id=connection_id,
@@ -2328,6 +2329,37 @@ class GatewayRouter:
                     return response
 
         folder_name = self._match_known_host_folder(lowered)
+        if folder_name and any(token in lowered for token in ("open", "browse")):
+            try:
+                folder_path = await self._resolve_known_host_folder_path(folder_name, session_key, metadata)
+                if folder_path is None:
+                    folder_path = f"~/{folder_name}"
+                result = await self.tool_registry.dispatch(
+                    "exec_shell",
+                    {
+                        "command": self._build_open_folder_command(folder_path),
+                        "host": True,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception:
+                response_text = f"I couldn't open your {folder_name} folder in File Explorer."
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            response_text = self._format_open_folder_response(folder_name, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
         if folder_name and self._looks_like_list_folder_request(lowered):
             try:
                 result = await self.tool_registry.dispatch(
@@ -2339,7 +2371,26 @@ class GatewayRouter:
                     },
                 )
             except Exception as exc:
-                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                try:
+                    folder_path = await self._resolve_known_host_folder_path(folder_name, session_key, metadata)
+                    if folder_path is None:
+                        raise exc
+                    result = await self.tool_registry.dispatch(
+                        "list_host_dir",
+                        {
+                            "path": folder_path,
+                            "session_key": session_key,
+                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        },
+                    )
+                except Exception:
+                    response_text = f"I couldn't find your {folder_name} folder anywhere in your allowed host locations."
+                    await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                    )
             response_text = self._format_host_directory_response(folder_name, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
@@ -2408,58 +2459,58 @@ class GatewayRouter:
         if filename_only_reference is None and self._looks_like_document_read_request(lowered):
             filename_only_reference = self._extract_bare_document_reference(original_message)
         if filename_only_reference and self._looks_like_document_read_request(lowered):
-            try:
-                search_result = await self.tool_registry.dispatch(
-                    "search_host_files",
-                    {
-                        "root": "@allowed",
-                        "pattern": "*",
-                        "name_query": filename_only_reference,
-                        "files_only": True,
-                        "limit": 20,
-                        "session_key": session_key,
-                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
-                    },
-                )
-            except Exception as exc:
-                return ResponseFrame(id=request_id, ok=False, error=str(exc))
-
-            file_match = self._pick_file_match(filename_only_reference, search_result)
-            if file_match is None:
-                matches = [match for match in search_result.get("matches", []) if not match.get("is_dir")]
-                if matches:
-                    response_text = self._format_file_selection_prompt(filename_only_reference, matches)
-                    await self._update_session_metadata(
-                        session_key,
-                        updates={
-                            HOST_FILE_CONFIRMATION_KEY: {
-                                "mode": "file_selection",
-                                "display_name": filename_only_reference,
-                                "candidates": matches,
-                            }
+            search_roots = self._resolve_document_search_roots(folder_name)
+            aggregated_matches: list[dict[str, Any]] = []
+            seen_roots: set[str] = set()
+            for search_root in search_roots:
+                normalized_root = search_root.strip()
+                if not normalized_root or normalized_root in seen_roots:
+                    continue
+                seen_roots.add(normalized_root)
+                try:
+                    search_result = await self.tool_registry.dispatch(
+                        "search_host_files",
+                        {
+                            "root": normalized_root,
+                            "pattern": "*",
+                            "name_query": filename_only_reference,
+                            "files_only": True,
+                            "limit": 20,
+                            "session_key": session_key,
+                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
                         },
                     )
-                else:
-                    response_text = f"I couldn't find {filename_only_reference} anywhere in your allowed host locations."
-                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
-                return ResponseFrame(
-                    id=request_id,
-                    ok=True,
-                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
-                )
+                except Exception as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
 
-            explicit_file_path = str(file_match.get("path", "")) or f"~/Downloads/{filename_only_reference}"
-            response_text = f"I found {filename_only_reference} at {explicit_file_path}. Is this the correct file?"
-            await self._update_session_metadata(
-                session_key,
-                updates={
-                    HOST_FILE_CONFIRMATION_KEY: {
-                        "mode": "file_confirmation",
-                        "path": explicit_file_path,
-                        "display_name": filename_only_reference,
-                    }
-                },
-            )
+                file_match = self._pick_file_match(filename_only_reference, search_result)
+                if file_match is not None:
+                    explicit_file_path = str(file_match.get("path", "")) or f"@allowed/{filename_only_reference}"
+                    return await self._read_and_summarize_host_file(
+                        request_id=request_id,
+                        session_key=session_key,
+                        original_message=original_message,
+                        metadata=metadata,
+                        path=explicit_file_path,
+                        display_name=str(file_match.get("name", "")) or filename_only_reference,
+                    )
+
+                aggregated_matches.extend(match for match in search_result.get("matches", []) if not match.get("is_dir"))
+
+            if aggregated_matches:
+                response_text = self._format_file_selection_prompt(filename_only_reference, aggregated_matches)
+                await self._update_session_metadata(
+                    session_key,
+                    updates={
+                        HOST_FILE_CONFIRMATION_KEY: {
+                            "mode": "file_selection",
+                            "display_name": filename_only_reference,
+                            "candidates": aggregated_matches,
+                        }
+                    },
+                )
+            else:
+                response_text = f"I couldn't find {filename_only_reference} anywhere in your allowed host locations."
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -2535,7 +2586,7 @@ class GatewayRouter:
                 result = await self.tool_registry.dispatch(
                     "search_host_files",
                     {
-                        "root": explicit_root or "@allowed",
+                        "root": explicit_root or (f"~/{folder_name}" if folder_name is not None else "@allowed"),
                         "pattern": "*",
                         "name_query": search_term,
                         "directories_only": wants_folder,
@@ -2624,14 +2675,14 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
-        desktop_note = self._parse_desktop_note_creation_request(original_message)
-        if desktop_note is not None:
-            filename, content = desktop_note
+        host_note = self._parse_host_note_creation_request(original_message)
+        if host_note is not None:
+            filename, folder_name, content = host_note
             try:
                 result = await self.tool_registry.dispatch(
                     "write_host_file",
                     {
-                        "path": f"~/Desktop/{filename}",
+                        "path": f"~/{folder_name}/{filename}",
                         "content": content,
                         "session_key": session_key,
                         "user_id": metadata.get("user_id", self.config.users.default_user_id),
@@ -2640,7 +2691,7 @@ class GatewayRouter:
                 )
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            response_text = self._format_host_write_response(filename, "Desktop", result)
+            response_text = self._format_host_write_response(filename, folder_name, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -2648,11 +2699,11 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
-        if self._looks_like_desktop_note_request(lowered):
+        if self._looks_like_host_note_request(lowered):
             response_text = (
-                "I can create that directly on your Desktop now. "
+                "I can create that directly in your Desktop, Downloads, Documents, Pictures, Music, or Videos folder now. "
                 "Tell me the filename and content, for example: "
-                "\"create a note called todo.txt on my Desktop with content Buy milk\"."
+                "\"create a note called todo.txt on my Downloads with content Buy milk\"."
             )
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
@@ -3210,25 +3261,99 @@ class GatewayRouter:
                 "what is in",
                 "what's in",
                 "what folders are in",
-                "open folder",
                 "show contents",
                 "show the contents",
-                "browse",
             )
         )
 
     def _match_known_host_folder(self, lowered: str) -> str | None:
-        mapping = {
-            "downloads": "Downloads",
-            "desktop": "Desktop",
-            "documents": "Documents",
-            "pictures": "Pictures",
-            "music": "Music",
-            "videos": "Videos",
-        }
-        for token, folder in mapping.items():
-            if token in lowered:
-                return folder
+        for _, folder_root in self._configured_host_folder_roots():
+            folder_name = Path(folder_root).name.strip()
+            if not folder_name:
+                continue
+            folder_tokens = {
+                folder_name.lower(),
+                folder_name.replace("_", " ").lower(),
+                folder_name.replace("-", " ").lower(),
+            }
+            if folder_name.lower() == "r:":
+                folder_tokens.update({"r", "r:", "r drive", "drive r"})
+            if any(token and token in lowered for token in folder_tokens):
+                return folder_name
+        return None
+
+    def _configured_host_folder_roots(self) -> list[tuple[str, str]]:
+        configured = getattr(self.config.system_access, "path_rules", [])
+        roots: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for rule in configured:
+            if isinstance(rule, dict):
+                raw_path = str(rule.get("path", "")).strip()
+                read_mode = str(rule.get("read", "auto_allow"))
+            else:
+                raw_path = str(getattr(rule, "path", "")).strip()
+                read_mode = str(getattr(rule, "read", "auto_allow"))
+            if not raw_path or read_mode == "deny":
+                continue
+            resolved = str(Path(raw_path).expanduser()).strip()
+            normalized = resolved.replace("\\", "/").rstrip("/")
+            if normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            roots.append((raw_path, resolved))
+        if not roots:
+            roots.append(("@allowed", "@allowed"))
+        return roots
+
+    def _resolve_document_search_roots(self, folder_name: str | None) -> list[str]:
+        if folder_name is None:
+            return ["@allowed"]
+        lowered = folder_name.lower().strip()
+        candidate_roots: list[str] = ["@allowed"]
+        for raw_path, resolved_path in self._configured_host_folder_roots():
+            folder_leaf = Path(resolved_path).name.lower()
+            raw_leaf = Path(raw_path).name.lower()
+            normalized_leafs = {folder_leaf, raw_leaf}
+            if lowered in normalized_leafs or lowered == folder_leaf or lowered == raw_leaf:
+                candidate_roots.append(raw_path)
+                if raw_path != resolved_path:
+                    candidate_roots.append(resolved_path)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for root in candidate_roots:
+            normalized = root.strip()
+            if normalized and normalized.lower() not in seen:
+                seen.add(normalized.lower())
+                deduped.append(normalized)
+        return deduped
+
+    async def _resolve_known_host_folder_path(
+        self,
+        folder_name: str,
+        session_key: str,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        try:
+            result = await self.tool_registry.dispatch(
+                "search_host_files",
+                {
+                    "root": "@allowed",
+                    "pattern": "*",
+                    "name_query": folder_name,
+                    "directories_only": True,
+                    "limit": 20,
+                    "session_key": session_key,
+                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                },
+            )
+        except Exception:
+            return None
+        folder_match = self._pick_folder_match_for_contents(folder_name, result)
+        if folder_match is not None:
+            return str(folder_match.get("path", "")) or None
+        matches = [match for match in result.get("matches", []) if match.get("is_dir")]
+        if len(matches) == 1:
+            return str(matches[0].get("path", "")) or None
         return None
 
     def _extract_explicit_host_file_path(self, message: str) -> str | None:
@@ -3305,6 +3430,8 @@ class GatewayRouter:
         patterns = (
             r"\b(?:the\s+)?file\s+name\s+(.+)$",
             r"\bfilename\s+(.+)$",
+            r"^(?:please\s+)?(?:read|open|show|summarize|summarise|give\s+me\s+summary\s+of|tell\s+me\s+about)\s+(.+?)\s+is\s+in\s+(?:my\s+)?(?:desktop|downloads|documents|pictures|music|videos)\b",
+            r"^(.+?)\s+is\s+in\s+(?:my\s+)?(?:desktop|downloads|documents|pictures|music|videos)\b",
             r"\b(?:find|search(?:\s+for)?|look(?:\s+for|\s+up)?|read|open|show|summarize|summarise)\s+(.+)$",
         )
         for pattern in patterns:
@@ -3312,6 +3439,13 @@ class GatewayRouter:
             if not match:
                 continue
             candidate = match.group(1).strip().strip("\"'").rstrip(",.;:")
+            candidate = re.sub(r"^\d+\s*[.)]\s*", "", candidate).strip()
+            candidate = re.sub(
+                r"\b(?:is|are)\s+in\s+(?:my\s+)?(?:desktop|downloads|documents|pictures|music|videos)\b.*$",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            ).strip()
             candidate = re.sub(
                 r"\b(?:for me|please|thanks?|thank you|to summarize|to summarise)\b.*$",
                 "",
@@ -3321,8 +3455,6 @@ class GatewayRouter:
             candidate = re.sub(r"\b(?:and\s+)?(?:summarize|summarise)\b.*$", "", candidate, flags=re.IGNORECASE).strip()
             candidate = re.sub(r"\b(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE).strip()
             if not candidate:
-                continue
-            if "." in Path(candidate).name:
                 continue
             if len(candidate) >= 3 and any(ch.isalpha() for ch in candidate):
                 return candidate
@@ -3368,6 +3500,7 @@ class GatewayRouter:
 
     def _extract_host_search_term(self, lowered: str) -> str | None:
         patterns = (
+            r"\b(?:search|find)(?:\s+for)?\s+(.+?)\s+(?:in|on)\s+(?:my\s+)?(?:desktop|downloads|documents|pictures|music|videos)\b",
             r"\b(?:search|find)(?:\s+for)?\s+(.+?)\s+(?:folder|file|directory)\b",
             r"\b(.+?)\s+(?:folder|file|directory)\s+(?:in|on)\s+(?:the\s+)?(?:r\s*:|r\s*drive|r\s*dive)\b",
         )
@@ -3413,6 +3546,12 @@ class GatewayRouter:
         if normalized == "r:/":
             return "R drive"
         return root
+
+    def _build_open_folder_command(self, folder_path: str) -> str:
+        # Expand ~ to the actual home directory for Windows explorer.exe
+        expanded_path = str(Path(folder_path).expanduser())
+        escaped_path = expanded_path.replace('"', '`"')
+        return f'explorer.exe "{escaped_path}"'
 
     def _wants_folder_contents(self, lowered: str) -> bool:
         return any(
@@ -3474,22 +3613,25 @@ class GatewayRouter:
         }
         return command_map.get(app_name, f"Start-Process -FilePath '{app_name}'")
 
-    def _looks_like_desktop_note_request(self, lowered: str) -> bool:
-        return "desktop" in lowered and "note" in lowered and any(token in lowered for token in ("create", "make", "write"))
+    def _looks_like_host_note_request(self, lowered: str) -> bool:
+        return any(folder in lowered for folder in ("desktop", "downloads", "documents", "pictures", "music", "videos")) and "note" in lowered and any(
+            token in lowered for token in ("create", "make", "write")
+        )
 
-    def _parse_desktop_note_creation_request(self, message: str) -> tuple[str, str] | None:
+    def _parse_host_note_creation_request(self, message: str) -> tuple[str, str, str] | None:
         match = re.search(
-            r"(?:create|make|write)\s+(?:a\s+)?note(?:\s+called|\s+named)?\s+([^\s]+)\s+(?:on\s+my\s+desktop|to\s+my\s+desktop)\s+with\s+content\s+(.+)",
+            r"(?:create|make|write)\s+(?:a\s+)?note(?:\s+called|\s+named)?\s+([^\s]+)\s+(?:on|in|to|inside)\s+(?:my\s+)?(desktop|downloads|documents|pictures|music|videos)\s*(?:folder)?\s+with\s+content\s+(.+)",
             message,
             flags=re.IGNORECASE,
         )
         if not match:
             return None
         filename = match.group(1).strip().strip("\"'")
-        content = match.group(2).strip().strip("\"'")
+        folder_name = match.group(2).strip().capitalize()
+        content = match.group(3).strip().strip("\"'")
         if not filename.lower().endswith(".txt"):
             filename = f"{filename}.txt"
-        return (filename, content) if filename and content else None
+        return (filename, folder_name, content) if filename and folder_name and content else None
 
     async def _parse_contextual_host_file_creation_request(
         self,
@@ -3743,6 +3885,12 @@ class GatewayRouter:
         if len(entries) > 12:
             lines.append(f"...and {len(entries) - 12} more.")
         return "\n".join(lines)
+
+    def _format_open_folder_response(self, folder_name: str, result: dict[str, Any]) -> str:
+        stderr = str(result.get("stderr", "")).strip() if isinstance(result, dict) else ""
+        if stderr:
+            return f"I couldn't open your {folder_name} folder in File Explorer: {stderr}"
+        return f"Opened your {folder_name} folder in File Explorer."
 
     def _format_host_search_response(self, search_term: str, result: dict[str, Any]) -> str:
         matches = result.get("matches", []) if isinstance(result, dict) else []

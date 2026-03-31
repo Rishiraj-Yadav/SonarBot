@@ -2,7 +2,7 @@
 
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 
-import { fetchJson } from "../lib/gateway_client";
+import { fetchJson, gatewayFetch } from "../lib/gateway_client";
 
 type BrowserTab = {
   tab_id: string;
@@ -289,7 +289,7 @@ export function BrowserPanel() {
     const x = Math.round((localX / metrics.displayWidth) * metrics.naturalWidth);
     const y = Math.round((localY / metrics.displayHeight) * metrics.naturalHeight);
     try {
-      const response = await fetch("http://localhost:8765/webchat/browser/click", {
+      const response = await gatewayFetch("/webchat/browser/click", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
@@ -306,7 +306,7 @@ export function BrowserPanel() {
 
   const stopActiveWorkflow = async () => {
     try {
-      await fetch("http://localhost:8765/api/browser/workflow/stop", {
+      await gatewayFetch("/api/browser/workflow/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",

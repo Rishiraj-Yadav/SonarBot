@@ -21,8 +21,8 @@ class SystemAccessRuntime:
     def __init__(self, config, store) -> None:
         self.config = config
         self.store = store
-        self.home_root = config.system_access.home_root.resolve()
-        self.backup_root = config.system_access.backup_root.resolve()
+        self.home_root = config.system_access.home_root.expanduser().resolve()
+        self.backup_root = config.system_access.backup_root.expanduser().resolve()
         self.protected_roots = [Path(path).expanduser().resolve() for path in config.system_access.protected_roots]
         self.path_rules = self._build_effective_path_rules()
         self.default_outside_policy = config.system_access.default_outside_policy
@@ -35,7 +35,7 @@ class SystemAccessRuntime:
             candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = self.home_root / candidate
-        return self._resolve_known_user_folder(candidate.resolve())
+        return self._resolve_known_user_path(candidate.resolve())
 
     def resolve_home_path(self, raw_path: str) -> Path:
         return self.resolve_host_path(raw_path)
@@ -73,9 +73,10 @@ class SystemAccessRuntime:
         return roots
 
     def _iter_known_user_folder_candidates(self, base_home: Path, folder_name: str) -> list[Path]:
-        candidates = [base_home / folder_name]
+        candidates: list[Path] = []
         for one_drive_root in self._iter_one_drive_roots(base_home):
             candidates.append(one_drive_root / folder_name)
+        candidates.append(base_home / folder_name)
         return candidates
 
     def _preferred_known_user_folder(self, folder_name: str) -> Path:
@@ -109,6 +110,22 @@ class SystemAccessRuntime:
                 if alt.exists():
                     return alt.resolve()
         return candidate
+
+    def _resolve_known_user_path(self, candidate: Path) -> Path:
+        resolved = candidate.resolve()
+        try:
+            relative = resolved.relative_to(self.home_root)
+        except ValueError:
+            return self._resolve_known_user_folder(resolved)
+        if not relative.parts:
+            return resolved
+        first_segment = relative.parts[0]
+        if first_segment.lower() not in self._known_user_folder_names():
+            return self._resolve_known_user_folder(resolved)
+        folder_root = self._preferred_known_user_folder(first_segment)
+        if len(relative.parts) == 1:
+            return folder_root.resolve()
+        return (folder_root / Path(*relative.parts[1:])).resolve()
 
     def extract_command_paths(self, command: str) -> list[Path]:
         pattern = re.compile(
@@ -468,6 +485,7 @@ class SystemAccessRuntime:
                     overwrite = getattr(rule, "overwrite", "always_ask")
                     delete = getattr(rule, "delete", "always_ask")
                     execute = getattr(rule, "execute", "ask_once")
+                path = self._resolve_known_user_folder(path).resolve()
                 rules.append(
                     PathAccessRule(
                         path=path,
@@ -480,7 +498,7 @@ class SystemAccessRuntime:
                 )
             return rules
         if self.home_root != Path.home().resolve():
-            return [
+            rules = [
                 PathAccessRule(
                     path=self.home_root,
                     read="auto_allow",
@@ -489,7 +507,16 @@ class SystemAccessRuntime:
                     delete="always_ask",
                     execute="ask_once",
                 )
-        ]
+            ]
+            seen = {self.home_root.resolve()}
+            for folder_name in ("Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos"):
+                folder_path = self._preferred_known_user_folder(folder_name)
+                resolved = folder_path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rules.append(PathAccessRule(path=resolved))
+            return rules
         return [
             PathAccessRule(path=self._preferred_known_user_folder("Desktop")),
             PathAccessRule(path=self._preferred_known_user_folder("Documents")),

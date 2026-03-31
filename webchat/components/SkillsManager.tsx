@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { gatewayFetch } from "../lib/gateway_client";
+
 type Skill = {
   name: string;
   description: string;
@@ -16,14 +18,14 @@ export function SkillsManager() {
   const [skills, setSkills] = useState<Skill[]>([]);
 
   useEffect(() => {
-    fetch("http://localhost:8765/api/skills")
+    gatewayFetch("/api/skills")
       .then((response) => response.json())
       .then((data) => setSkills(data.skills ?? []))
       .catch(() => undefined);
   }, []);
 
   async function toggle(name: string) {
-    const response = await fetch(`http://localhost:8765/api/skills/${encodeURIComponent(name)}/toggle`, {
+    const response = await gatewayFetch(`/api/skills/${encodeURIComponent(name)}/toggle`, {
       method: "POST",
     });
     const updated = await response.json();

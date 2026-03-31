@@ -235,6 +235,48 @@ class DummyToolRegistry:
             query = str(payload.get("name_query", ""))
             query_compact = re.sub(r"[^a-z0-9]+", "", query.lower())
             root = str(payload.get("root", "@allowed"))
+            if query_compact.startswith("onlineapplicationreceipt3"):
+                return {
+                    "root": root,
+                    "searched_roots": ["C:/Users/ashis/Downloads"] if root == "@allowed" else [root],
+                    "matches": [
+                        {
+                            "name": "Online Application Receipt (3).pdf",
+                            "path": "C:/Users/ashis/Downloads/Online Application Receipt (3).pdf",
+                            "is_dir": False,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if query_compact.startswith("1introductiontosoftwareengineering2526"):
+                return {
+                    "root": root,
+                    "searched_roots": ["C:/Users/ashis/Downloads"] if root == "@allowed" else [root],
+                    "matches": [
+                        {
+                            "name": "1. Introduction to Software Engineering 25-26.pdf",
+                            "path": "C:/Users/ashis/Downloads/1. Introduction to Software Engineering 25-26.pdf",
+                            "is_dir": False,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if query_compact == "pictures":
+                return {
+                    "root": root,
+                    "searched_roots": ["C:/Users/ashis/Pictures", "C:/Users/ashis/OneDrive/Pictures"],
+                    "matches": [
+                        {
+                            "name": "Pictures",
+                            "path": "C:/Users/ashis/OneDrive/Pictures",
+                            "is_dir": True,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
             if root == "@allowed" and query_compact.startswith("proteinintroduction1whyitmatters"):
                 return {
                     "root": root,
@@ -257,6 +299,27 @@ class DummyToolRegistry:
                         {
                             "name": "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx",
                             "path": "C:/Users/ashis/Documents/History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx",
+                            "is_dir": False,
+                        }
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if root == "@allowed" and query_compact.startswith("citylights"):
+                return {
+                    "root": root,
+                    "searched_roots": [
+                        "C:/Users/ashis/Desktop",
+                        "C:/Users/ashis/Documents",
+                        "C:/Users/ashis/Downloads",
+                        "C:/Users/ashis/Pictures",
+                        "C:/Users/ashis/Music",
+                        "C:/Users/ashis/Videos",
+                    ],
+                    "matches": [
+                        {
+                            "name": "City_Lights.mp3",
+                            "path": "C:/Users/ashis/Music/City_Lights.mp3",
                             "is_dir": False,
                         }
                     ],
@@ -1268,6 +1331,82 @@ async def test_router_host_shortcut_searches_named_folder(app_config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_searches_files_in_desktop_folder(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-search-desktop",
+        request_id="req-host-search-desktop",
+        session_key="telegram:123",
+        message="search for webchat-test in my Desktop",
+        metadata={"trace_id": "trace-host-search-desktop", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[0][1]["root"] == "~/Desktop"
+    assert tool_registry.calls[0][1]["name_query"] == "webchat-test"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_beats_stale_browser_context_for_desktop_queries(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager.session.metadata = browser_task_state_update(
+        active_task={
+            "recipe_name": "google_search_open",
+            "site_name": "google",
+            "query": "example",
+            "execution_mode": "visible",
+            "awaiting_followup": "workflow_plan",
+        }
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-search-stale-browser",
+        request_id="req-host-search-stale-browser",
+        session_key="telegram:123",
+        message="search for webchat-test in my Desktop",
+        metadata={"trace_id": "trace-host-search-stale-browser", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[0][1]["root"] == "~/Desktop"
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_searches_named_folder_on_r_drive(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(
@@ -1332,6 +1471,76 @@ async def test_router_host_shortcut_opens_named_folder_and_lists_contents(app_co
     assert response.ok is True
     assert "R:/6_semester/SPCC" in response.payload["command_response"]
     assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "list_host_dir"]
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_opens_pictures_folder(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-pictures-open",
+        request_id="req-host-pictures-open",
+        session_key="telegram:123",
+        message="open my Pictures folder",
+        metadata={"trace_id": "trace-host-pictures-open", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Opened your Pictures folder in File Explorer." in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "exec_shell"
+    assert tool_registry.calls[0][1]["command"].lower().startswith("explorer.exe ")
+    assert "pictures" in tool_registry.calls[0][1]["command"].lower()
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_opens_downloads_folder(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-downloads-open",
+        request_id="req-host-downloads-open",
+        session_key="telegram:123",
+        message="open my Downloads folder",
+        metadata={"trace_id": "trace-host-downloads-open", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Opened your Downloads folder in File Explorer." in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "exec_shell"
+    assert tool_registry.calls[0][1]["command"].lower().startswith("explorer.exe ")
+    assert "downloads" in tool_registry.calls[0][1]["command"].lower()
 
 
 @pytest.mark.asyncio
@@ -1436,21 +1645,84 @@ async def test_router_host_shortcut_reads_filename_only_pptx_from_downloads(app_
         mode=QueueMode.STEER,
     )
 
-    second_response = await router.route_user_message(
-        connection_id="conn-host-pptx-filename",
-        request_id="req-host-pptx-filename-confirm",
+    assert first_response.ok is True
+    assert "Summary:" in first_response.payload["command_response"]
+    assert "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx" in first_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_downloads_summary_request_without_browser_fallback(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-download-summary",
+        request_id="req-host-download-summary",
         session_key="telegram:123",
-        message="yes",
-        metadata={"trace_id": "trace-host-pptx-filename-confirm", "user_id": "default"},
+        message="Online Application Receipt (3) is in Downloads give me summary of this",
+        metadata={"trace_id": "trace-host-download-summary", "user_id": "default"},
         mode=QueueMode.STEER,
     )
 
-    assert first_response.ok is True
-    assert "Is this the correct file?" in first_response.payload["command_response"]
-    assert "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx" in first_response.payload["command_response"]
-    assert second_response.ok is True
-    assert "Summary:" in second_response.payload["command_response"]
-    assert "C:/Users/ashis/Documents/Protein_Introduction_ 1 Why_It_Matters.pptx" in second_response.payload["command_response"]
+    assert response.ok is True
+    assert "Summary:" in response.payload["command_response"]
+    assert "Online Application Receipt (3).pdf" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_numbered_downloads_summary_request_without_browser_fallback(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-numbered-download-summary",
+        request_id="req-host-numbered-download-summary",
+        session_key="telegram:123",
+        message="1. Introduction to Software Engineering 25-26 is in downloads give me summary for this",
+        metadata={"trace_id": "trace-host-numbered-download-summary", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Summary:" in response.payload["command_response"]
+    assert "1. Introduction to Software Engineering 25-26.pdf" in response.payload["command_response"]
     assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
     assert browser_workflow_engine.calls == []
 
@@ -1486,21 +1758,49 @@ async def test_router_host_shortcut_reads_bare_title_pptx_without_browser_fallba
         mode=QueueMode.STEER,
     )
 
-    second_response = await router.route_user_message(
-        connection_id="conn-host-bare-title",
-        request_id="req-host-bare-title-confirm",
+    assert first_response.ok is True
+    assert "Summary:" in first_response.payload["command_response"]
+    assert "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx" in first_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
+    assert browser_workflow_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_unique_file_without_folder_mention_from_allowed_roots(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = DummyBrowserWorkflowEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-allowed-roots",
+        request_id="req-host-allowed-roots",
         session_key="telegram:123",
-        message="yes",
-        metadata={"trace_id": "trace-host-bare-title-confirm", "user_id": "default"},
+        message="please read and summarize City_Lights.mp3 for me",
+        metadata={"trace_id": "trace-host-allowed-roots", "user_id": "default"},
         mode=QueueMode.STEER,
     )
 
-    assert first_response.ok is True
-    assert "Is this the correct file?" in first_response.payload["command_response"]
-    assert "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx" in first_response.payload["command_response"]
-    assert second_response.ok is True
-    assert "Summary:" in second_response.payload["command_response"]
-    assert "History_of_Protein 2 _Discovery 2 _Ancient_to_AlphaFold.pptx" in second_response.payload["command_response"]
+    assert response.ok is True
+    assert "Summary:" in response.payload["command_response"]
+    assert "City_Lights.mp3" in response.payload["command_response"]
+    assert "C:/Users/ashis/Music/City_Lights.mp3" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[0][1]["root"] == "@allowed"
     assert [call[0] for call in tool_registry.calls[:3]] == ["search_host_files", "read_host_document", "llm_task"]
     assert browser_workflow_engine.calls == []
 
@@ -1763,6 +2063,41 @@ async def test_router_host_shortcut_creates_desktop_note_when_filename_and_conte
     assert "created todo.txt in your desktop" in response.payload["command_response"].lower()
     assert tool_registry.calls[0][0] == "write_host_file"
     assert tool_registry.calls[0][1]["path"] == "~/Desktop/todo.txt"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_downloads_note_when_filename_and_content_are_given(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4-downloads",
+        request_id="req-host-4-downloads",
+        session_key="telegram:123",
+        message="create a note called downloads-log on my Downloads with content hello from downloads",
+        metadata={"trace_id": "trace-host-4-downloads", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "created downloads-log.txt in your downloads" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "~/Downloads/downloads-log.txt"
+    assert tool_registry.calls[0][1]["content"] == "hello from downloads"
 
 
 @pytest.mark.asyncio

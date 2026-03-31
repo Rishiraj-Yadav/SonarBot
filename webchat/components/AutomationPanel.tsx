@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { fetchJson } from "../lib/gateway_client";
+import { fetchJson, gatewayFetch } from "../lib/gateway_client";
 
 type NotificationItem = {
   notification_id: string;
@@ -122,7 +122,7 @@ export function AutomationPanel() {
   async function toggleRule(rule: AutomationRule) {
     const path = rule.paused ? `/api/automation/rules/${rule.name}/resume` : `/api/automation/rules/${rule.name}/pause`;
     try {
-      await fetch(`http://localhost:8765${path}`, { method: "POST" });
+      await gatewayFetch(path, { method: "POST" });
       setRules((current) => current.map((item) => (item.name === rule.name ? { ...item, paused: !item.paused } : item)));
     } catch {
       return;

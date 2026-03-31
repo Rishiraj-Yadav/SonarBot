@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from assistant.agent.loop import AgentLoop
@@ -357,6 +358,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             await session_manager.stop_pruning_task()
 
     app = FastAPI(title="SonarBot Gateway", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/__health")
     async def health() -> dict[str, object]:

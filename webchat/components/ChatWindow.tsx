@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { MessageBubble } from "./MessageBubble";
-import { createGatewaySocket, fetchJson } from "../lib/gateway_client";
+import { createGatewaySocket, fetchJson, gatewayFetch } from "../lib/gateway_client";
 
 type ChatMessage = {
   id: string;
@@ -163,7 +163,7 @@ export function ChatWindow() {
       return;
     }
     try {
-      await fetch(`http://localhost:8765/api/system-access/approvals/${approvalId}`, {
+      await gatewayFetch(`/api/system-access/approvals/${approvalId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decision }),
