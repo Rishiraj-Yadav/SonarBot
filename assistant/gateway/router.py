@@ -395,6 +395,62 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": "Automation rules:\n" + "\n".join(lines), "rules": rules},
             )
 
+        if command_name == "desktop":
+            if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop automation is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._desktop_help_text(),
+                    },
+                )
+            if subcommand in {"list", "ls"}:
+                rules = await self.automation_engine.list_rules(user_id)
+                desktop_rules = self._filter_desktop_rules(rules)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._format_desktop_rules_response(desktop_rules),
+                        "rules": desktop_rules,
+                    },
+                )
+            if subcommand in {"pause", "resume", "delete", "remove", "rm"}:
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error=f"Use /desktop {subcommand} <rule_name>.")
+                rules = await self.automation_engine.list_rules(user_id)
+                desktop_rules = self._filter_desktop_rules(rules)
+                matched_rule, error_text = self._match_desktop_rule_reference(desktop_rules, subargs)
+                if error_text:
+                    return ResponseFrame(id=request_id, ok=False, error=error_text)
+                assert matched_rule is not None
+                rule_name = str(matched_rule.get("name", ""))
+                display_name = str(matched_rule.get("display_name") or rule_name)
+                if subcommand == "pause":
+                    await self.automation_engine.pause_rule(user_id, rule_name)
+                    response_text = f"Paused desktop automation '{display_name}'."
+                elif subcommand == "resume":
+                    await self.automation_engine.resume_rule(user_id, rule_name)
+                    response_text = f"Resumed desktop automation '{display_name}'."
+                else:
+                    await self.automation_engine.delete_rule(user_id, rule_name)
+                    response_text = f"Deleted desktop automation '{display_name}'."
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            return ResponseFrame(id=request_id, ok=False, error="Unknown /desktop subcommand. Use /desktop help.")
+
         if command_name == "cron":
             user_id = await self._resolve_user_id(connection_id, session_key)
             subcommand, subargs = self._split_command_arguments(arguments)
@@ -961,6 +1017,16 @@ class GatewayRouter:
         if one_time_shortcut is not None:
             return one_time_shortcut
 
+        desktop_automation_shortcut = await self._handle_desktop_automation_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if desktop_automation_shortcut is not None:
+            return desktop_automation_shortcut
+
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
@@ -1089,6 +1155,90 @@ class GatewayRouter:
                 "one_time_reminder": reminder,
             },
         )
+
+    async def _handle_desktop_automation_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+            return None
+        management_response = await self._handle_desktop_automation_management_shortcut(
+            session_key,
+            original_message,
+            lowered,
+            metadata,
+        )
+        if management_response is not None:
+            await self._persist_inline_exchange(session_key, original_message, management_response, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": management_response},
+            )
+        parsed = await self._parse_desktop_automation_request(session_key, original_message, lowered, metadata)
+        if parsed is None:
+            return None
+        if parsed.get("response_text"):
+            response_text = str(parsed["response_text"])
+        else:
+            user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+            rule = await self.automation_engine.create_desktop_automation_rule(user_id, **parsed)
+            response_text = self._format_desktop_automation_creation_response(rule)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_desktop_automation_management_shortcut(
+        self,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+            return None
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        if normalized in {
+            "list my desktop automations",
+            "show my desktop automations",
+            "list desktop automations",
+            "show desktop automations",
+            "what desktop automations do i have",
+        }:
+            rules = await self.automation_engine.list_rules(user_id)
+            return self._format_desktop_rules_response(self._filter_desktop_rules(rules))
+        action_match = re.match(
+            r"^(?P<action>pause|resume|delete|remove)\s+(?:my\s+)?desktop\s+automation\s+(?P<name>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if action_match is None:
+            return None
+        rules = await self.automation_engine.list_rules(user_id)
+        desktop_rules = self._filter_desktop_rules(rules)
+        matched_rule, error_text = self._match_desktop_rule_reference(desktop_rules, str(action_match.group("name")))
+        if error_text:
+            return error_text
+        assert matched_rule is not None
+        rule_name = str(matched_rule.get("name", ""))
+        display_name = str(matched_rule.get("display_name") or rule_name)
+        action = str(action_match.group("action")).lower()
+        if action == "pause":
+            await self.automation_engine.pause_rule(user_id, rule_name)
+            return f"Paused desktop automation '{display_name}'."
+        if action == "resume":
+            await self.automation_engine.resume_rule(user_id, rule_name)
+            return f"Resumed desktop automation '{display_name}'."
+        await self.automation_engine.delete_rule(user_id, rule_name)
+        return f"Deleted desktop automation '{display_name}'."
 
     async def _handle_host_shortcut(
         self,
@@ -1516,6 +1666,15 @@ class GatewayRouter:
             "/cron delete <cron_id>"
         )
 
+    def _desktop_help_text(self) -> str:
+        return (
+            "Desktop automation commands:\n"
+            "/desktop list\n"
+            "/desktop pause <rule_name>\n"
+            "/desktop resume <rule_name>\n"
+            "/desktop delete <rule_name>"
+        )
+
     def _browser_help_text(self) -> str:
         return (
             "Browser commands:\n"
@@ -1709,6 +1868,246 @@ class GatewayRouter:
         if not normalized.lower().startswith("reminder:"):
             normalized = f"Reminder: {normalized}"
         return normalized
+
+    async def _parse_desktop_automation_request(
+        self,
+        session_key: str,
+        message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        watch_notify_match = re.match(
+            r"^watch\s+(?P<source>.+?)\s+and\s+notify\s+me\s+for\s+new\s+(?:(?P<ext>[a-z0-9]+)\s+)?files?$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if watch_notify_match:
+            source_path = await self._resolve_desktop_automation_path(
+                session_key,
+                str(watch_notify_match.group("source")),
+                metadata,
+            )
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the watched folder '{watch_notify_match.group('source')}' inside your allowed host locations."}
+            extension = (watch_notify_match.group("ext") or "").strip().lower()
+            return {
+                "name": f"Watch {Path(source_path).name}",
+                "trigger_type": "file_watch",
+                "watch_path": source_path,
+                "event_types": ["file_created"],
+                "file_extensions": [extension] if extension else [],
+                "filename_pattern": "*",
+                "action_type": "notify",
+                "destination_path": "",
+                "cooldown_seconds": 10,
+                "dedupe_window_seconds": 10,
+                "delivery_policy": "primary",
+                "severity": "info",
+            }
+        watch_match = re.match(
+            r"^when\s+(?:a|an)\s+(?:(?P<ext>[a-z0-9]+)\s+)?file\s+appears\s+in\s+(?P<source>.+?)\s*,?\s*(?P<action>move|copy|rename|delete|notify)(?:\s+it)?(?:\s+to\s+(?P<dest>.+))?$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if watch_match:
+            source_path = await self._resolve_desktop_automation_path(
+                session_key,
+                str(watch_match.group("source")),
+                metadata,
+            )
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the watched folder '{watch_match.group('source')}' inside your allowed host locations."}
+            action = str(watch_match.group("action")).lower()
+            destination_path = ""
+            if action in {"move", "copy"}:
+                dest_value = str(watch_match.group("dest") or "").strip()
+                if not dest_value:
+                    return {"response_text": f"I need a destination folder for the '{action}' action."}
+                resolved_destination = await self._resolve_desktop_automation_path(session_key, dest_value, metadata)
+                if resolved_destination is None:
+                    return {"response_text": f"I couldn't resolve the destination folder '{dest_value}' inside your allowed host locations."}
+                destination_path = resolved_destination
+            extension = (watch_match.group("ext") or "").strip().lower()
+            return {
+                "name": f"Desktop automation for {Path(source_path).name}",
+                "trigger_type": "file_watch",
+                "watch_path": source_path,
+                "event_types": ["file_created"],
+                "file_extensions": [extension] if extension and extension != "file" else [],
+                "filename_pattern": "*",
+                "action_type": "notify" if action == "notify" else action,
+                "destination_path": destination_path,
+                "cooldown_seconds": 10,
+                "dedupe_window_seconds": 10,
+                "delivery_policy": "primary",
+                "severity": "info",
+            }
+        organize_named_time_match = re.match(
+            r"^every\s+(?P<time>morning|afternoon|evening|night|noon|midnight)\s+organize\s+my\s+(?P<source>desktop|downloads|documents|download2|[a-z0-9._ /-]+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if organize_named_time_match:
+            source_path = await self._resolve_desktop_automation_path(
+                session_key,
+                str(organize_named_time_match.group("source")),
+                metadata,
+            )
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the folder '{organize_named_time_match.group('source')}' inside your allowed host locations."}
+            schedule = self._build_schedule_from_frequency_and_time("daily", str(organize_named_time_match.group("time")))
+            if schedule is None:
+                return {"response_text": "I couldn't understand that schedule. Try something like 'every night organize my Desktop'."}
+            return {
+                "name": f"Organize {Path(source_path).name}",
+                "trigger_type": "schedule",
+                "watch_path": source_path,
+                "schedule": schedule,
+                "event_types": ["scheduled"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "action_type": "organize",
+                "destination_path": "",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+            }
+        organize_match = re.match(
+            r"^every\s+(?P<frequency>weekday|day|daily|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+organize\s+my\s+(?P<source>desktop|downloads|documents|download2|[a-z0-9._ /-]+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if organize_match:
+            source_path = await self._resolve_desktop_automation_path(
+                session_key,
+                str(organize_match.group("source")),
+                metadata,
+            )
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the folder '{organize_match.group('source')}' inside your allowed host locations."}
+            schedule = self._build_schedule_from_frequency_and_time(
+                str(organize_match.group("frequency")),
+                str(organize_match.group("time")),
+            )
+            if schedule is None:
+                return {"response_text": "I couldn't understand that schedule. Try something like 'every weekday at 9 am organize my Desktop'."}
+            return {
+                "name": f"Organize {Path(source_path).name}",
+                "trigger_type": "schedule",
+                "watch_path": source_path,
+                "schedule": schedule,
+                "event_types": ["scheduled"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "action_type": "organize",
+                "destination_path": "",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+            }
+        return None
+
+    async def _resolve_desktop_automation_path(
+        self,
+        session_key: str,
+        value: str,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        raw = value.strip().strip("\"'")
+        explicit = self._extract_explicit_host_path(raw)
+        if explicit is not None:
+            return explicit
+        raw_normalized = raw.replace("\\", "/").strip().strip("/")
+        if "/" in raw_normalized:
+            base_name, *rest = [segment for segment in raw_normalized.split("/") if segment]
+            base_path = self._resolve_known_host_folder_reference(base_name)
+            if base_path is not None:
+                return str(Path(base_path, *rest)).replace("\\", "/")
+        known = self._resolve_known_host_folder_reference(raw)
+        if known is not None:
+            return known
+        resolution = await self._resolve_host_directory_reference(session_key, raw, None, metadata)
+        if resolution is not None and resolution.get("path"):
+            return str(resolution["path"])
+        return None
+
+    def _format_desktop_automation_creation_response(self, rule: dict[str, Any]) -> str:
+        trigger_type = str(rule.get("trigger_type", "file_watch"))
+        display_name = str(rule.get("name") or rule.get("display_name") or rule.get("rule_id", "desktop rule"))
+        if trigger_type == "schedule":
+            return f"Created desktop automation '{display_name}' on schedule {rule.get('schedule', '')}."
+        extension_summary = ""
+        if rule.get("file_extensions"):
+            extension_summary = f" for .{rule['file_extensions'][0]} files"
+        return (
+            f"Created desktop automation '{display_name}' watching {rule.get('watch_path', '')}{extension_summary} "
+            f"with action {rule.get('action_type', 'notify')}."
+        )
+
+    def _filter_desktop_rules(self, rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            rule
+            for rule in rules
+            if str(rule.get("trigger", "")).lower() == "desktop"
+            or str(rule.get("name", "")).lower().startswith("desktop:")
+            or "trigger_type" in rule
+        ]
+
+    def _format_desktop_rules_response(self, rules: list[dict[str, Any]]) -> str:
+        if not rules:
+            return "No desktop automations configured."
+        lines = ["Desktop automations:"]
+        for rule in rules:
+            display_name = str(rule.get("display_name") or rule.get("name", "desktop rule"))
+            state = "paused" if bool(rule.get("paused")) else "active"
+            trigger_type = str(rule.get("trigger_type", "file_watch"))
+            if trigger_type == "schedule":
+                summary = str(rule.get("schedule", ""))
+            else:
+                summary = str(rule.get("watch_path", ""))
+                extensions = rule.get("file_extensions") or []
+                if extensions:
+                    summary = f"{summary} | .{extensions[0]}"
+            lines.append(f"- {display_name}: {state} | {trigger_type} | {summary} | {rule.get('action_type', 'notify')}")
+        return "\n".join(lines)
+
+    def _match_desktop_rule_reference(
+        self,
+        rules: list[dict[str, Any]],
+        raw_reference: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        reference = raw_reference.strip().strip("\"'")
+        if not reference:
+            return None, "Please provide a desktop automation name."
+        compact_reference = self._compact_search_name(reference.removeprefix("desktop automation").strip())
+        exact_matches: list[dict[str, Any]] = []
+        partial_matches: list[dict[str, Any]] = []
+        for rule in rules:
+            candidates = {
+                str(rule.get("name", "")),
+                str(rule.get("display_name", "")),
+                str(rule.get("rule_id", "")),
+            }
+            compact_candidates = {self._compact_search_name(candidate) for candidate in candidates if candidate}
+            if compact_reference in compact_candidates:
+                exact_matches.append(rule)
+                continue
+            if any(compact_reference and compact_reference in candidate for candidate in compact_candidates):
+                partial_matches.append(rule)
+        if len(exact_matches) == 1:
+            return exact_matches[0], None
+        if len(exact_matches) > 1:
+            names = ", ".join(str(rule.get("display_name") or rule.get("name", "desktop rule")) for rule in exact_matches[:5])
+            return None, f"I found multiple desktop automations matching that name: {names}."
+        if len(partial_matches) == 1:
+            return partial_matches[0], None
+        if len(partial_matches) > 1:
+            names = ", ".join(str(rule.get("display_name") or rule.get("name", "desktop rule")) for rule in partial_matches[:5])
+            return None, f"I found multiple desktop automations matching that name: {names}."
+        return None, f"I couldn't find a desktop automation named '{reference}'."
 
     def _skill_payload(self, skill: Any) -> dict[str, Any]:
         return {

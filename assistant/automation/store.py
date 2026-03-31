@@ -8,7 +8,16 @@ from typing import Any
 
 import aiosqlite
 
-from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRun, DynamicCronJob, Notification, OneTimeReminder, utc_now_iso
+from assistant.automation.models import (
+    ApprovalRequest,
+    AutomationEvent,
+    AutomationRun,
+    DesktopAutomationRule,
+    DynamicCronJob,
+    Notification,
+    OneTimeReminder,
+    utc_now_iso,
+)
 
 
 class AutomationStore:
@@ -131,6 +140,33 @@ class AutomationStore:
                     message TEXT NOT NULL,
                     paused INTEGER NOT NULL DEFAULT 0,
                     fired INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS desktop_automation_rules (
+                    rule_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL,
+                    watch_path TEXT NOT NULL,
+                    schedule TEXT NOT NULL,
+                    event_types_json TEXT NOT NULL,
+                    file_extensions_json TEXT NOT NULL,
+                    filename_pattern TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    destination_path TEXT NOT NULL,
+                    target_name_template TEXT NOT NULL,
+                    content_template TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    cooldown_seconds INTEGER NOT NULL DEFAULT 30,
+                    dedupe_window_seconds INTEGER NOT NULL DEFAULT 30,
+                    delivery_policy TEXT NOT NULL DEFAULT 'primary',
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    last_event_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -851,4 +887,163 @@ class AutomationStore:
                 (user_id, reminder_id),
             )
             await db.commit()
-            return bool(cursor.rowcount)
+        return bool(cursor.rowcount)
+
+    async def create_desktop_rule(self, rule: DesktopAutomationRule) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO desktop_automation_rules (
+                    rule_id, user_id, name, trigger_type, watch_path, schedule, event_types_json,
+                    file_extensions_json, filename_pattern, action_type, destination_path,
+                    target_name_template, content_template, paused, cooldown_seconds,
+                    dedupe_window_seconds, delivery_policy, severity, last_event_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule.rule_id,
+                    rule.user_id,
+                    rule.name,
+                    rule.trigger_type,
+                    rule.watch_path,
+                    rule.schedule,
+                    json.dumps(rule.event_types),
+                    json.dumps(rule.file_extensions),
+                    rule.filename_pattern,
+                    rule.action_type,
+                    rule.destination_path,
+                    rule.target_name_template,
+                    rule.content_template,
+                    int(rule.paused),
+                    rule.cooldown_seconds,
+                    rule.dedupe_window_seconds,
+                    rule.delivery_policy,
+                    rule.severity,
+                    rule.last_event_at,
+                    rule.created_at,
+                    rule.updated_at,
+                ),
+            )
+            await db.commit()
+
+    async def list_desktop_rules(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT rule_id, user_id, name, trigger_type, watch_path, schedule, event_types_json,
+                       file_extensions_json, filename_pattern, action_type, destination_path,
+                       target_name_template, content_template, paused, cooldown_seconds,
+                       dedupe_window_seconds, delivery_policy, severity, last_event_at, created_at, updated_at
+                FROM desktop_automation_rules
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ) as cursor:
+                async for row in cursor:
+                    rows.append(self._desktop_rule_row_to_dict(row))
+        return rows
+
+    async def list_all_desktop_rules(self, *, include_paused: bool = False, limit: int = 500) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        query = (
+            """
+            SELECT rule_id, user_id, name, trigger_type, watch_path, schedule, event_types_json,
+                   file_extensions_json, filename_pattern, action_type, destination_path,
+                   target_name_template, content_template, paused, cooldown_seconds,
+                   dedupe_window_seconds, delivery_policy, severity, last_event_at, created_at, updated_at
+            FROM desktop_automation_rules
+            """
+            + ("" if include_paused else " WHERE paused = 0")
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, (limit,)) as cursor:
+                async for row in cursor:
+                    rows.append(self._desktop_rule_row_to_dict(row))
+        return rows
+
+    async def get_desktop_rule(self, user_id: str, rule_id: str) -> dict[str, Any] | None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT rule_id, user_id, name, trigger_type, watch_path, schedule, event_types_json,
+                       file_extensions_json, filename_pattern, action_type, destination_path,
+                       target_name_template, content_template, paused, cooldown_seconds,
+                       dedupe_window_seconds, delivery_policy, severity, last_event_at, created_at, updated_at
+                FROM desktop_automation_rules
+                WHERE user_id = ? AND rule_id = ?
+                """,
+                (user_id, rule_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return self._desktop_rule_row_to_dict(row) if row is not None else None
+
+    async def set_desktop_rule_paused(self, user_id: str, rule_id: str, paused: bool) -> dict[str, Any] | None:
+        await self.initialize()
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE desktop_automation_rules
+                SET paused = ?, updated_at = ?
+                WHERE user_id = ? AND rule_id = ?
+                """,
+                (int(paused), updated_at, user_id, rule_id),
+            )
+            await db.commit()
+        return await self.get_desktop_rule(user_id, rule_id)
+
+    async def update_desktop_rule_last_event(self, user_id: str, rule_id: str, last_event_at: str) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE desktop_automation_rules
+                SET last_event_at = ?, updated_at = ?
+                WHERE user_id = ? AND rule_id = ?
+                """,
+                (last_event_at, utc_now_iso(), user_id, rule_id),
+            )
+            await db.commit()
+
+    async def delete_desktop_rule(self, user_id: str, rule_id: str) -> bool:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM desktop_automation_rules WHERE user_id = ? AND rule_id = ?",
+                (user_id, rule_id),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    def _desktop_rule_row_to_dict(self, row: Any) -> dict[str, Any]:
+        return {
+            "rule_id": row[0],
+            "user_id": row[1],
+            "name": row[2],
+            "trigger_type": row[3],
+            "watch_path": row[4],
+            "schedule": row[5],
+            "event_types": json.loads(row[6] or "[]"),
+            "file_extensions": json.loads(row[7] or "[]"),
+            "filename_pattern": row[8],
+            "action_type": row[9],
+            "destination_path": row[10],
+            "target_name_template": row[11],
+            "content_template": row[12],
+            "paused": bool(row[13]),
+            "cooldown_seconds": row[14],
+            "dedupe_window_seconds": row[15],
+            "delivery_policy": row[16],
+            "severity": row[17],
+            "last_event_at": row[18],
+            "created_at": row[19],
+            "updated_at": row[20],
+        }

@@ -51,6 +51,13 @@ default_action = "deny"
 inbox_retention_days = 30
 default_severity = "info"
 
+[automation.desktop]
+enabled = false
+watch_enabled = false
+ignored_patterns = ["~$*", "*.tmp", "*.temp", "*.crdownload", "*.part", ".DS_Store"]
+event_debounce_ms = 1500
+poll_interval_seconds = 3
+
 [context_engine]
 enabled = false
 interval_minutes = 180

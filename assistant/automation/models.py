@@ -105,3 +105,28 @@ class OneTimeReminder:
     fired: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class DesktopAutomationRule:
+    rule_id: str
+    user_id: str
+    name: str
+    trigger_type: str
+    watch_path: str = ""
+    schedule: str = ""
+    event_types: list[str] = field(default_factory=list)
+    file_extensions: list[str] = field(default_factory=list)
+    filename_pattern: str = "*"
+    action_type: str = "notify"
+    destination_path: str = ""
+    target_name_template: str = ""
+    content_template: str = ""
+    paused: bool = False
+    cooldown_seconds: int = 30
+    dedupe_window_seconds: int = 30
+    delivery_policy: str = "primary"
+    severity: str = "info"
+    last_event_at: str = ""
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)

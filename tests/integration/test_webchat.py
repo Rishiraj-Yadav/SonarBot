@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
@@ -161,3 +162,30 @@ def test_webchat_context_engine_api_exposes_engine_status(app_config) -> None:
         payload = response.json()
         assert payload["engine"]["enabled"] is True
         assert "snapshot_dir" in payload["engine"]
+
+
+def test_webchat_automation_rules_api_includes_desktop_rules(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app) as client:
+        services = app.state.services
+        created = asyncio.run(
+            services.automation_engine.create_desktop_automation_rule(
+                app_config.users.default_user_id,
+                name="Move PDFs from Download2",
+                trigger_type="file_watch",
+                watch_path="R:/Download2",
+                event_types=["file_created"],
+                file_extensions=["pdf"],
+                action_type="move",
+                destination_path="R:/Documents/PDFs",
+            )
+        )
+
+        response = client.get("/api/automation/rules")
+
+        assert response.status_code == 200
+        rules = response.json()["rules"]
+        assert any(rule["name"] == f"desktop:{created['rule_id']}" for rule in rules)

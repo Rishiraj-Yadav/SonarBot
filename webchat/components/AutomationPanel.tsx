@@ -25,6 +25,13 @@ type AutomationRule = {
   name: string;
   trigger: string;
   paused: boolean;
+  display_name?: string;
+  trigger_type?: string;
+  watch_path?: string;
+  schedule?: string;
+  action_type?: string;
+  file_extensions?: string[];
+  last_event_at?: string;
 };
 
 type NotificationsResponse = {
@@ -60,6 +67,17 @@ function bodyPreview(title: string, body: string) {
     return "";
   }
   return normalizedBody;
+}
+
+function ruleSummary(rule: AutomationRule) {
+  if (rule.trigger === "desktop") {
+    if (rule.trigger_type === "schedule") {
+      return `scheduled ${rule.schedule ?? ""} · action ${rule.action_type ?? "notify"}`.trim();
+    }
+    const extension = rule.file_extensions && rule.file_extensions.length > 0 ? ` · .${rule.file_extensions.join(", .")}` : "";
+    return `${rule.watch_path ?? "watched folder"}${extension} · action ${rule.action_type ?? "notify"}`.trim();
+  }
+  return rule.trigger;
 }
 
 export function AutomationPanel() {
@@ -213,8 +231,9 @@ export function AutomationPanel() {
             {rules.map((rule) => (
               <div key={rule.name} className="flex items-center justify-between gap-3 rounded-[1.35rem] border border-line/80 bg-white/95 p-4">
                 <div>
-                  <div className="text-sm font-medium text-ink">{rule.name}</div>
-                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{rule.trigger}</div>
+                  <div className="text-sm font-medium text-ink">{rule.display_name ?? rule.name}</div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{ruleSummary(rule)}</div>
+                  {rule.last_event_at ? <div className="mt-1 text-[11px] text-slate-500">Last event: {shortTime(rule.last_event_at)}</div> : null}
                 </div>
                 <button
                   type="button"

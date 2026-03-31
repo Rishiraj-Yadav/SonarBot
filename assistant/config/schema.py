@@ -142,6 +142,23 @@ class AutomationNotificationsConfig(BaseModel):
     default_severity: str = "info"
 
 
+class DesktopAutomationConfig(BaseModel):
+    enabled: bool = False
+    watch_enabled: bool = False
+    ignored_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "~$*",
+            "*.tmp",
+            "*.temp",
+            "*.crdownload",
+            "*.part",
+            ".DS_Store",
+        ]
+    )
+    event_debounce_ms: int = 1500
+    poll_interval_seconds: int = 3
+
+
 class AutomationConfig(BaseModel):
     heartbeat_interval_minutes: int = 15
     cron_jobs: list[CronJobConfig] = Field(default_factory=list)
@@ -150,6 +167,7 @@ class AutomationConfig(BaseModel):
     delivery: AutomationDeliveryConfig = Field(default_factory=AutomationDeliveryConfig)
     approvals: AutomationApprovalsConfig = Field(default_factory=AutomationApprovalsConfig)
     notifications: AutomationNotificationsConfig = Field(default_factory=AutomationNotificationsConfig)
+    desktop: DesktopAutomationConfig = Field(default_factory=DesktopAutomationConfig)
 
 
 class ContextEngineConfig(BaseModel):

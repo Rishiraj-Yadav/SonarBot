@@ -20,6 +20,7 @@ from assistant.automation import (
     AutomationEngine,
     AutomationScheduler,
     AutomationStore,
+    DesktopAutomationWatcher,
     HeartbeatService,
     NotificationDispatcher,
     StandingOrdersManager,
@@ -82,6 +83,7 @@ class GatewayServices:
     user_profiles: UserProfileStore
     automation_store: AutomationStore
     automation_engine: AutomationEngine
+    desktop_watcher: DesktopAutomationWatcher
     context_engine: ContextEngine
     system_access_manager: SystemAccessManager
     browser_runtime: Any
@@ -192,8 +194,10 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles,
             automation_store,
             notification_dispatcher,
+            system_access_manager=system_access_manager,
         )
         await automation_engine.initialize()
+        desktop_watcher = DesktopAutomationWatcher(runtime_config, automation_engine)
         context_engine = ContextEngine(
             runtime_config,
             model_provider=provider,
@@ -237,6 +241,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles=user_profiles,
             automation_store=automation_store,
             automation_engine=automation_engine,
+            desktop_watcher=desktop_watcher,
             context_engine=context_engine,
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
@@ -247,6 +252,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         await agent_loop.start()
         if automation_scheduler is not None:
             await automation_scheduler.start()
+        await desktop_watcher.start()
         await heartbeat_service.start()
         for channel in channels:
             connection_manager.register_channel(channel)
@@ -261,6 +267,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             for channel in channels:
                 await channel.stop()
             await heartbeat_service.stop()
+            await desktop_watcher.stop()
             if automation_scheduler is not None:
                 await automation_scheduler.stop()
             await context_engine.stop()
@@ -356,6 +363,14 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
         await services.automation_engine.resume_rule(user_id, name)
         return {"ok": True, "name": name, "paused": False}
+
+    @app.delete("/api/automation/rules/{name}")
+    async def delete_automation_rule(name: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        deleted = await services.automation_engine.delete_rule(user_id, name)
+        return {"ok": deleted, "name": name}
 
     @app.post("/api/automation/runs/{run_id}/replay")
     async def replay_automation_run(run_id: str) -> dict[str, Any]:

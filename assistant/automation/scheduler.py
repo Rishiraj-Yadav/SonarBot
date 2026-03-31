@@ -45,6 +45,14 @@ class AutomationScheduler:
                 message=str(reminder["message"]),
                 user_id=str(reminder["user_id"]),
             )
+        for rule in await self.automation_engine.list_all_desktop_rules():
+            if str(rule.get("trigger_type")) != "schedule" or bool(rule.get("paused")):
+                continue
+            self._add_desktop_job(
+                rule_id=str(rule["rule_id"]),
+                user_id=str(rule["user_id"]),
+                schedule=str(rule["schedule"]),
+            )
         self.scheduler.start()
 
     async def stop(self) -> None:
@@ -107,6 +115,22 @@ class AutomationScheduler:
         if job is not None:
             self.scheduler.remove_job(self._one_time_job_id(reminder_id))
 
+    async def register_desktop_rule(self, rule: dict[str, object]) -> None:
+        if self.scheduler is None or str(rule.get("trigger_type", "schedule")) != "schedule":
+            return
+        self._add_desktop_job(
+            rule_id=str(rule["rule_id"]),
+            user_id=str(rule["user_id"]),
+            schedule=str(rule["schedule"]),
+        )
+
+    async def remove_desktop_rule(self, rule_id: str) -> None:
+        if self.scheduler is None:
+            return
+        job = self.scheduler.get_job(self._desktop_job_id(rule_id))
+        if job is not None:
+            self.scheduler.remove_job(self._desktop_job_id(rule_id))
+
     def _add_job(
         self,
         *,
@@ -147,6 +171,24 @@ class AutomationScheduler:
             replace_existing=True,
         )
 
+    def _add_desktop_job(
+        self,
+        *,
+        rule_id: str,
+        user_id: str,
+        schedule: str,
+    ) -> None:
+        from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+        trigger = CronTrigger.from_crontab(schedule)
+        self.scheduler.add_job(
+            self.automation_engine.handle_desktop_schedule_rule,
+            trigger=trigger,
+            id=self._desktop_job_id(rule_id),
+            kwargs={"rule_id": rule_id, "user_id": user_id},
+            replace_existing=True,
+        )
+
     def _dynamic_job_id(self, cron_id: str) -> str:
         return f"dynamic-cron-{cron_id}"
 
@@ -155,3 +197,6 @@ class AutomationScheduler:
 
     def _one_time_job_id(self, reminder_id: str) -> str:
         return f"one-time-{reminder_id}"
+
+    def _desktop_job_id(self, rule_id: str) -> str:
+        return f"desktop-{rule_id}"

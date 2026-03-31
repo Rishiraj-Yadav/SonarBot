@@ -12,11 +12,13 @@ from uuid import uuid4
 
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.automation.delivery import NotificationDispatcher
+from assistant.automation.desktop_executor import DesktopAutomationExecutor
 from assistant.automation.models import (
     ApprovalRequest,
     AutomationEvent,
     AutomationRule,
     AutomationRun,
+    DesktopAutomationRule,
     DynamicCronJob,
     Notification,
     OneTimeReminder,
@@ -34,6 +36,7 @@ class AutomationEngine:
         user_profiles,
         store,
         dispatcher: NotificationDispatcher,
+        system_access_manager=None,
     ) -> None:
         self.config = config
         self.agent_loop = agent_loop
@@ -43,6 +46,8 @@ class AutomationEngine:
         self.store = store
         self.dispatcher = dispatcher
         self.scheduler = None
+        self.system_access_manager = system_access_manager
+        self.desktop_executor = DesktopAutomationExecutor(system_access_manager) if system_access_manager is not None else None
 
     async def initialize(self) -> None:
         await self.store.initialize()
@@ -156,6 +161,9 @@ class AutomationEngine:
             payload["one_time"] = True
             payload["reminder_id"] = str(reminder["reminder_id"])
             rules.append(payload)
+        desktop_rules = await self.store.list_desktop_rules(user_id)
+        for desktop_rule in desktop_rules:
+            rules.append(self._desktop_rule_to_payload(desktop_rule, state.get(self._desktop_rule_name(str(desktop_rule["rule_id"])), {})))
         webhook_names = sorted(self.config.automation.webhooks.keys())
         for webhook_name in webhook_names:
             rule = self._webhook_rule(webhook_name, f"Webhook event from {webhook_name}")
@@ -177,13 +185,26 @@ class AutomationEngine:
         if rule_name.startswith("dynamic-cron:"):
             await self.pause_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
             return
+        if rule_name.startswith("desktop:"):
+            await self.pause_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, True)
 
     async def resume_rule(self, user_id: str, rule_name: str) -> None:
         if rule_name.startswith("dynamic-cron:"):
             await self.resume_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
             return
+        if rule_name.startswith("desktop:"):
+            await self.resume_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, False)
+
+    async def delete_rule(self, user_id: str, rule_name: str) -> bool:
+        if rule_name.startswith("dynamic-cron:"):
+            return await self.delete_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
+        if rule_name.startswith("desktop:"):
+            return await self.delete_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
+        return False
 
     async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, Any]:
         normalized_schedule = self._validate_cron_schedule(schedule)
@@ -255,6 +276,127 @@ class AutomationEngine:
             "updated_at": reminder.updated_at,
         }
 
+    async def create_desktop_automation_rule(
+        self,
+        user_id: str,
+        *,
+        name: str,
+        trigger_type: str,
+        watch_path: str = "",
+        schedule: str = "",
+        event_types: list[str] | None = None,
+        file_extensions: list[str] | None = None,
+        filename_pattern: str = "*",
+        action_type: str = "notify",
+        destination_path: str = "",
+        target_name_template: str = "",
+        content_template: str = "",
+        cooldown_seconds: int = 30,
+        dedupe_window_seconds: int = 30,
+        delivery_policy: str = "primary",
+        severity: str = "info",
+    ) -> dict[str, Any]:
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("Desktop automation rule name cannot be empty.")
+        if trigger_type not in {"file_watch", "schedule"}:
+            raise ValueError("Desktop automation trigger_type must be 'file_watch' or 'schedule'.")
+        if trigger_type == "file_watch" and not watch_path.strip():
+            raise ValueError("Desktop file-watch rules require a watch path.")
+        if trigger_type == "schedule":
+            schedule = self._validate_cron_schedule(schedule)
+        rule = DesktopAutomationRule(
+            rule_id=uuid4().hex[:12],
+            user_id=user_id,
+            name=cleaned_name,
+            trigger_type=trigger_type,
+            watch_path=watch_path.strip(),
+            schedule=schedule.strip(),
+            event_types=event_types or ["file_created"],
+            file_extensions=[item.strip().lstrip(".").lower() for item in (file_extensions or []) if item.strip()],
+            filename_pattern=filename_pattern.strip() or "*",
+            action_type=action_type,
+            destination_path=destination_path.strip(),
+            target_name_template=target_name_template.strip(),
+            content_template=content_template.strip(),
+            cooldown_seconds=max(0, int(cooldown_seconds)),
+            dedupe_window_seconds=max(0, int(dedupe_window_seconds)),
+            delivery_policy=delivery_policy,
+            severity=severity,
+        )
+        await self.store.create_desktop_rule(rule)
+        await self.store.set_rule_paused(user_id, self._desktop_rule_name(rule.rule_id), False)
+        if self.scheduler is not None and rule.trigger_type == "schedule":
+            await self.scheduler.register_desktop_rule(
+                {
+                    "rule_id": rule.rule_id,
+                    "user_id": user_id,
+                    "schedule": rule.schedule,
+                    "name": rule.name,
+                }
+            )
+        return await self.store.get_desktop_rule(user_id, rule.rule_id) or {}
+
+    async def list_all_desktop_rules(self) -> list[dict[str, Any]]:
+        return await self.store.list_all_desktop_rules(include_paused=False)
+
+    async def pause_desktop_rule(self, user_id: str, rule_id: str) -> dict[str, Any]:
+        rule = await self.store.set_desktop_rule_paused(user_id, rule_id, True)
+        if rule is None:
+            raise KeyError(f"Unknown desktop rule '{rule_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_rule_name(rule_id), True)
+        if self.scheduler is not None and str(rule.get("trigger_type")) == "schedule":
+            await self.scheduler.remove_desktop_rule(rule_id)
+        return rule
+
+    async def resume_desktop_rule(self, user_id: str, rule_id: str) -> dict[str, Any]:
+        rule = await self.store.set_desktop_rule_paused(user_id, rule_id, False)
+        if rule is None:
+            raise KeyError(f"Unknown desktop rule '{rule_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_rule_name(rule_id), False)
+        if self.scheduler is not None and str(rule.get("trigger_type")) == "schedule":
+            await self.scheduler.register_desktop_rule(rule)
+        return rule
+
+    async def delete_desktop_rule(self, user_id: str, rule_id: str) -> bool:
+        deleted = await self.store.delete_desktop_rule(user_id, rule_id)
+        if not deleted:
+            raise KeyError(f"Unknown desktop rule '{rule_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_rule_name(rule_id), True)
+        if self.scheduler is not None:
+            await self.scheduler.remove_desktop_rule(rule_id)
+        return True
+
+    async def handle_desktop_watch_event(self, rule_id: str, user_id: str, event_type: str, path: str) -> dict[str, Any]:
+        rule = await self.store.get_desktop_rule(user_id, rule_id)
+        if rule is None or self.desktop_executor is None:
+            return {"status": "skipped", "reason": "missing-rule"}
+        if not self.desktop_executor.matches_event(rule, event_type=event_type, path=path):
+            return {"status": "skipped", "reason": "filter"}
+        event = self._build_event(
+            event_type=f"desktop:{event_type}",
+            user_id=user_id,
+            source=self._desktop_rule_name(rule_id),
+            payload={"path": path, "event_type": event_type, "trigger_type": "file_watch"},
+            dedupe_key=f"{rule_id}:{event_type}:{path}",
+            priority=55,
+        )
+        return await self._run_desktop_event(event, rule)
+
+    async def handle_desktop_schedule_rule(self, rule_id: str, user_id: str) -> dict[str, Any]:
+        rule = await self.store.get_desktop_rule(user_id, rule_id)
+        if rule is None or self.desktop_executor is None:
+            return {"status": "skipped", "reason": "missing-rule"}
+        event = self._build_event(
+            event_type="desktop:schedule",
+            user_id=user_id,
+            source=self._desktop_rule_name(rule_id),
+            payload={"path": str(rule.get("watch_path", "")), "event_type": "scheduled", "trigger_type": "schedule"},
+            dedupe_key=f"{rule_id}:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}",
+            priority=55,
+        )
+        return await self._run_desktop_event(event, rule)
+
     async def list_dynamic_cron_jobs(self, user_id: str) -> list[dict[str, Any]]:
         return await self.store.list_dynamic_cron_jobs(user_id)
 
@@ -324,6 +466,11 @@ class AutomationEngine:
                 str(event["payload"].get("message", "")),
                 user_id=str(run["user_id"]),
                 run_at=str(event["payload"].get("run_at", "")),
+            )
+        if rule_name.startswith("desktop:"):
+            return await self.handle_desktop_schedule_rule(
+                rule_name.removeprefix("desktop:"),
+                user_id=str(run["user_id"]),
             )
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
@@ -450,6 +597,62 @@ class AutomationEngine:
         )
         await self.store.update_event_status(event.event_id, "completed")
         return {"status": "completed", "notification_id": delivered.notification_id, "rule_name": rule.name}
+
+    async def _run_desktop_event(self, event: AutomationEvent, rule: dict[str, Any]) -> dict[str, Any]:
+        should_skip, reason = await self.store.should_skip_for_dedupe(
+            event.user_id,
+            self._desktop_rule_name(str(rule["rule_id"])),
+            event.dedupe_key,
+            int(rule.get("dedupe_window_seconds", 30)),
+            int(rule.get("cooldown_seconds", 30)),
+        )
+        await self.store.record_event(event, status="skipped" if should_skip else "queued")
+        if should_skip:
+            return {"status": "skipped", "reason": reason, "rule_name": self._desktop_rule_name(str(rule["rule_id"]))}
+        session_key = f"automation:{event.user_id}:{self._slug(str(rule['name']))}"
+        run = AutomationRun(
+            run_id=uuid4().hex,
+            event_id=event.event_id,
+            user_id=event.user_id,
+            rule_name=self._desktop_rule_name(str(rule["rule_id"])),
+            session_key=session_key,
+            status="running",
+            prompt=str(rule["name"]),
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+        )
+        await self.store.create_run(run)
+        await self.store.update_event_status(event.event_id, "running")
+        result = await self.desktop_executor.execute(
+            rule=rule,
+            event_payload=event.payload,
+            session_key=session_key,
+            session_id=run.run_id,
+            user_id=event.user_id,
+        )
+        message = str(result.get("message", "")).strip()
+        notification = Notification(
+            notification_id=uuid4().hex,
+            user_id=event.user_id,
+            title=message[:80] or f"Desktop automation: {rule['name']}",
+            body=message,
+            source=self._desktop_rule_name(str(rule["rule_id"])),
+            severity=str(rule.get("severity", "info")),
+            delivery_mode=str(rule.get("delivery_policy", "primary")),
+            status="queued",
+            target_channels=[],
+            metadata={"rule_name": rule["name"], "event_id": event.event_id, "desktop_rule_id": rule["rule_id"]},
+        )
+        delivered = await self.dispatcher.dispatch(notification)
+        await self.store.finish_run(
+            run.run_id,
+            status="completed",
+            result_text=message,
+            notification_id=delivered.notification_id,
+        )
+        await self.store.update_event_status(event.event_id, "completed")
+        await self.store.update_desktop_rule_last_event(event.user_id, str(rule["rule_id"]), utc_now_iso())
+        return {"status": "completed", "notification_id": delivered.notification_id, "rule_name": rule["name"]}
 
     def _build_event(
         self,
@@ -640,6 +843,9 @@ class AutomationEngine:
     def _one_time_reminder_rule_name(self, reminder_id: str) -> str:
         return f"one-time:{reminder_id}"
 
+    def _desktop_rule_name(self, rule_id: str) -> str:
+        return f"desktop:{rule_id}"
+
     def _rule_to_payload(self, rule: AutomationRule, state: dict[str, Any]) -> dict[str, Any]:
         return {
             "name": rule.name,
@@ -654,6 +860,27 @@ class AutomationEngine:
             "paused": bool(state.get("paused", False)),
             "last_run_at": state.get("last_run_at", ""),
             "last_notification_at": state.get("last_notification_at", ""),
+        }
+
+    def _desktop_rule_to_payload(self, rule: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": self._desktop_rule_name(str(rule["rule_id"])),
+            "display_name": str(rule["name"]),
+            "trigger": "desktop",
+            "trigger_type": str(rule["trigger_type"]),
+            "watch_path": str(rule.get("watch_path", "")),
+            "schedule": str(rule.get("schedule", "")),
+            "event_types": list(rule.get("event_types", [])),
+            "file_extensions": list(rule.get("file_extensions", [])),
+            "filename_pattern": str(rule.get("filename_pattern", "*")),
+            "action_type": str(rule.get("action_type", "notify")),
+            "destination_path": str(rule.get("destination_path", "")),
+            "paused": bool(rule.get("paused", False) or state.get("paused", False)),
+            "last_run_at": state.get("last_run_at", ""),
+            "last_notification_at": state.get("last_notification_at", ""),
+            "last_event_at": str(rule.get("last_event_at", "")),
+            "severity": str(rule.get("severity", "info")),
+            "delivery_policy": str(rule.get("delivery_policy", "primary")),
         }
 
     def _hash_payload(self, source: str, payload: dict[str, Any]) -> str:

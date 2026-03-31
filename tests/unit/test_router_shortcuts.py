@@ -375,13 +375,28 @@ class DummyAutomationEngine:
         return []
 
     async def list_rules(self, _user_id: str):
-        return []
+        return list(self.desktop_rules)
 
     async def pause_rule(self, _user_id: str, _rule_name: str) -> None:
-        return None
+        for rule in self.desktop_rules:
+            if rule["name"] == _rule_name:
+                rule["paused"] = True
+                return None
+        raise KeyError(f"Unknown rule '{_rule_name}'.")
 
     async def resume_rule(self, _user_id: str, _rule_name: str) -> None:
-        return None
+        for rule in self.desktop_rules:
+            if rule["name"] == _rule_name:
+                rule["paused"] = False
+                return None
+        raise KeyError(f"Unknown rule '{_rule_name}'.")
+
+    async def delete_rule(self, _user_id: str, _rule_name: str) -> None:
+        for index, rule in enumerate(self.desktop_rules):
+            if rule["name"] == _rule_name:
+                self.desktop_rules.pop(index)
+                return None
+        raise KeyError(f"Unknown rule '{_rule_name}'.")
 
     async def replay_run(self, _run_id: str):
         return {"status": "ok"}
@@ -395,6 +410,7 @@ class DummyAutomationEngine:
     def __init__(self) -> None:
         self.dynamic_jobs: list[dict[str, object]] = []
         self.one_time_reminders: list[dict[str, object]] = []
+        self.desktop_rules: list[dict[str, object]] = []
 
     async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
         job = {
@@ -442,6 +458,26 @@ class DummyAutomationEngine:
         }
         self.one_time_reminders = [reminder]
         return reminder
+
+    async def create_desktop_automation_rule(self, user_id: str, **payload) -> dict[str, object]:
+        rule = {
+            "rule_id": "desktop-rule-1",
+            "user_id": user_id,
+            "name": "desktop:desktop-rule-1",
+            "display_name": payload.get("name", "Desktop automation"),
+            "trigger": "desktop",
+            "trigger_type": payload.get("trigger_type", "file_watch"),
+            "watch_path": payload.get("watch_path", ""),
+            "schedule": payload.get("schedule", ""),
+            "event_types": payload.get("event_types", []),
+            "file_extensions": payload.get("file_extensions", []),
+            "filename_pattern": payload.get("filename_pattern", "*"),
+            "action_type": payload.get("action_type", "notify"),
+            "destination_path": payload.get("destination_path", ""),
+            "paused": False,
+        }
+        self.desktop_rules = [rule]
+        return rule
 
 
 class DummyUserProfiles:
@@ -1616,6 +1652,339 @@ async def test_router_host_shortcut_updates_recently_read_host_file_with_pronoun
     assert tool_registry.calls[1][0] == "write_host_file"
     assert tool_registry.calls[1][1]["path"] == "R:/C practice/testing123.docx"
     assert tool_registry.calls[1][1]["content"] == "xyz"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_desktop_file_watch_rule_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-auto-1",
+        request_id="req-desktop-auto-1",
+        session_key="telegram:123",
+        message="when a pdf file appears in download2, move it to documents/pdfs",
+        metadata={"trace_id": "trace-desktop-auto-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert automation_engine.desktop_rules
+    assert automation_engine.desktop_rules[0]["trigger_type"] == "file_watch"
+    assert automation_engine.desktop_rules[0]["action_type"] == "move"
+    assert automation_engine.desktop_rules[0]["file_extensions"] == ["pdf"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_desktop_schedule_rule_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Desktop",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-auto-2",
+        request_id="req-desktop-auto-2",
+        session_key="telegram:123",
+        message="every weekday at 9 am organize my desktop",
+        metadata={"trace_id": "trace-desktop-auto-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert automation_engine.desktop_rules
+    assert automation_engine.desktop_rules[0]["trigger_type"] == "schedule"
+    assert automation_engine.desktop_rules[0]["action_type"] == "organize"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_desktop_watch_notify_rule_from_broader_phrase(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-auto-3",
+        request_id="req-desktop-auto-3",
+        session_key="telegram:123",
+        message="watch download2 and notify me for new zip files",
+        metadata={"trace_id": "trace-desktop-auto-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert automation_engine.desktop_rules
+    assert automation_engine.desktop_rules[0]["trigger_type"] == "file_watch"
+    assert automation_engine.desktop_rules[0]["action_type"] == "notify"
+    assert automation_engine.desktop_rules[0]["file_extensions"] == ["zip"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_desktop_schedule_rule_from_named_time_phrase(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Desktop",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-auto-4",
+        request_id="req-desktop-auto-4",
+        session_key="telegram:123",
+        message="every night organize my desktop",
+        metadata={"trace_id": "trace-desktop-auto-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert automation_engine.desktop_rules
+    assert automation_engine.desktop_rules[0]["trigger_type"] == "schedule"
+    assert automation_engine.desktop_rules[0]["schedule"] == "0 21 * * *"
+
+
+@pytest.mark.asyncio
+async def test_router_lists_desktop_automations_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    automation_engine.desktop_rules = [
+        {
+            "rule_id": "desktop-rule-1",
+            "name": "desktop:desktop-rule-1",
+            "display_name": "Watch Download2",
+            "trigger": "desktop",
+            "trigger_type": "file_watch",
+            "watch_path": "R:/Download2",
+            "file_extensions": ["zip"],
+            "action_type": "notify",
+            "paused": False,
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-list-1",
+        request_id="req-desktop-list-1",
+        session_key="telegram:123",
+        message="list my desktop automations",
+        metadata={"trace_id": "trace-desktop-list-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Desktop automations:" in response.payload["command_response"]
+    assert "Watch Download2" in response.payload["command_response"]
+
+
+@pytest.mark.asyncio
+async def test_router_pauses_desktop_automation_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    automation_engine.desktop_rules = [
+        {
+            "rule_id": "desktop-rule-1",
+            "name": "desktop:desktop-rule-1",
+            "display_name": "Watch Download2",
+            "trigger": "desktop",
+            "trigger_type": "file_watch",
+            "watch_path": "R:/Download2",
+            "file_extensions": ["zip"],
+            "action_type": "notify",
+            "paused": False,
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-desktop-pause-1",
+        request_id="req-desktop-pause-1",
+        session_key="telegram:123",
+        message="pause desktop automation watch download2",
+        metadata={"trace_id": "trace-desktop-pause-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Paused desktop automation 'Watch Download2'." in response.payload["command_response"]
+    assert automation_engine.desktop_rules[0]["paused"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_desktop_slash_command_flow(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    automation_engine.desktop_rules = [
+        {
+            "rule_id": "desktop-rule-1",
+            "name": "desktop:desktop-rule-1",
+            "display_name": "Watch Download2",
+            "trigger": "desktop",
+            "trigger_type": "file_watch",
+            "watch_path": "R:/Download2",
+            "file_extensions": ["zip"],
+            "action_type": "notify",
+            "paused": False,
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    list_response = await router.route_user_message(
+        connection_id="conn-desktop-cmd-1",
+        request_id="req-desktop-cmd-1",
+        session_key="telegram:123",
+        message="/desktop list",
+        metadata={"trace_id": "trace-desktop-cmd-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    pause_response = await router.route_user_message(
+        connection_id="conn-desktop-cmd-2",
+        request_id="req-desktop-cmd-2",
+        session_key="telegram:123",
+        message="/desktop pause Watch Download2",
+        metadata={"trace_id": "trace-desktop-cmd-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    resume_response = await router.route_user_message(
+        connection_id="conn-desktop-cmd-3",
+        request_id="req-desktop-cmd-3",
+        session_key="telegram:123",
+        message="/desktop resume Watch Download2",
+        metadata={"trace_id": "trace-desktop-cmd-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    delete_response = await router.route_user_message(
+        connection_id="conn-desktop-cmd-4",
+        request_id="req-desktop-cmd-4",
+        session_key="telegram:123",
+        message="/desktop delete Watch Download2",
+        metadata={"trace_id": "trace-desktop-cmd-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert list_response.ok is True
+    assert "Watch Download2" in list_response.payload["command_response"]
+    assert pause_response.ok is True
+    assert "Paused desktop automation 'Watch Download2'." in pause_response.payload["command_response"]
+    assert resume_response.ok is True
+    assert "Resumed desktop automation 'Watch Download2'." in resume_response.payload["command_response"]
+    assert delete_response.ok is True
+    assert "Deleted desktop automation 'Watch Download2'." in delete_response.payload["command_response"]
+    assert automation_engine.desktop_rules == []
 
 
 @pytest.mark.asyncio

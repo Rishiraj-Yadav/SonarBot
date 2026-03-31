@@ -48,6 +48,8 @@ class FakeScheduler:
         self.paused: list[str] = []
         self.resumed: list[str] = []
         self.removed: list[str] = []
+        self.desktop_registered: list[dict[str, object]] = []
+        self.desktop_removed: list[str] = []
 
     async def register_dynamic_job(self, job: dict[str, object]) -> None:
         self.registered.append(dict(job))
@@ -60,6 +62,30 @@ class FakeScheduler:
 
     async def remove_dynamic_job(self, cron_id: str) -> None:
         self.removed.append(cron_id)
+
+    async def register_desktop_rule(self, rule: dict[str, object]) -> None:
+        self.desktop_registered.append(dict(rule))
+
+    async def remove_desktop_rule(self, rule_id: str) -> None:
+        self.desktop_removed.append(rule_id)
+
+
+class FakeSystemAccessManager:
+    def __init__(self) -> None:
+        self.moves: list[tuple[str, str]] = []
+
+    async def move_host_file(self, *, source: str, destination: str, session_key: str, session_id: str, user_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        self.moves.append((source, destination))
+        return {"status": "completed", "source": source, "destination": destination}
+
+    async def copy_host_file(self, *, source: str, destination: str, session_key: str, session_id: str, user_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        return {"status": "completed", "source": source, "destination": destination}
+
+    async def delete_host_file(self, *, path: str, session_key: str, session_id: str, user_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        return {"status": "completed", "path": path}
+
+    async def write_host_file(self, *, path: str, content: str, session_key: str, session_id: str, user_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        return {"status": "completed", "path": path, "content": content}
 
 
 @pytest.mark.asyncio
@@ -225,3 +251,62 @@ async def test_automation_engine_creates_and_fires_one_time_reminder(app_config)
     assert listed and listed[0]["reminder_id"] == created["reminder_id"]
     assert result["status"] == "completed"
     assert fired is not None and fired["fired"] is True
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_creates_desktop_rules_and_executes_watch_event(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    system_access_manager = FakeSystemAccessManager()
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+        system_access_manager=system_access_manager,
+    )
+    scheduler = FakeScheduler()
+    engine.set_scheduler(scheduler)
+
+    created = await engine.create_desktop_automation_rule(
+        app_config.users.default_user_id,
+        name="Move PDFs from Download2",
+        trigger_type="file_watch",
+        watch_path="R:/Download2",
+        event_types=["file_created"],
+        file_extensions=["pdf"],
+        action_type="move",
+        destination_path="R:/Documents/PDFs",
+    )
+    scheduled = await engine.create_desktop_automation_rule(
+        app_config.users.default_user_id,
+        name="Organize Desktop",
+        trigger_type="schedule",
+        watch_path="C:/Users/Ritesh/OneDrive/Desktop",
+        schedule="0 9 * * 1-5",
+        action_type="organize",
+    )
+    rules = await engine.list_rules(app_config.users.default_user_id)
+    result = await engine.handle_desktop_watch_event(
+        str(created["rule_id"]),
+        app_config.users.default_user_id,
+        "file_created",
+        "R:/Download2/report.pdf",
+    )
+
+    assert any(item["name"] == f"desktop:{created['rule_id']}" for item in rules)
+    assert any(item["name"] == f"desktop:{scheduled['rule_id']}" for item in rules)
+    assert result["status"] == "completed"
+    assert [(source.replace("\\", "/"), destination.replace("\\", "/")) for source, destination in system_access_manager.moves] == [
+        ("R:/Download2/report.pdf", "R:/Documents/PDFs/report.pdf")
+    ]
+    assert scheduler.desktop_registered and scheduler.desktop_registered[0]["rule_id"] == scheduled["rule_id"]
