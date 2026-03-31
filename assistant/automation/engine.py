@@ -19,6 +19,7 @@ from assistant.automation.models import (
     AutomationRun,
     DynamicCronJob,
     Notification,
+    OneTimeReminder,
     utc_now_iso,
 )
 
@@ -144,6 +145,17 @@ class AutomationEngine:
             payload["dynamic"] = True
             payload["cron_id"] = str(job["cron_id"])
             rules.append(payload)
+        one_time_reminders = await self.store.list_one_time_reminders(user_id)
+        for reminder in one_time_reminders:
+            reminder_rule = self._one_time_reminder_rule(str(reminder["reminder_id"]), str(reminder["message"]))
+            payload = self._rule_to_payload(reminder_rule, state.get(reminder_rule.name, {}))
+            payload["run_at"] = str(reminder["run_at"])
+            payload["message"] = str(reminder["message"])
+            payload["paused"] = bool(reminder["paused"])
+            payload["fired"] = bool(reminder["fired"])
+            payload["one_time"] = True
+            payload["reminder_id"] = str(reminder["reminder_id"])
+            rules.append(payload)
         webhook_names = sorted(self.config.automation.webhooks.keys())
         for webhook_name in webhook_names:
             rule = self._webhook_rule(webhook_name, f"Webhook event from {webhook_name}")
@@ -206,11 +218,51 @@ class AutomationEngine:
             "updated_at": job.updated_at,
         }
 
+    async def create_one_time_reminder(self, user_id: str, run_at: datetime, message: str) -> dict[str, Any]:
+        target_time = run_at.astimezone(timezone.utc)
+        if target_time <= datetime.now(timezone.utc):
+            raise ValueError("One-time reminder time must be in the future.")
+        cleaned_message = message.strip()
+        if not cleaned_message:
+            raise ValueError("Reminder message cannot be empty.")
+        reminder = OneTimeReminder(
+            reminder_id=uuid4().hex[:12],
+            user_id=user_id,
+            run_at=target_time.isoformat(),
+            message=cleaned_message,
+        )
+        await self.store.create_one_time_reminder(reminder)
+        await self.store.set_rule_paused(user_id, self._one_time_reminder_rule_name(reminder.reminder_id), False)
+        if self.scheduler is not None:
+            await self.scheduler.register_one_time_reminder(
+                {
+                    "reminder_id": reminder.reminder_id,
+                    "user_id": user_id,
+                    "run_at": reminder.run_at,
+                    "message": reminder.message,
+                    "paused": False,
+                    "fired": False,
+                }
+            )
+        return {
+            "reminder_id": reminder.reminder_id,
+            "user_id": reminder.user_id,
+            "run_at": reminder.run_at,
+            "message": reminder.message,
+            "paused": reminder.paused,
+            "fired": reminder.fired,
+            "created_at": reminder.created_at,
+            "updated_at": reminder.updated_at,
+        }
+
     async def list_dynamic_cron_jobs(self, user_id: str) -> list[dict[str, Any]]:
         return await self.store.list_dynamic_cron_jobs(user_id)
 
     async def list_all_dynamic_cron_jobs(self) -> list[dict[str, Any]]:
         return await self.store.list_all_dynamic_cron_jobs(include_paused=False)
+
+    async def list_all_one_time_reminders(self) -> list[dict[str, Any]]:
+        return await self.store.list_all_one_time_reminders(include_paused=False, include_fired=False)
 
     async def pause_dynamic_cron_job(self, user_id: str, cron_id: str) -> dict[str, Any]:
         job = await self.store.set_dynamic_cron_job_paused(user_id, cron_id, True)
@@ -239,6 +291,21 @@ class AutomationEngine:
             await self.scheduler.remove_dynamic_job(cron_id)
         return True
 
+    async def handle_one_time_reminder(self, reminder_id: str, message: str, user_id: str, run_at: str) -> dict[str, Any]:
+        rule_name = self._one_time_reminder_rule_name(reminder_id)
+        rule = self._one_time_reminder_rule(reminder_id, message)
+        event = self._build_event(
+            event_type="one-time",
+            user_id=user_id,
+            source=rule.name,
+            payload={"message": message, "run_at": run_at},
+            dedupe_key=f"{rule.name}:{run_at}",
+            priority=45,
+        )
+        result = await self._run_event(event, rule, user_prompt=rule.prompt_or_skill or message)
+        await self.store.mark_one_time_reminder_fired(user_id, reminder_id)
+        return result
+
     async def replay_run(self, run_id: str) -> dict[str, Any]:
         run = await self.store.get_run(run_id)
         if run is None:
@@ -251,6 +318,13 @@ class AutomationEngine:
             return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
         if rule_name.startswith("dynamic-cron:"):
             return await self.handle_cron_job(rule_name, str(event["payload"].get("message", "")), user_id=str(run["user_id"]))
+        if rule_name.startswith("one-time:"):
+            return await self.handle_one_time_reminder(
+                rule_name.removeprefix("one-time:"),
+                str(event["payload"].get("message", "")),
+                user_id=str(run["user_id"]),
+                run_at=str(event["payload"].get("run_at", "")),
+            )
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
                 rule_name.removeprefix("webhook:"),
@@ -516,6 +590,19 @@ class AutomationEngine:
     def _dynamic_cron_rule(self, cron_id: str, message: str) -> AutomationRule:
         return self._cron_rule(self._dynamic_cron_rule_name(cron_id), message)
 
+    def _one_time_reminder_rule(self, reminder_id: str, message: str) -> AutomationRule:
+        return AutomationRule(
+            name=self._one_time_reminder_rule_name(reminder_id),
+            trigger="one-time",
+            prompt_or_skill=message,
+            delivery_policy="primary",
+            action_policy="notify_first",
+            cooldown_seconds=0,
+            dedupe_window_seconds=0,
+            quiet_hours_behavior="queue",
+            severity="info",
+        )
+
     def _webhook_rule(self, name: str, message: str) -> AutomationRule:
         return AutomationRule(
             name=f"webhook:{name}",
@@ -549,6 +636,9 @@ class AutomationEngine:
 
     def _dynamic_cron_rule_name(self, cron_id: str) -> str:
         return f"dynamic-cron:{cron_id}"
+
+    def _one_time_reminder_rule_name(self, reminder_id: str) -> str:
+        return f"one-time:{reminder_id}"
 
     def _rule_to_payload(self, rule: AutomationRule, state: dict[str, Any]) -> dict[str, Any]:
         return {

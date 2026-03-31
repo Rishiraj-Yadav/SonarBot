@@ -173,6 +173,105 @@ async def test_write_host_file_infers_document_formats_from_extension(app_config
 
 
 @pytest.mark.asyncio
+async def test_read_host_file_extracts_docx_text(app_config, tmp_path: Path) -> None:
+    home_root = tmp_path / "home"
+    home_root.mkdir(parents=True, exist_ok=True)
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.system_access.path_rules = [
+        {
+            "path": str(home_root),
+            "read": "auto_allow",
+            "write": "auto_allow",
+            "overwrite": "auto_allow",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+    target = home_root / "testing123.docx"
+    await manager.write_host_file(
+        path=str(target),
+        content="hello from docx",
+        session_key="main",
+        session_id="sess-docx-read-1",
+        user_id="default",
+    )
+
+    result = await manager.read_host_file(
+        path=str(target),
+        session_id="sess-docx-read-2",
+        user_id="default",
+    )
+
+    assert result["file_format"] == "docx"
+    assert "hello from docx" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_write_host_file_falls_back_to_new_file_when_target_is_locked(
+    app_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home_root = tmp_path / "home"
+    home_root.mkdir(parents=True, exist_ok=True)
+    app_config.system_access.enabled = True
+    app_config.system_access.home_root = home_root
+    app_config.system_access.protected_roots = []
+    app_config.system_access.backup_root = tmp_path / "backups"
+    app_config.system_access.audit_log_path = tmp_path / "logs" / "system_actions.jsonl"
+    app_config.system_access.path_rules = [
+        {
+            "path": str(home_root),
+            "read": "auto_allow",
+            "write": "auto_allow",
+            "overwrite": "auto_allow",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    app_config.ensure_runtime_dirs()
+
+    manager = SystemAccessManager(app_config)
+    await manager.initialize()
+    target = home_root / "locked.docx"
+    await manager.write_host_file(
+        path=str(target),
+        content="hello from docx",
+        session_key="main",
+        session_id="sess-docx-lock-1",
+        user_id="default",
+    )
+
+    original_write_content = manager.runtime.write_content
+
+    async def _raise_only_for_target(path: Path, content: str):
+        if path == target:
+            raise PermissionError(13, "Permission denied", str(target))
+        return await original_write_content(path, content)
+
+    monkeypatch.setattr(manager.runtime, "write_content", _raise_only_for_target)
+
+    result = await manager.write_host_file(
+        path=str(target),
+        content="updated value",
+        session_key="main",
+        session_id="sess-docx-lock-2",
+        user_id="default",
+    )
+
+    assert result["status"] == "completed:fallback_new_file"
+    assert result["path"].endswith("locked_updated.docx")
+    assert result["fallback_from"] == str(target)
+    assert Path(str(result["path"])).exists()
+
+
+@pytest.mark.asyncio
 async def test_search_host_files_prefers_named_directories_over_substring_noise(app_config, tmp_path: Path) -> None:
     home_root = tmp_path / "home"
     target_dir = home_root / "Documents" / "college" / "5sem"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from assistant.agent.session_manager import SessionManager
@@ -187,3 +189,39 @@ async def test_automation_engine_manages_dynamic_cron_jobs(app_config) -> None:
     assert scheduler.paused == [str(created["cron_id"])]
     assert scheduler.resumed == [str(created["cron_id"])]
     assert scheduler.removed == [str(created["cron_id"])]
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_creates_and_fires_one_time_reminder(app_config) -> None:
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+    )
+
+    future_time = datetime.now(timezone.utc) + timedelta(hours=2)
+    created = await engine.create_one_time_reminder(app_config.users.default_user_id, future_time, "Reminder: file taxes")
+    listed = await engine.list_all_one_time_reminders()
+    result = await engine.handle_one_time_reminder(
+        str(created["reminder_id"]),
+        str(created["message"]),
+        user_id=app_config.users.default_user_id,
+        run_at=str(created["run_at"]),
+    )
+    fired = await store.get_one_time_reminder(app_config.users.default_user_id, str(created["reminder_id"]))
+
+    assert created["message"] == "Reminder: file taxes"
+    assert listed and listed[0]["reminder_id"] == created["reminder_id"]
+    assert result["status"] == "completed"
+    assert fired is not None and fired["fired"] is True

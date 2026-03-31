@@ -46,6 +46,17 @@ def _deep_set(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     cursor[path[-1]] = value
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _load_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -53,11 +64,20 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
-def load_config(config_path: Path | None = None, dotenv_path: Path | None = None) -> AppConfig:
-    config_path = (config_path or (default_assistant_home() / "config.toml")).expanduser().resolve()
-    dotenv_path = (dotenv_path or (Path.cwd() / ".env")).expanduser().resolve()
+def _default_config_paths() -> list[Path]:
+    paths = [default_assistant_home() / "config.toml"]
+    local_path = Path.cwd() / "config.toml"
+    if local_path not in paths:
+        paths.append(local_path)
+    return [path.expanduser().resolve() for path in paths]
 
-    raw_config = _load_toml(config_path)
+
+def load_config(config_path: Path | None = None, dotenv_path: Path | None = None) -> AppConfig:
+    dotenv_path = (dotenv_path or (Path.cwd() / ".env")).expanduser().resolve()
+    config_paths = [(config_path.expanduser().resolve() if config_path is not None else path) for path in _default_config_paths()] if config_path is None else [config_path.expanduser().resolve()]
+    raw_config: dict[str, Any] = {}
+    for path in config_paths:
+        raw_config = _deep_merge(raw_config, _load_toml(path))
     env_values = {
         key: value
         for key, value in {**dotenv_values(dotenv_path), **os.environ}.items()
@@ -76,5 +96,5 @@ def load_config(config_path: Path | None = None, dotenv_path: Path | None = None
         return AppConfig.model_validate(merged)
     except ValidationError as exc:
         raise RuntimeError(
-            "Configuration is invalid. Populate ~/.assistant/config.toml or a local .env with the required values."
+            "Configuration is invalid. Populate ~/.assistant/config.toml, a project-local config.toml, or a local .env with the required values."
         ) from exc

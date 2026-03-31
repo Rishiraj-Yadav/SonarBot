@@ -136,7 +136,7 @@ class DummyToolRegistry:
             "browser_login",
         }:
             return True
-        if self.host_tools_enabled and tool_name in {"list_host_dir", "search_host_files", "exec_shell", "write_host_file"}:
+        if self.host_tools_enabled and tool_name in {"list_host_dir", "search_host_files", "read_host_file", "exec_shell", "write_host_file"}:
             return True
         return self.has_llm_task and tool_name == "llm_task"
 
@@ -186,6 +186,22 @@ class DummyToolRegistry:
                         {"name": "os-notes.pdf", "path": f"{requested_path}/os-notes.pdf", "is_dir": False, "size": 1024},
                     ],
                 }
+            if requested_path.endswith("/6_semester") or requested_path.endswith("\\6_semester"):
+                return {
+                    "path": requested_path,
+                    "entries": [
+                        {"name": "SPCC", "path": f"{requested_path}/SPCC", "is_dir": True, "size": 0},
+                        {"name": "timepass.txt", "path": f"{requested_path}/timepass.txt", "is_dir": False, "size": 512},
+                    ],
+                }
+            if requested_path.replace("\\", "/") == "C:/Users/Ritesh/Downloads":
+                return {
+                    "path": requested_path,
+                    "entries": [
+                        {"name": "Resume.pdf", "path": "C:/Users/Ritesh/Downloads/Resume.pdf", "is_dir": False, "size": 1024},
+                        {"name": "notes", "path": "C:/Users/Ritesh/Downloads/notes", "is_dir": True, "size": 0},
+                    ],
+                }
             return {
                 "path": payload["path"],
                 "entries": [
@@ -214,6 +230,66 @@ class DummyToolRegistry:
                         {"name": "SPCC", "path": "R:/6_semester/SPCC", "is_dir": True},
                     ],
                     "directories_only": bool(payload.get("directories_only")),
+                }
+            if query_compact == "6semester":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/"],
+                    "matches": [
+                        {"name": "6_semester", "path": "R:/6_semester", "is_dir": True},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                }
+            if query_compact == "archive":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/", "C:/Users/Ritesh/Documents"],
+                    "matches": [
+                        {"name": "Archive", "path": "R:/6_semester/Archive", "is_dir": True},
+                        {"name": "Archive", "path": "C:/Users/Ritesh/Documents/Archive", "is_dir": True},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                }
+            if query_compact == "report.pdf" or query_compact == "reportpdf":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["C:/Users/Ritesh/Documents"],
+                    "matches": [
+                        {"name": "report.pdf", "path": f"{root.rstrip('/\\')}/report.pdf", "is_dir": False},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                }
+            if query_compact == "testing.txt" or query_compact == "testingtxt":
+                resolved_root = root.rstrip("/\\")
+                base_path = "R:/5_SEM" if root in {"R:/", "@allowed"} else resolved_root
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/"],
+                    "matches": [
+                        {"name": "testing.txt", "path": f"{base_path}/testing.txt", "is_dir": False},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if query_compact == "cpractice":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/"],
+                    "matches": [
+                        {"name": "C practice", "path": "R:/C practice", "is_dir": True},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
+                }
+            if query_compact == "testing123.docx" or query_compact == "testing123docx":
+                return {
+                    "root": root,
+                    "searched_roots": [root] if root != "@allowed" else ["R:/"],
+                    "matches": [
+                        {"name": "testing123.docx", "path": "R:/C practice/testing123.docx", "is_dir": False},
+                    ],
+                    "directories_only": bool(payload.get("directories_only")),
+                    "files_only": bool(payload.get("files_only")),
                 }
             return {
                 "root": root,
@@ -244,6 +320,20 @@ class DummyToolRegistry:
                 "approval_category": "ask_once",
                 "audit_id": "audit-2",
                 "host": True,
+            }
+        if tool_name == "read_host_file":
+            requested_path = str(payload["path"]).replace("\\", "/")
+            if requested_path.endswith("/testing.txt"):
+                content = "hello rishiraj this is the testing file"
+            elif requested_path.endswith("/testing123.docx"):
+                content = "abcd"
+            else:
+                content = ""
+            return {
+                "path": payload["path"],
+                "content": content,
+                "bytes_read": len(content.encode("utf-8")),
+                "line_count": len(content.splitlines()),
             }
         if tool_name == "browser_sessions_list":
             return {
@@ -304,6 +394,7 @@ class DummyAutomationEngine:
 
     def __init__(self) -> None:
         self.dynamic_jobs: list[dict[str, object]] = []
+        self.one_time_reminders: list[dict[str, object]] = []
 
     async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
         job = {
@@ -339,6 +430,18 @@ class DummyAutomationEngine:
                 self.dynamic_jobs.pop(index)
                 return True
         raise KeyError(f"Unknown cron job '{cron_id}'.")
+
+    async def create_one_time_reminder(self, user_id: str, run_at, message: str) -> dict[str, object]:
+        reminder = {
+            "reminder_id": "once-user-1",
+            "user_id": user_id,
+            "run_at": run_at.isoformat(),
+            "message": message,
+            "paused": False,
+            "fired": False,
+        }
+        self.one_time_reminders = [reminder]
+        return reminder
 
 
 class DummyUserProfiles:
@@ -614,6 +717,127 @@ async def test_router_host_shortcut_lists_downloads_without_show_me_phrase(app_c
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_lists_desktop_for_content_phrase(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    app_config.system_access.path_rules = [
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Desktop",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-1c",
+        request_id="req-host-1c",
+        session_key="telegram:123",
+        message="what is the content of the desktop folder",
+        metadata={"trace_id": "trace-host-1c", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Desktop" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/OneDrive/Desktop"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_lists_downloads_for_typo_content_phrase(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-1d",
+        request_id="req-host-1d",
+        session_key="telegram:123",
+        message="what is the content if the download folder",
+        metadata={"trace_id": "trace-host-1d", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Downloads" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "~/Downloads"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_lists_configured_download2_folder(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-1e",
+        request_id="req-host-1e",
+        session_key="telegram:123",
+        message="what is the content of the download2",
+        metadata={"trace_id": "trace-host-1e", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "R:/Download2"
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_searches_named_folder(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     session_manager = DummySessionManager()
@@ -717,6 +941,74 @@ async def test_router_host_shortcut_opens_named_folder_and_lists_contents(app_co
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_lists_explicit_c_path(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-2bc",
+        request_id="req-host-2bc",
+        session_key="telegram:123",
+        message="show me the files in C:/Users/Ritesh/Downloads",
+        metadata={"trace_id": "trace-host-2bc", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Resume.pdf" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/Downloads"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_searches_explicit_c_path(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-2bd",
+        request_id="req-host-2bd",
+        session_key="telegram:123",
+        message="look for report.pdf in C:/Users/Ritesh/Documents",
+        metadata={"trace_id": "trace-host-2bd", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "report.pdf" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[0][1]["root"] == "C:/Users/Ritesh/Documents"
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_lists_folder_contents_when_user_asks_whats_inside(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(
@@ -748,6 +1040,41 @@ async def test_router_host_shortcut_lists_folder_contents_when_user_asks_whats_i
     assert "I found the folder at" in response.payload["command_response"]
     assert "dbms/" in response.payload["command_response"]
     assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "list_host_dir"]
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_disambiguates_duplicate_named_folders(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-2d",
+        request_id="req-host-2d",
+        session_key="telegram:123",
+        message="open archive folder",
+        metadata={"trace_id": "trace-host-2d", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "multiple folders matching 'archive'" in response.payload["command_response"].lower()
+    assert "R:/6_semester/Archive" in response.payload["command_response"]
+    assert "C:/Users/Ritesh/Documents/Archive" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == ["search_host_files"]
 
 
 @pytest.mark.asyncio
@@ -865,6 +1192,48 @@ async def test_router_host_shortcut_creates_file_in_recent_host_folder_context(a
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_with_inside_this_after_folder_listing(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-folder-2",
+            "role": "assistant",
+            "content": "Here's what's inside the C:/Users/Ritesh/OneDrive/Desktop folder:\n- Cursor.lnk",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4bb",
+        request_id="req-host-4bb",
+        session_key="telegram:123",
+        message="create a new.pdf file with the content hello world inside this",
+        metadata={"trace_id": "trace-host-4bb", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/OneDrive/Desktop/new.pdf"
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_creates_file_in_named_folder_context(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(
@@ -931,6 +1300,356 @@ async def test_router_host_shortcut_creates_pdf_file_when_extension_is_provided(
     assert response.ok is True
     assert tool_registry.calls[1][0] == "write_host_file"
     assert tool_registry.calls[1][1]["path"] == "R:/6_semester/SPCC/report.pdf"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_named_r_drive_folder_without_being_treated_as_search(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4de",
+        request_id="req-host-4de",
+        session_key="telegram:123",
+        message="create a new.pdf file with content hello world into the 6 semester folder in R drive",
+        metadata={"trace_id": "trace-host-4de", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "write_host_file"]
+    assert tool_registry.calls[1][1]["path"] == "R:/6_semester/new.pdf"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_explicit_c_path(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4e",
+        request_id="req-host-4e",
+        session_key="telegram:123",
+        message="create a todo.txt file in C:/Users/Ritesh/Documents with content buy milk",
+        metadata={"trace_id": "trace-host-4e", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/Documents/todo.txt"
+    assert tool_registry.calls[0][1]["content"] == "buy milk"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_configured_desktop_without_folder_word(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    app_config.system_access.path_rules = [
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Desktop",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4ea",
+        request_id="req-host-4ea",
+        session_key="telegram:123",
+        message="create a new.pdf file with the content hello world inside desktop",
+        metadata={"trace_id": "trace-host-4ea", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/OneDrive/Desktop/new.pdf"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_in_configured_download2_without_folder_word(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4eb",
+        request_id="req-host-4eb",
+        session_key="telegram:123",
+        message="create a new.pdf file with the content hello world inside download2",
+        metadata={"trace_id": "trace-host-4eb", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "write_host_file"
+    assert tool_registry.calls[0][1]["path"] == "R:/Download2/new.pdf"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_file_from_named_folder_in_r_drive(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-read-1",
+        request_id="req-host-read-1",
+        session_key="telegram:123",
+        message="open the testing.txt file in the 5_sem folder in R drive",
+        metadata={"trace_id": "trace-host-read-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "hello rishiraj this is the testing file" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "read_host_file"]
+    assert tool_registry.calls[1][1]["path"] == "R:/college/5sem/testing.txt"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_reads_file_from_recent_host_folder_context(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-read-ctx-1",
+            "role": "assistant",
+            "content": "Here's what's inside the R:/5_SEM folder:\n- testing.txt",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-read-2",
+        request_id="req-host-read-2",
+        session_key="telegram:123",
+        message="what is the content of the testing.txt file",
+        metadata={"trace_id": "trace-host-read-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "hello rishiraj this is the testing file" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "read_host_file"
+    assert tool_registry.calls[0][1]["path"] == "R:/5_SEM/testing.txt"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_overwrites_existing_file_in_named_folder(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-write-ovr-1",
+        request_id="req-host-write-ovr-1",
+        session_key="telegram:123",
+        message="overwrite testing.txt in the 5_sem folder in R drive with content updated homework reminder",
+        metadata={"trace_id": "trace-host-write-ovr-1", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "write_host_file"]
+    assert tool_registry.calls[1][1]["path"] == "R:/college/5sem/testing.txt"
+    assert tool_registry.calls[1][1]["content"] == "updated homework reminder"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_updates_recently_read_host_file_with_pronoun_reference(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-folder-c-practice",
+            "role": "assistant",
+            "content": "Here is the content of the `C practice` folder on your R drive:\n- testing123.docx",
+        },
+    )
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-file-c-practice",
+            "role": "assistant",
+            "content": "Here is the content of `testing123.docx`:\n\nabcd",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-update-1",
+        request_id="req-host-update-1",
+        session_key="telegram:123",
+        message="change it to xyz",
+        metadata={"trace_id": "trace-host-update-1", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[1][0] == "write_host_file"
+    assert tool_registry.calls[1][1]["path"] == "R:/C practice/testing123.docx"
+    assert tool_registry.calls[1][1]["content"] == "xyz"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_lists_contents_from_give_content_phrase(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4ef",
+        request_id="req-host-4ef",
+        session_key="telegram:123",
+        message="give the content of the 6_semester folder in R drive",
+        metadata={"trace_id": "trace-host-4ef", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "R:/6_semester" in response.payload["command_response"]
+    assert "timepass.txt" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[:2]] == ["search_host_files", "list_host_dir"]
 
 
 @pytest.mark.asyncio
@@ -1247,6 +1966,175 @@ async def test_router_creates_dynamic_cron_from_named_day_reminder_phrase(app_co
     assert response.payload["queued"] is False
     assert automation_engine.dynamic_jobs[0]["schedule"] == "30 21 * * 1"
     assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: submit attendance"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_dynamic_cron_from_daily_suffix_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-nl-3",
+        request_id="req-cron-nl-3",
+        session_key="telegram:123",
+        message="remind me at 6 pm daily to study",
+        metadata={"trace_id": "trace-cron-nl-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "0 18 * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: study"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_dynamic_cron_from_weekdays_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-nl-4",
+        request_id="req-cron-nl-4",
+        session_key="telegram:123",
+        message="set a reminder for weekdays at 7 am to exercise",
+        metadata={"trace_id": "trace-cron-nl-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "0 7 * * 1-5"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: exercise"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_dynamic_cron_from_time_of_day_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-nl-5",
+        request_id="req-cron-nl-5",
+        session_key="telegram:123",
+        message="every evening remind me to study",
+        metadata={"trace_id": "trace-cron-nl-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "0 18 * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: study"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_one_time_reminder_for_tomorrow_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-1",
+        request_id="req-reminder-1",
+        session_key="telegram:123",
+        message="remind me tomorrow at 8 am to submit the form",
+        metadata={"trace_id": "trace-reminder-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created one-time reminder 'once-user-1'" in response.payload["command_response"]
+    assert automation_engine.one_time_reminders[0]["message"] == "Reminder: submit the form"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_one_time_reminder_for_at_time_tomorrow_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-reminder-2",
+        request_id="req-reminder-2",
+        session_key="telegram:123",
+        message="remind me at 6 pm tomorrow to call home",
+        metadata={"trace_id": "trace-reminder-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.one_time_reminders[0]["message"] == "Reminder: call home"
 
 
 @pytest.mark.asyncio

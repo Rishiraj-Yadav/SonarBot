@@ -58,7 +58,9 @@ class TelegramChannel(Channel):
 
     async def stop(self) -> None:
         if self._polling_task is not None:
-            self.dispatcher.stop_polling()
+            stop_result = self.dispatcher.stop_polling()
+            if asyncio.iscoroutine(stop_result):
+                await stop_result
             self._polling_task.cancel()
             try:
                 await self._polling_task

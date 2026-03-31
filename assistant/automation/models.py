@@ -93,3 +93,15 @@ class DynamicCronJob:
     paused: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(slots=True)
+class OneTimeReminder:
+    reminder_id: str
+    user_id: str
+    run_at: str
+    message: str
+    paused: bool = False
+    fired: bool = False
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)

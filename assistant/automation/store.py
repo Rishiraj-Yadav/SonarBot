@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRun, DynamicCronJob, Notification, utc_now_iso
+from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRun, DynamicCronJob, Notification, OneTimeReminder, utc_now_iso
 
 
 class AutomationStore:
@@ -117,6 +117,20 @@ class AutomationStore:
                     schedule TEXT NOT NULL,
                     message TEXT NOT NULL,
                     paused INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS one_time_reminders (
+                    reminder_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    run_at TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    fired INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -681,6 +695,160 @@ class AutomationStore:
             cursor = await db.execute(
                 "DELETE FROM dynamic_cron_jobs WHERE user_id = ? AND cron_id = ?",
                 (user_id, cron_id),
+            )
+            await db.commit()
+            return bool(cursor.rowcount)
+
+    async def create_one_time_reminder(self, reminder: OneTimeReminder) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO one_time_reminders (
+                    reminder_id, user_id, run_at, message, paused, fired, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reminder.reminder_id,
+                    reminder.user_id,
+                    reminder.run_at,
+                    reminder.message,
+                    int(reminder.paused),
+                    int(reminder.fired),
+                    reminder.created_at,
+                    reminder.updated_at,
+                ),
+            )
+            await db.commit()
+
+    async def list_one_time_reminders(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT reminder_id, run_at, message, paused, fired, created_at, updated_at
+                FROM one_time_reminders
+                WHERE user_id = ?
+                ORDER BY run_at ASC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ) as cursor:
+                async for row in cursor:
+                    rows.append(
+                        {
+                            "reminder_id": row[0],
+                            "user_id": user_id,
+                            "run_at": row[1],
+                            "message": row[2],
+                            "paused": bool(row[3]),
+                            "fired": bool(row[4]),
+                            "created_at": row[5],
+                            "updated_at": row[6],
+                        }
+                    )
+        return rows
+
+    async def list_all_one_time_reminders(
+        self,
+        *,
+        include_paused: bool = False,
+        include_fired: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        conditions: list[str] = []
+        params: list[Any] = []
+        if not include_paused:
+            conditions.append("paused = 0")
+        if not include_fired:
+            conditions.append("fired = 0")
+        query = """
+                SELECT reminder_id, user_id, run_at, message, paused, fired, created_at, updated_at
+                FROM one_time_reminders
+            """
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY run_at ASC LIMIT ?"
+        params.append(limit)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, tuple(params)) as cursor:
+                async for row in cursor:
+                    rows.append(
+                        {
+                            "reminder_id": row[0],
+                            "user_id": row[1],
+                            "run_at": row[2],
+                            "message": row[3],
+                            "paused": bool(row[4]),
+                            "fired": bool(row[5]),
+                            "created_at": row[6],
+                            "updated_at": row[7],
+                        }
+                    )
+        return rows
+
+    async def get_one_time_reminder(self, user_id: str, reminder_id: str) -> dict[str, Any] | None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT reminder_id, run_at, message, paused, fired, created_at, updated_at
+                FROM one_time_reminders
+                WHERE user_id = ? AND reminder_id = ?
+                """,
+                (user_id, reminder_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "reminder_id": row[0],
+                "user_id": user_id,
+                "run_at": row[1],
+                "message": row[2],
+                "paused": bool(row[3]),
+                "fired": bool(row[4]),
+                "created_at": row[5],
+                "updated_at": row[6],
+            }
+
+    async def set_one_time_reminder_paused(self, user_id: str, reminder_id: str, paused: bool) -> dict[str, Any] | None:
+        await self.initialize()
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE one_time_reminders
+                SET paused = ?, updated_at = ?
+                WHERE user_id = ? AND reminder_id = ?
+                """,
+                (int(paused), updated_at, user_id, reminder_id),
+            )
+            await db.commit()
+        return await self.get_one_time_reminder(user_id, reminder_id)
+
+    async def mark_one_time_reminder_fired(self, user_id: str, reminder_id: str) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE one_time_reminders
+                SET fired = 1, updated_at = ?
+                WHERE user_id = ? AND reminder_id = ?
+                """,
+                (utc_now_iso(), user_id, reminder_id),
+            )
+            await db.commit()
+
+    async def delete_one_time_reminder(self, user_id: str, reminder_id: str) -> bool:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM one_time_reminders WHERE user_id = ? AND reminder_id = ?",
+                (user_id, reminder_id),
             )
             await db.commit()
             return bool(cursor.rowcount)

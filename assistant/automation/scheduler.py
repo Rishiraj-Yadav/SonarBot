@@ -13,6 +13,7 @@ class AutomationScheduler:
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore
             from apscheduler.triggers.cron import CronTrigger  # type: ignore
+            from apscheduler.triggers.date import DateTrigger  # type: ignore
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("APScheduler is not installed.") from exc
 
@@ -35,6 +36,15 @@ class AutomationScheduler:
                 message=str(job["message"]),
                 user_id=str(job["user_id"]),
             )
+        for reminder in await self.automation_engine.list_all_one_time_reminders():
+            if bool(reminder.get("paused")) or bool(reminder.get("fired")):
+                continue
+            self._add_one_time_job(
+                reminder_id=str(reminder["reminder_id"]),
+                run_at=str(reminder["run_at"]),
+                message=str(reminder["message"]),
+                user_id=str(reminder["user_id"]),
+            )
         self.scheduler.start()
 
     async def stop(self) -> None:
@@ -53,6 +63,16 @@ class AutomationScheduler:
             rule_name=self._dynamic_rule_name(str(job["cron_id"])),
             message=str(job["message"]),
             user_id=str(job["user_id"]),
+        )
+
+    async def register_one_time_reminder(self, reminder: dict[str, object]) -> None:
+        if self.scheduler is None or bool(reminder.get("paused")) or bool(reminder.get("fired")):
+            return
+        self._add_one_time_job(
+            reminder_id=str(reminder["reminder_id"]),
+            run_at=str(reminder["run_at"]),
+            message=str(reminder["message"]),
+            user_id=str(reminder["user_id"]),
         )
 
     async def pause_dynamic_job(self, cron_id: str) -> None:
@@ -80,6 +100,13 @@ class AutomationScheduler:
         if job is not None:
             self.scheduler.remove_job(self._dynamic_job_id(cron_id))
 
+    async def remove_one_time_reminder(self, reminder_id: str) -> None:
+        if self.scheduler is None:
+            return
+        job = self.scheduler.get_job(self._one_time_job_id(reminder_id))
+        if job is not None:
+            self.scheduler.remove_job(self._one_time_job_id(reminder_id))
+
     def _add_job(
         self,
         *,
@@ -100,8 +127,31 @@ class AutomationScheduler:
             replace_existing=True,
         )
 
+    def _add_one_time_job(
+        self,
+        *,
+        reminder_id: str,
+        run_at: str,
+        message: str,
+        user_id: str,
+    ) -> None:
+        from apscheduler.triggers.date import DateTrigger  # type: ignore
+        from datetime import datetime
+
+        trigger = DateTrigger(run_date=datetime.fromisoformat(run_at))
+        self.scheduler.add_job(
+            self.automation_engine.handle_one_time_reminder,
+            trigger=trigger,
+            id=self._one_time_job_id(reminder_id),
+            kwargs={"reminder_id": reminder_id, "message": message, "user_id": user_id, "run_at": run_at},
+            replace_existing=True,
+        )
+
     def _dynamic_job_id(self, cron_id: str) -> str:
         return f"dynamic-cron-{cron_id}"
 
     def _dynamic_rule_name(self, cron_id: str) -> str:
         return f"dynamic-cron:{cron_id}"
+
+    def _one_time_job_id(self, reminder_id: str) -> str:
+        return f"one-time-{reminder_id}"

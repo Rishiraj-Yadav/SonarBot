@@ -165,7 +165,7 @@ class SystemAccessManager:
                 details={"stderr": f"Reading is not allowed for {resolved}", "exit_code": 1},
             )
         started = time.perf_counter()
-        result = await self.runtime.read_text(resolved)
+        result = await self.runtime.read_content(resolved)
         duration_ms = int((time.perf_counter() - started) * 1000)
         audit_entry = HostAuditEntry(
             user_id=user_id,
@@ -379,7 +379,39 @@ class SystemAccessManager:
         if exists and resolved.is_file():
             backup_id, _ = await self.runtime.backup_file(resolved, "write_host_file")
         started = time.perf_counter()
-        result = await self.runtime.write_content(resolved, content)
+        try:
+            result = await self.runtime.write_content(resolved, content)
+        except PermissionError:
+            fallback = await self._attempt_locked_file_fallback(
+                original_path=resolved,
+                content=content,
+                user_id=user_id,
+                session_id=session_id,
+                session_key=session_key,
+                connection_id=connection_id,
+                channel_name=channel_name,
+            )
+            if fallback is None:
+                return await self._record_blocked_action(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tool="write_host_file",
+                    action_kind="write_host_file",
+                    target=str(resolved),
+                    category=category,
+                    approval_mode=approval_mode,
+                    outcome="failed:file_locked",
+                    details={
+                        "stderr": (
+                            f"Windows denied writing to {resolved}. The file may be open in Word, an editor, "
+                            "or another program. Close it and try again."
+                        ),
+                        "exit_code": 1,
+                        "bytes_written": 0,
+                        "backup_id": backup_id,
+                    },
+                )
+            result, category, approval_mode = fallback
         duration_ms = int((time.perf_counter() - started) * 1000)
         audit_entry = HostAuditEntry(
             user_id=user_id,
@@ -403,6 +435,54 @@ class SystemAccessManager:
             "backup_id": backup_id,
             "file_format": result.get("file_format", "text"),
         }
+
+    async def _attempt_locked_file_fallback(
+        self,
+        *,
+        original_path: Path,
+        content: str,
+        user_id: str,
+        session_id: str,
+        session_key: str,
+        connection_id: str,
+        channel_name: str,
+    ) -> tuple[dict[str, Any], str, str] | None:
+        fallback_path = self._build_fallback_write_path(original_path)
+        category, reason = self.runtime.classify_path_action(fallback_path, "write")
+        if category == "deny":
+            return None
+        approval_mode = "auto"
+        if category in {"ask_once", "always_ask"}:
+            decision, approval_mode, approval = await self.approvals.request(
+                user_id=user_id,
+                session_id=session_id,
+                session_key=session_key,
+                connection_id=connection_id,
+                channel_name=channel_name,
+                action_kind="write_host_file",
+                target_summary=str(fallback_path),
+                category=category,
+                payload={"path": str(fallback_path), "overwrite": False, "bytes": len(content.encode("utf-8"))},
+            )
+            if decision != "approved":
+                return None
+        try:
+            result = await self.runtime.write_content(fallback_path, content)
+        except PermissionError:
+            return None
+        result["fallback_from"] = str(original_path)
+        result["status"] = "completed:fallback_new_file"
+        return result, category, approval_mode
+
+    def _build_fallback_write_path(self, original_path: Path) -> Path:
+        stem = original_path.stem
+        suffix = original_path.suffix
+        candidate = original_path.with_name(f"{stem}_updated{suffix}")
+        counter = 2
+        while candidate.exists():
+            candidate = original_path.with_name(f"{stem}_updated_{counter}{suffix}")
+            counter += 1
+        return candidate
 
     async def copy_host_file(
         self,

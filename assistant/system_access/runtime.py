@@ -9,8 +9,9 @@ import os
 import re
 import shutil
 import zipfile
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path
+from xml.etree import ElementTree as ET
 from uuid import uuid4
 
 from assistant.system_access.policy import PathAccessRule, matches_protected_path, most_specific_rule
@@ -122,12 +123,33 @@ class SystemAccessRuntime:
         stat_result = await asyncio.to_thread(path.stat)
         if stat_result.st_size > max_bytes:
             raise ValueError(f"File is too large to read as text ({stat_result.st_size} bytes).")
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        content = await asyncio.to_thread(self._read_text_with_fallbacks, path)
         return {
             "path": str(path),
             "content": content,
             "bytes_read": len(content.encode("utf-8")),
             "line_count": len(content.splitlines()),
+        }
+
+    async def read_content(self, path: Path, max_bytes: int = 2_000_000) -> dict[str, object]:
+        file_format = self._infer_write_format(path)
+        stat_result = await asyncio.to_thread(path.stat)
+        if stat_result.st_size > max_bytes:
+            raise ValueError(f"File is too large to read ({stat_result.st_size} bytes).")
+        if file_format == "docx":
+            content = await asyncio.to_thread(self._extract_docx_text, path)
+        elif file_format == "pdf":
+            raise ValueError("PDF text extraction is not available through read_host_file yet. Use pdf_extract.")
+        elif file_format == "doc":
+            raise ValueError("Legacy .doc text extraction is not supported yet.")
+        else:
+            content = await asyncio.to_thread(self._read_text_with_fallbacks, path)
+        return {
+            "path": str(path),
+            "content": content,
+            "bytes_read": len(content.encode("utf-8")),
+            "line_count": len(content.splitlines()),
+            "file_format": file_format,
         }
 
     async def write_text(self, path: Path, content: str) -> dict[str, object]:
@@ -143,26 +165,70 @@ class SystemAccessRuntime:
 
         def _write() -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
             if file_format == "text":
-                path.write_text(content, encoding="utf-8")
+                temp_path.write_text(content, encoding="utf-8")
+                os.replace(temp_path, path)
                 return len(content.encode("utf-8"))
             if file_format == "pdf":
                 data = self._build_simple_pdf_bytes(content)
-                path.write_bytes(data)
+                temp_path.write_bytes(data)
+                os.replace(temp_path, path)
                 return len(data)
             if file_format == "docx":
                 data = self._build_simple_docx_bytes(content)
-                path.write_bytes(data)
+                temp_path.write_bytes(data)
+                os.replace(temp_path, path)
                 return len(data)
             if file_format == "doc":
                 data = self._build_simple_rtf_bytes(content)
-                path.write_bytes(data)
+                temp_path.write_bytes(data)
+                os.replace(temp_path, path)
                 return len(data)
-            path.write_text(content, encoding="utf-8")
+            temp_path.write_text(content, encoding="utf-8")
+            os.replace(temp_path, path)
             return len(content.encode("utf-8"))
 
-        bytes_written = await asyncio.to_thread(_write)
+        try:
+            bytes_written = await asyncio.to_thread(_write)
+        finally:
+            for leftover in path.parent.glob(f".{path.name}.*.tmp"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
         return {"path": str(path), "bytes_written": bytes_written, "file_format": file_format}
+
+    def _read_text_with_fallbacks(self, path: Path) -> str:
+        encodings = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+        last_error: Exception | None = None
+        for encoding in encodings:
+            try:
+                return path.read_text(encoding=encoding)
+            except UnicodeDecodeError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return path.read_text(encoding="utf-8")
+
+    def _extract_docx_text(self, path: Path) -> str:
+        with zipfile.ZipFile(path) as archive:
+            xml_data = archive.read("word/document.xml")
+        root = ET.fromstring(xml_data)
+        namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs: list[str] = []
+        for paragraph in root.findall(".//w:p", namespace):
+            chunks = []
+            for node in paragraph.findall(".//w:t", namespace):
+                if node.text:
+                    chunks.append(node.text)
+            if chunks:
+                paragraphs.append("".join(chunks))
+        if paragraphs:
+            return "\n".join(paragraphs).strip()
+        text_nodes = [node.text for node in root.findall(".//w:t", namespace) if node.text]
+        return html_unescape(" ".join(text_nodes)).strip()
 
     async def delete_path(self, path: Path) -> dict[str, object]:
         def _delete() -> None:

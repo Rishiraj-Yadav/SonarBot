@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -951,6 +951,16 @@ class GatewayRouter:
         if cron_shortcut is not None:
             return cron_shortcut
 
+        one_time_shortcut = await self._handle_natural_language_one_time_reminder_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if one_time_shortcut is not None:
+            return one_time_shortcut
+
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
@@ -1046,6 +1056,40 @@ class GatewayRouter:
             },
         )
 
+    async def _handle_natural_language_one_time_reminder_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_natural_language_one_time_reminder_request(lowered)
+        if parsed is None:
+            return None
+        run_at, reminder_message = parsed
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        try:
+            reminder = await self.automation_engine.create_one_time_reminder(user_id, run_at, reminder_message)
+        except ValueError as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        local_time = run_at.astimezone().strftime("%Y-%m-%d %I:%M %p")
+        response_text = (
+            f"Created one-time reminder '{reminder['reminder_id']}' for {local_time}.\n"
+            f"Message: {reminder['message']}"
+        )
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "one_time_reminder": reminder,
+            },
+        )
+
     async def _handle_host_shortcut(
         self,
         request_id: str,
@@ -1057,13 +1101,37 @@ class GatewayRouter:
         if not self._has_host_tools():
             return None
 
+        explicit_path = self._extract_explicit_host_path(original_message)
         folder_name = self._match_known_host_folder(lowered)
-        if folder_name and self._looks_like_list_folder_request(lowered):
+
+        explicit_root = self._extract_host_search_root(lowered)
+        if explicit_path is not None and self._looks_like_list_folder_request(lowered):
             try:
                 result = await self.tool_registry.dispatch(
                     "list_host_dir",
                     {
-                        "path": f"~/{folder_name}",
+                        "path": explicit_path,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_directory_response(explicit_path, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if folder_name and self._looks_like_list_folder_request(lowered):
+            folder_path = self._resolve_known_host_folder_path(folder_name)
+            try:
+                result = await self.tool_registry.dispatch(
+                    "list_host_dir",
+                    {
+                        "path": folder_path,
                         "session_key": session_key,
                         "user_id": metadata.get("user_id", self.config.users.default_user_id),
                     },
@@ -1078,8 +1146,9 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
-        explicit_root = self._extract_host_search_root(lowered)
-        if explicit_root is not None and self._looks_like_list_folder_request(lowered) and folder_name is None:
+        browse_term = self._extract_host_browse_folder_term(lowered)
+
+        if explicit_root is not None and self._looks_like_list_folder_request(lowered) and folder_name is None and browse_term is None:
             label = self._describe_host_root(explicit_root)
             try:
                 result = await self.tool_registry.dispatch(
@@ -1100,7 +1169,117 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
-        browse_term = self._extract_host_browse_folder_term(lowered)
+        contextual_host_write = await self._parse_contextual_host_file_creation_request(
+            session_key,
+            original_message,
+            metadata,
+        )
+        if contextual_host_write is not None:
+            if contextual_host_write.get("response_text"):
+                response_text = str(contextual_host_write["response_text"])
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            target_dir = str(contextual_host_write["target_dir"])
+            filename = str(contextual_host_write["filename"])
+            content = str(contextual_host_write["content"])
+            try:
+                result = await self.tool_registry.dispatch(
+                    "write_host_file",
+                    {
+                        "path": f"{target_dir.rstrip('/\\')}/{filename}",
+                        "content": content,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_write_response(filename, target_dir, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        contextual_host_update = await self._parse_contextual_host_file_update_request(
+            session_key,
+            original_message,
+            metadata,
+        )
+        if contextual_host_update is not None:
+            if contextual_host_update.get("response_text"):
+                response_text = str(contextual_host_update["response_text"])
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            try:
+                result = await self.tool_registry.dispatch(
+                    "write_host_file",
+                    {
+                        "path": str(contextual_host_update["path"]),
+                        "content": str(contextual_host_update["content"]),
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            final_path = str(result.get("path", contextual_host_update["path"]))
+            response_text = self._format_host_write_response(
+                Path(final_path).name,
+                Path(final_path).parent.as_posix(),
+                result,
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        contextual_host_read = await self._parse_contextual_host_file_read_request(
+            session_key,
+            original_message,
+            metadata,
+        )
+        if contextual_host_read is not None:
+            if contextual_host_read.get("response_text"):
+                response_text = str(contextual_host_read["response_text"])
+                await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            try:
+                result = await self.tool_registry.dispatch(
+                    "read_host_file",
+                    {
+                        "path": str(contextual_host_read["path"]),
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_read_response(str(contextual_host_read["path"]), result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
         if browse_term and folder_name is None:
             try:
                 result = await self.tool_registry.dispatch(
@@ -1117,22 +1296,26 @@ class GatewayRouter:
                 )
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            folder_match = self._pick_folder_match_for_contents(browse_term, result)
-            if folder_match is not None:
-                try:
-                    listing = await self.tool_registry.dispatch(
-                        "list_host_dir",
-                        {
-                            "path": folder_match["path"],
-                            "session_key": session_key,
-                            "user_id": metadata.get("user_id", self.config.users.default_user_id),
-                        },
-                    )
-                except Exception as exc:
-                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
-                response_text = self._format_host_folder_contents_response(folder_match, listing)
+            ambiguous_response = self._format_host_disambiguation_response(browse_term, result)
+            if ambiguous_response is not None:
+                response_text = ambiguous_response
             else:
-                response_text = self._format_host_search_response(browse_term, result)
+                folder_match = self._pick_folder_match_for_contents(browse_term, result)
+                if folder_match is not None:
+                    try:
+                        listing = await self.tool_registry.dispatch(
+                            "list_host_dir",
+                            {
+                                "path": folder_match["path"],
+                                "session_key": session_key,
+                                "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                            },
+                        )
+                    except Exception as exc:
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    response_text = self._format_host_folder_contents_response(folder_match, listing)
+                else:
+                    response_text = self._format_host_search_response(browse_term, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -1147,7 +1330,7 @@ class GatewayRouter:
                 result = await self.tool_registry.dispatch(
                     "search_host_files",
                     {
-                        "root": explicit_root or "@allowed",
+                        "root": explicit_path or explicit_root or "@allowed",
                         "pattern": "*",
                         "name_query": search_term,
                         "directories_only": wants_folder,
@@ -1158,7 +1341,10 @@ class GatewayRouter:
                 )
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            if wants_folder and self._wants_folder_contents(lowered):
+            ambiguous_response = self._format_host_disambiguation_response(search_term, result) if wants_folder else None
+            if ambiguous_response is not None:
+                response_text = ambiguous_response
+            elif wants_folder and self._wants_folder_contents(lowered):
                 folder_match = self._pick_folder_match_for_contents(search_term, result)
                 if folder_match is not None:
                     try:
@@ -1201,34 +1387,6 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_host_exec_response(app_name, result)
-            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
-            return ResponseFrame(
-                id=request_id,
-                ok=True,
-                payload={"queued": False, "session_key": session_key, "command_response": response_text},
-            )
-
-        contextual_host_write = await self._parse_contextual_host_file_creation_request(
-            session_key,
-            original_message,
-            metadata,
-        )
-        if contextual_host_write is not None:
-            target_dir, filename, content = contextual_host_write
-            try:
-                result = await self.tool_registry.dispatch(
-                    "write_host_file",
-                    {
-                        "path": f"{target_dir.rstrip('/\\')}/{filename}",
-                        "content": content,
-                        "session_key": session_key,
-                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
-                        "channel_name": metadata.get("channel", ""),
-                    },
-                )
-            except Exception as exc:
-                return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            response_text = self._format_host_write_response(filename, target_dir, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -1290,11 +1448,15 @@ class GatewayRouter:
                 "If GitHub OAuth is connected and the user asks for a repository count, use github_list_repos and "
                 "count the returned repositories instead of asking a follow-up question."
             )
-        if any(token in lowered for token in ("desktop", "downloads", "documents", "notepad", "folder", "drive", "r:")):
+        if any(
+            token in lowered
+            for token in ("desktop", "downloads", "documents", "notepad", "folder", "drive", "r:", "c:")
+        ) or self._extract_explicit_host_path(message) is not None:
             hints.append(
                 "You have host-system access tools inside the configured allowed host roots: list_host_dir, search_host_files, "
                 "read_host_file, write_host_file, and exec_shell with host=true. Do not claim you are limited to the workspace "
-                "when the request is about Desktop, Downloads, Documents, allowed drives such as R:/, or opening simple Windows apps."
+                "when the request is about Desktop, Downloads, Documents, explicit host paths such as C:/..., "
+                "allowed drives such as R:/, or opening simple Windows apps."
             )
         if any(
             token in lowered
@@ -1412,23 +1574,75 @@ class GatewayRouter:
     def _parse_natural_language_cron_request(self, message: str, lowered: str) -> tuple[str, str] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
         normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
+        normalized = re.sub(r"^(?:set up|setup)\s+", "set ", normalized)
+        frequency_pattern = (
+            r"daily|day|weekdays|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekly"
+        )
         patterns = (
-            r"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            r"^remind me every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            r"^every\s+(?P<frequency>day|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
+            rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            rf"^remind me every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            rf"^every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
+            rf"^(?:set|create|make)\s+(?:a\s+)?reminder\s+for\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            rf"^remind me at\s+(?P<time>.+?)\s+(?P<frequency>{frequency_pattern})s?\s+to\s+(?P<message>.+)$",
+            rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+reminder\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+            rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+remind me to\s+(?P<message>.+)$",
         )
         for pattern in patterns:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if not match:
                 continue
-            schedule = self._build_schedule_from_frequency_and_time(
-                str(match.group("frequency")),
-                str(match.group("time")),
-            )
+            if match.groupdict().get("time_of_day") is not None:
+                schedule = self._build_schedule_from_frequency_and_time("day", str(match.group("time_of_day")))
+            else:
+                frequency_value = str(match.group("frequency"))
+                if frequency_value == "weekly":
+                    frequency_value = "weekday"
+                schedule = self._build_schedule_from_frequency_and_time(
+                    frequency_value,
+                    str(match.group("time")),
+                )
             reminder_message = self._normalize_reminder_message(match.group("message"))
             if schedule and reminder_message:
                 return schedule, reminder_message
         return None
+
+    def _parse_natural_language_one_time_reminder_request(self, lowered: str) -> tuple[datetime, str] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
+        patterns = (
+            r"^remind me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+            r"^remind me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
+            r"^(?:set|create|make)\s+(?:a\s+)?reminder for (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            run_at = self._build_one_time_reminder_datetime(str(match.group("day")), str(match.group("time")))
+            reminder_message = self._normalize_reminder_message(match.group("message"))
+            if run_at is not None and reminder_message:
+                return run_at, reminder_message
+        return None
+
+    def _build_one_time_reminder_datetime(self, day_text: str, time_text: str) -> datetime | None:
+        parsed_time = self._parse_reminder_time(time_text)
+        if parsed_time is None:
+            return None
+        hour, minute = parsed_time
+        now = datetime.now().astimezone()
+        day_offset = 1 if day_text.lower() == "tomorrow" else 0
+        target_date = now.date() + timedelta(days=day_offset)
+        target = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            hour,
+            minute,
+            tzinfo=now.tzinfo,
+        )
+        if day_offset == 0 and target <= now:
+            return None
+        return target
 
     def _build_schedule_from_frequency_and_time(self, frequency: str, time_text: str) -> str | None:
         parsed_time = self._parse_reminder_time(time_text)
@@ -1437,7 +1651,9 @@ class GatewayRouter:
         hour, minute = parsed_time
         day_map = {
             "day": "*",
+            "daily": "*",
             "weekday": "1-5",
+            "weekdays": "1-5",
             "monday": "1",
             "tuesday": "2",
             "wednesday": "3",
@@ -1454,6 +1670,16 @@ class GatewayRouter:
 
     def _parse_reminder_time(self, value: str) -> tuple[int, int] | None:
         normalized = re.sub(r"\s+", " ", value.strip().lower())
+        named_times = {
+            "morning": (9, 0),
+            "afternoon": (14, 0),
+            "evening": (18, 0),
+            "night": (21, 0),
+            "noon": (12, 0),
+            "midnight": (0, 0),
+        }
+        if normalized in named_times:
+            return named_times[normalized]
         twelve_hour = re.match(r"^(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)$", normalized)
         if twelve_hour is not None:
             hour = int(twelve_hour.group("hour"))
@@ -1548,7 +1774,7 @@ class GatewayRouter:
     def _has_host_tools(self) -> bool:
         has_tool = getattr(self.tool_registry, "has", None)
         return callable(has_tool) and all(
-            has_tool(name) for name in ("list_host_dir", "search_host_files", "exec_shell")
+            has_tool(name) for name in ("list_host_dir", "search_host_files", "read_host_file", "write_host_file", "exec_shell")
         )
 
     def _looks_like_list_folder_request(self, lowered: str) -> bool:
@@ -1556,11 +1782,21 @@ class GatewayRouter:
             phrase in lowered
             for phrase in (
                 "show me files",
+                "show me the files",
                 "show files",
                 "list files",
                 "list the files",
+                "files in",
                 "what is in",
                 "what's in",
+                "content of",
+                "content if",
+                "contents of",
+                "contents if",
+                "what is the content of",
+                "what is the content if",
+                "what are the contents of",
+                "what are the contents if",
                 "open folder",
                 "show contents",
                 "show the contents",
@@ -1569,23 +1805,60 @@ class GatewayRouter:
         )
 
     def _match_known_host_folder(self, lowered: str) -> str | None:
+        configured = getattr(self.config.system_access, "path_rules", [])
+        configured_names: list[str] = []
+        for rule in configured:
+            raw_path = getattr(rule, "path", None)
+            if raw_path is None and isinstance(rule, dict):
+                raw_path = rule.get("path")
+            if raw_path is None:
+                continue
+            candidate_name = Path(str(raw_path)).expanduser().resolve().name.strip()
+            if candidate_name:
+                configured_names.append(candidate_name)
+        for candidate_name in sorted(configured_names, key=len, reverse=True):
+            if candidate_name.lower() in lowered:
+                return candidate_name
+
         mapping = {
             "downloads": "Downloads",
+            "download": "Downloads",
             "desktop": "Desktop",
+            "deskotp": "Desktop",
             "documents": "Documents",
+            "document": "Documents",
+            "docs": "Documents",
             "pictures": "Pictures",
+            "picture": "Pictures",
             "music": "Music",
             "videos": "Videos",
+            "video": "Videos",
         }
         for token, folder in mapping.items():
             if token in lowered:
                 return folder
         return None
 
+    def _resolve_known_host_folder_path(self, folder_name: str) -> str:
+        configured = getattr(self.config.system_access, "path_rules", [])
+        normalized_folder = folder_name.strip().lower()
+        for rule in configured:
+            raw_path = getattr(rule, "path", None)
+            if raw_path is None and isinstance(rule, dict):
+                raw_path = rule.get("path")
+            if raw_path is None:
+                continue
+            candidate = Path(str(raw_path)).expanduser().resolve()
+            if candidate.name.strip().lower() == normalized_folder:
+                return str(candidate).replace("\\", "/")
+        return f"~/{folder_name}"
+
     def _extract_host_search_term(self, lowered: str) -> str | None:
         patterns = (
             r"\b(?:search|find)(?:\s+for)?\s+(.+?)\s+(?:folder|file|directory)\b",
             r"\b(.+?)\s+(?:folder|file|directory)\s+(?:in|on)\s+(?:the\s+)?(?:r\s*:|r\s*drive|r\s*dive)\b",
+            r"\b(?:search|find|look\s+for|look\s+up)\s+(.+?)\s+(?:in|inside|on)\s+(?:[a-z]:[\\/][^\n]+|[a-z]\s*:?\s*drive)\b",
+            r"\b(?:search|find|look\s+for|look\s+up)\s+(.+)$",
         )
         for pattern in patterns:
             match = re.search(pattern, lowered)
@@ -1604,14 +1877,21 @@ class GatewayRouter:
         return cleaned or None
 
     def _extract_host_search_root(self, lowered: str) -> str | None:
-        if re.search(r"\br\s*:?\s*(?:drive|dive)?\b", lowered) or "r:\\" in lowered or "r:/" in lowered:
-            return "R:/"
+        path_match = re.search(r"\b([a-z]):[\\/]", lowered)
+        if path_match:
+            return f"{path_match.group(1).upper()}:/"
+        drive_match = re.search(r"\b([a-z])\s*:?\s*(?:drive|dive)\b", lowered)
+        if drive_match:
+            return f"{drive_match.group(1).upper()}:/"
         return None
 
     def _extract_host_browse_folder_term(self, lowered: str) -> str | None:
         patterns = (
             r"\b(?:open|oepn|show|list|browse)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
             r"\b(?:open|oepn|show|list|browse)\s+(?:the\s+)?folder\s+(.+)\b",
+            r"\b(?:open|oepn|show|list|browse)\s+(?:the\s+)?files?\s+in\s+(.+)$",
+            r"\b(?:give|show|tell)\s+(?:me\s+)?(?:the\s+)?(?:content|contents)\s+of\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+            r"\bwhat(?:'s|\s+is)\s+(?:inside|in)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
         )
         for pattern in patterns:
             match = re.search(pattern, lowered)
@@ -1710,23 +1990,38 @@ class GatewayRouter:
         session_key: str,
         message: str,
         metadata: dict[str, Any],
-    ) -> tuple[str, str, str] | None:
+    ) -> dict[str, str] | None:
         lowered = message.lower()
         filename, content = await self._parse_host_file_request_details(session_key, message)
         if not filename or not content:
             return None
         explicit_root = self._extract_host_search_root(lowered)
+        explicit_path = self._extract_explicit_host_path(message)
+        if explicit_path is not None:
+            explicit_path_obj = Path(explicit_path)
+            if explicit_path_obj.suffix and explicit_path_obj.name.lower() == filename.lower():
+                return {
+                    "target_dir": str(explicit_path_obj.parent).replace("\\", "/"),
+                    "filename": explicit_path_obj.name,
+                    "content": content,
+                }
         target_dir = self._extract_explicit_host_directory(message)
         if target_dir is None:
             folder_reference = self._extract_named_folder_reference_for_write(lowered)
             if folder_reference is not None:
-                target_dir = await self._resolve_host_directory_reference(
+                resolution = await self._resolve_host_directory_reference(
                     session_key,
                     folder_reference,
                     explicit_root,
                     metadata,
                 )
-            elif any(token in lowered for token in (" there", " here", "that folder", "this folder")):
+                if resolution.get("response_text"):
+                    return {"response_text": str(resolution["response_text"])}
+                target_dir = resolution.get("path")
+            elif any(
+                token in lowered
+                for token in (" there", " here", "that folder", "this folder", "inside this", "inside that")
+            ):
                 target_dir = await self._resolve_recent_host_directory(
                     session_key,
                     explicit_root,
@@ -1734,7 +2029,7 @@ class GatewayRouter:
                 )
         if target_dir is None:
             return None
-        return target_dir, filename, content
+        return {"target_dir": target_dir, "filename": filename, "content": content}
 
     async def _parse_host_file_request_details(self, session_key: str, message: str) -> tuple[str | None, str | None]:
         lowered = message.lower()
@@ -1774,9 +2069,17 @@ class GatewayRouter:
         path = path.rstrip("\\/")
         return path or None
 
+    def _extract_explicit_host_path(self, message: str) -> str | None:
+        match = re.search(r"\b([A-Za-z]:[\\/][^\n\"']+)", message)
+        if match is None:
+            return None
+        path = match.group(1).strip().rstrip(".")
+        return path.rstrip("\\/") or None
+
     def _extract_named_folder_reference_for_write(self, lowered: str) -> str | None:
         patterns = (
             r"\b(?:in|inside|into|to)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+            r"\b(?:in|inside|into)\s+(?!which\b)(?:the\s+)?([a-z0-9._ -]+)$",
             r"\b(?:save|create|make|write)\s+(?:a\s+)?file\s+(?:in|inside)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
         )
         for pattern in patterns:
@@ -1833,8 +2136,12 @@ class GatewayRouter:
 
     def _extract_host_file_content(self, message: str) -> str | None:
         patterns = (
+            r"\bwith\s+the\s+content\s+(.+)$",
             r"\bwith\s+content\s+(.+)$",
             r"\bcontaining\s+(.+)$",
+            r"\breplace\s+(?:the\s+)?content\s+with\s+(.+)$",
+            r"\bset\s+(?:the\s+)?content\s+to\s+(.+)$",
+            r"\bupdate\s+(?:the\s+)?content\s+to\s+(.+)$",
             r"\bin\s+which\s+(.+)$",
             r"\bwhere\s+(.+)$",
         )
@@ -1877,9 +2184,115 @@ class GatewayRouter:
                 term = self._clean_host_search_term(named_folder.group(1))
                 if term:
                     resolved = await self._resolve_host_directory_reference(session_key, term, explicit_root, metadata)
-                    if resolved is not None:
-                        return resolved
+                    if resolved is not None and resolved.get("path"):
+                        return str(resolved["path"])
         return None
+
+    async def _parse_contextual_host_file_read_request(
+        self,
+        session_key: str,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, str] | None:
+        lowered = message.lower()
+        if not self._looks_like_host_file_read_request(lowered):
+            return None
+        explicit_path = self._extract_explicit_host_path(message)
+        if explicit_path is not None and Path(explicit_path).suffix:
+            return {"path": explicit_path}
+
+        filename = self._extract_explicit_filename(message)
+        if filename is None:
+            filename = self._extract_file_reference_from_content_request(lowered)
+        if filename is None:
+            return None
+
+        explicit_root = self._extract_host_search_root(lowered)
+        target_dir = self._extract_explicit_host_directory(message)
+        if target_dir is None:
+            folder_reference = self._extract_named_folder_reference_for_read(lowered)
+            if folder_reference is not None:
+                resolution = await self._resolve_host_directory_reference(
+                    session_key,
+                    folder_reference,
+                    explicit_root,
+                    metadata,
+                )
+                if resolution and resolution.get("response_text"):
+                    return {"response_text": str(resolution["response_text"])}
+                if resolution:
+                    target_dir = resolution.get("path")
+            elif any(
+                token in lowered
+                for token in (" there", " here", "that folder", "this folder", "inside this", "inside that")
+            ):
+                target_dir = await self._resolve_recent_host_directory(
+                    session_key,
+                    explicit_root,
+                    metadata,
+                )
+            else:
+                recent_dir = await self._resolve_recent_host_directory_direct_path(session_key)
+                if recent_dir is not None:
+                    target_dir = recent_dir
+        if target_dir is not None:
+            return {"path": f"{str(target_dir).rstrip('/\\')}/{filename}"}
+
+        try:
+            result = await self.tool_registry.dispatch(
+                "search_host_files",
+                {
+                    "root": explicit_root or "@allowed",
+                    "pattern": "*",
+                    "name_query": filename,
+                    "files_only": True,
+                    "limit": 20,
+                    "session_key": session_key,
+                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                },
+            )
+        except Exception:
+            return None
+        matches = [match for match in result.get("matches", []) if not match.get("is_dir")]
+        if not matches:
+            return {"response_text": self._format_host_search_response(filename, result)}
+        exact_match = self._pick_file_match(filename, result)
+        if exact_match is not None:
+            return {"path": str(exact_match.get("path", ""))}
+        if len(matches) == 1:
+            return {"path": str(matches[0].get("path", ""))}
+        return {"response_text": self._format_host_file_disambiguation_response(filename, result)}
+
+    async def _parse_contextual_host_file_update_request(
+        self,
+        session_key: str,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, str] | None:
+        lowered = message.lower().strip()
+        if not self._looks_like_host_file_update_request(lowered):
+            return None
+        content = self._extract_host_file_update_content(message)
+        if not content:
+            return None
+
+        explicit_path = self._extract_explicit_host_path(message)
+        if explicit_path is not None and Path(explicit_path).suffix:
+            return {"path": explicit_path, "content": content}
+
+        read_resolution = await self._parse_contextual_host_file_read_request(session_key, message, metadata)
+        if read_resolution is not None and read_resolution.get("path"):
+            return {"path": str(read_resolution["path"]), "content": content}
+
+        recent_path = await self._resolve_recent_host_file_path(session_key, metadata)
+        if recent_path is not None:
+            return {"path": recent_path, "content": content}
+        return {
+            "response_text": (
+                "I need to know which file to update. Tell me the filename or path, "
+                "for example: overwrite testing123.docx in the C practice folder with content xyz."
+            )
+        }
 
     async def _resolve_host_directory_reference(
         self,
@@ -1887,10 +2300,13 @@ class GatewayRouter:
         folder_reference: str,
         explicit_root: str | None,
         metadata: dict[str, Any],
-    ) -> str | None:
+    ) -> dict[str, str] | None:
+        known_folder_path = self._resolve_known_host_folder_reference(folder_reference)
+        if known_folder_path is not None:
+            return {"path": known_folder_path}
         recent_path = await self._resolve_recent_host_directory_direct_path(session_key)
         if recent_path and self._compact_search_name(Path(recent_path).name) == self._compact_search_name(folder_reference):
-            return recent_path
+            return {"path": recent_path}
         try:
             result = await self.tool_registry.dispatch(
                 "search_host_files",
@@ -1906,12 +2322,127 @@ class GatewayRouter:
             )
         except Exception:
             return None
+        ambiguous_response = self._format_host_disambiguation_response(folder_reference, result)
+        if ambiguous_response is not None:
+            return {"response_text": ambiguous_response}
         folder_match = self._pick_folder_match_for_contents(folder_reference, result)
         if folder_match is not None:
-            return str(folder_match.get("path", "")) or None
+            return {"path": str(folder_match.get("path", "")) or ""}
         matches = [match for match in result.get("matches", []) if match.get("is_dir")]
         if len(matches) == 1:
-            return str(matches[0].get("path", "")) or None
+            return {"path": str(matches[0].get("path", "")) or ""}
+        return None
+
+    def _resolve_known_host_folder_reference(self, folder_reference: str) -> str | None:
+        configured = getattr(self.config.system_access, "path_rules", [])
+        normalized_reference = self._compact_search_name(folder_reference)
+        for rule in configured:
+            raw_path = getattr(rule, "path", None)
+            if raw_path is None and isinstance(rule, dict):
+                raw_path = rule.get("path")
+            if raw_path is None:
+                continue
+            candidate = Path(str(raw_path)).expanduser().resolve()
+            if self._compact_search_name(candidate.name) == normalized_reference:
+                return str(candidate).replace("\\", "/")
+        return None
+
+    def _looks_like_host_file_read_request(self, lowered: str) -> bool:
+        if not (self._extract_explicit_filename(lowered) or self._extract_file_reference_from_content_request(lowered)):
+            return False
+        return any(
+            phrase in lowered
+            for phrase in (
+                "open ",
+                "read ",
+                "show ",
+                "what is the content of",
+                "what's the content of",
+                "content of",
+                "contents of",
+                "what is in",
+                "what's in",
+            )
+        )
+
+    def _extract_file_reference_from_content_request(self, lowered: str) -> str | None:
+        patterns = (
+            r"\b(?:content|contents)\s+of\s+(?:the\s+)?([a-z0-9_.-]+\.[a-z0-9]{1,8})\b",
+            r"\bwhat(?:'s|\s+is)\s+(?:in|the\s+content\s+of)\s+(?:the\s+)?([a-z0-9_.-]+\.[a-z0-9]{1,8})\b",
+            r"\bopen\s+(?:the\s+)?([a-z0-9_.-]+\.[a-z0-9]{1,8})\b",
+            r"\bread\s+(?:the\s+)?([a-z0-9_.-]+\.[a-z0-9]{1,8})\b",
+            r"^\s*([a-z0-9_.-]+\.[a-z0-9]{1,8})\s+(?:in|inside|from)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _looks_like_host_file_update_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in (
+                "change it to ",
+                "change this to ",
+                "replace it with ",
+                "replace this with ",
+                "update it to ",
+                "update this to ",
+                "overwrite ",
+                "replace the content with ",
+                "set the content to ",
+                "update the content to ",
+            )
+        )
+
+    def _extract_host_file_update_content(self, message: str) -> str | None:
+        patterns = (
+            r"\bchange\s+(?:it|this)\s+to\s+(.+)$",
+            r"\breplace\s+(?:it|this)\s+with\s+(.+)$",
+            r"\bupdate\s+(?:it|this)\s+to\s+(.+)$",
+            r"\boverwrite\b(?:.+?)\bwith\s+content\s+(.+)$",
+            r"\breplace\s+(?:the\s+)?content\s+with\s+(.+)$",
+            r"\bset\s+(?:the\s+)?content\s+to\s+(.+)$",
+            r"\bupdate\s+(?:the\s+)?content\s+to\s+(.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if not match:
+                continue
+            content = self._clean_contextual_file_content(match.group(1))
+            if content:
+                return content
+        return None
+
+    def _extract_named_folder_reference_for_read(self, lowered: str) -> str | None:
+        patterns = (
+            r"\b(?:in|inside|from)\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+            r"\b(?:file|content|contents)\s+in\s+(?:the\s+)?(.+?)\s+(?:folder|directory)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered)
+            if not match:
+                continue
+            term = self._clean_host_search_term(match.group(1))
+            if term and term not in {"that", "this", "there", "here"}:
+                return term
+        return None
+
+    def _pick_file_match(self, filename: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        matches = [match for match in result.get("matches", []) if not match.get("is_dir")]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        compact_term = self._compact_search_name(filename)
+        exactish = [
+            match
+            for match in matches
+            if self._compact_search_name(str(match.get("name", ""))) == compact_term
+        ]
+        if len(exactish) == 1:
+            return exactish[0]
         return None
 
     async def _resolve_recent_host_directory_direct_path(self, session_key: str) -> str | None:
@@ -1931,6 +2462,39 @@ class GatewayRouter:
                 if re.search(r"\.[A-Za-z0-9]{1,6}$", path):
                     continue
                 return path.rstrip("\\/")
+            named_r_drive_folder = re.search(
+                r"content of the\s+[`'\"]?(.+?)[`'\"]?\s+folder\s+on your r drive",
+                content,
+                flags=re.IGNORECASE,
+            )
+            if named_r_drive_folder:
+                term = self._clean_host_search_term(named_r_drive_folder.group(1))
+                if term:
+                    return await self._resolve_recent_named_folder_on_r_drive(session_key, term)
+        return None
+
+    async def _resolve_recent_named_folder_on_r_drive(self, session_key: str, folder_name: str) -> str | None:
+        try:
+            result = await self.tool_registry.dispatch(
+                "search_host_files",
+                {
+                    "root": "R:/",
+                    "pattern": "*",
+                    "name_query": folder_name,
+                    "directories_only": True,
+                    "limit": 20,
+                    "session_key": session_key,
+                    "user_id": self.config.users.default_user_id,
+                },
+            )
+        except Exception:
+            return None
+        folder_match = self._pick_folder_match_for_contents(folder_name, result)
+        if folder_match is not None:
+            return str(folder_match.get("path", "")) or None
+        matches = [match for match in result.get("matches", []) if match.get("is_dir")]
+        if len(matches) == 1:
+            return str(matches[0].get("path", "")) or None
         return None
 
     async def _resolve_recent_assistant_text(self, session_key: str) -> str | None:
@@ -1945,6 +2509,53 @@ class GatewayRouter:
                 continue
             return content
         return None
+
+    async def _resolve_recent_host_file_path(self, session_key: str, metadata: dict[str, Any]) -> str | None:
+        history = await self.session_manager.session_history(session_key, limit=12)
+        for item in reversed(history):
+            if str(item.get("role", "")) != "assistant":
+                continue
+            content = str(item.get("content", ""))
+            direct_path_match = re.search(r"([A-Za-z]:[\\/][^\n`'\"]+\.[A-Za-z0-9]{1,8})", content)
+            if direct_path_match:
+                return direct_path_match.group(1).strip().rstrip(".")
+            file_match = re.search(r"content of\s+[`'\"]([^`'\"]+\.[A-Za-z0-9]{1,8})[`'\"]", content, flags=re.IGNORECASE)
+            if not file_match:
+                continue
+            filename = file_match.group(1).strip()
+            recent_dir = await self._resolve_recent_host_directory_direct_path(session_key)
+            if recent_dir is not None:
+                return f"{recent_dir.rstrip('/\\')}/{filename}"
+            try:
+                result = await self.tool_registry.dispatch(
+                    "search_host_files",
+                    {
+                        "root": "@allowed",
+                        "pattern": "*",
+                        "name_query": filename,
+                        "files_only": True,
+                        "limit": 20,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                    },
+                )
+            except Exception:
+                return None
+            exact_match = self._pick_file_match(filename, result)
+            if exact_match is not None:
+                return str(exact_match.get("path", "")) or None
+            matches = [match for match in result.get("matches", []) if not match.get("is_dir")]
+            if len(matches) == 1:
+                return str(matches[0].get("path", "")) or None
+        return None
+
+    def _format_host_read_response(self, path: str, result: dict[str, Any]) -> str:
+        content = str(result.get("content", ""))
+        filename = Path(path).name or path
+        if not content:
+            return f"The file `{filename}` is empty."
+        preview = content if len(content) <= 4000 else f"{content[:4000].rstrip()}\n..."
+        return f"Here is the content of `{filename}`:\n\n{preview}"
 
     def _format_host_directory_response(self, folder_name: str, result: dict[str, Any]) -> str:
         entries = result.get("entries", []) if isinstance(result, dict) else []
@@ -1972,6 +2583,28 @@ class GatewayRouter:
             lines.append(f"- {label} -> {match.get('path', '')}")
         if len(matches) > 10:
             lines.append(f"...and {len(matches) - 10} more.")
+        return "\n".join(lines)
+
+    def _format_host_disambiguation_response(self, search_term: str, result: dict[str, Any]) -> str | None:
+        matches = [match for match in result.get("matches", []) if match.get("is_dir")]
+        if len(matches) <= 1:
+            return None
+        compact_term = self._compact_search_name(search_term)
+        exactish = [
+            match for match in matches if self._compact_search_name(str(match.get("name", ""))) == compact_term
+        ]
+        if len(exactish) <= 1:
+            return None
+        lines = [f"I found multiple folders matching '{search_term}'. Please tell me which path you want:"]
+        for match in exactish[:8]:
+            lines.append(f"- {match.get('path', '')}")
+        return "\n".join(lines)
+
+    def _format_host_file_disambiguation_response(self, filename: str, result: dict[str, Any]) -> str:
+        matches = [match for match in result.get("matches", []) if not match.get("is_dir")]
+        lines = [f"I found multiple files matching '{filename}'. Please tell me which path you want:"]
+        for match in matches[:8]:
+            lines.append(f"- {match.get('path', '')}")
         return "\n".join(lines)
 
     def _describe_host_search_scope(self, result: dict[str, Any]) -> str:
@@ -2013,6 +2646,13 @@ class GatewayRouter:
             return (
                 f"I didn't create {filename} in your {folder_name} because the host action was {status}. "
                 "Check /host-approvals if you want to review pending requests."
+            )
+        fallback_from = result.get("fallback_from")
+        if status == "completed:fallback_new_file" and fallback_from:
+            original_name = Path(str(fallback_from)).name
+            return (
+                f"I couldn't overwrite {original_name} because Windows appears to have it open, "
+                f"so I saved the updated content as {filename} in your {folder_name}."
             )
         return f"I created {filename} in your {folder_name}."
 

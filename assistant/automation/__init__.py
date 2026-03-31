@@ -2,7 +2,7 @@
 
 from assistant.automation.delivery import NotificationDispatcher
 from assistant.automation.engine import AutomationEngine
-from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRule, AutomationRun, Notification
+from assistant.automation.models import ApprovalRequest, AutomationEvent, AutomationRule, AutomationRun, Notification, OneTimeReminder
 from assistant.automation.heartbeat import HeartbeatService
 from assistant.automation.scheduler import AutomationScheduler
 from assistant.automation.standing_orders import StandingOrdersManager
@@ -19,6 +19,7 @@ __all__ = [
     "HeartbeatService",
     "Notification",
     "NotificationDispatcher",
+    "OneTimeReminder",
     "StandingOrdersManager",
     "AutomationStore",
     "render_webhook_message",
