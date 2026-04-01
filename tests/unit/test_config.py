@@ -70,3 +70,34 @@ def test_load_config_merges_project_local_config_with_assistant_home(monkeypatch
     assert config.gateway.token == "from-home"
     assert config.system_access.enabled is True
     assert config.users.default_user_id == "local-user"
+
+
+def test_load_config_merges_desktop_known_apps_with_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    dotenv_path = tmp_path / ".env"
+    workspace_dir = (tmp_path / "workspace").as_posix()
+
+    config_path.write_text(
+        "[gateway]\n"
+        'host = "127.0.0.1"\n'
+        "port = 8765\n"
+        'token = "from-config"\n\n'
+        "[agent]\n"
+        f'workspace_dir = "{workspace_dir}"\n'
+        'model = "gemini-config"\n'
+        "max_tokens = 2048\n"
+        "context_window = 32768\n\n"
+        "[llm]\n"
+        'gemini_api_key = "config-key"\n\n'
+        "[desktop_apps]\n"
+        "enabled = true\n"
+        'known_apps = { vscode = "R:/Microsoft VS Code/Code.exe" }\n',
+        encoding="utf-8",
+    )
+    dotenv_path.write_text("", encoding="utf-8")
+
+    config = load_config(config_path=config_path, dotenv_path=dotenv_path)
+
+    assert config.desktop_apps.known_apps["vscode"].as_posix() == "R:/Microsoft VS Code/Code.exe"
+    assert "taskmanager" in config.desktop_apps.known_apps
+    assert "excel" in config.desktop_apps.known_apps

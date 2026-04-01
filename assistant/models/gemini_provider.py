@@ -35,10 +35,9 @@ class GeminiProvider(ModelProvider):
             raise RuntimeError("LLM provider temporarily unavailable due to repeated failures. Please retry shortly.")
 
         payload = self._build_payload(messages=messages, system=system, tools=tools)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
         try:
-            data = await self._perform_request(url, payload)
+            data = await self._perform_request_with_fallback(payload)
             self.circuit_breaker.record_success()
         except Exception:
             self.circuit_breaker.record_failure()
@@ -54,8 +53,32 @@ class GeminiProvider(ModelProvider):
 
         yield ModelResponse(tool_calls=tool_calls, usage=usage, done=True)
 
+    async def _perform_request_with_fallback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        last_error: Exception | None = None
+        candidate_models = self._candidate_models()
+        for index, model_name in enumerate(candidate_models):
+            try:
+                return await self._perform_request_for_model(model_name, payload)
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code not in {400, 404} or index == len(candidate_models) - 1:
+                    raise
+                self.logger.warning(
+                    "gemini_model_fallback",
+                    failed_model=model_name,
+                    fallback_model=candidate_models[index + 1],
+                    status_code=exc.response.status_code,
+                )
+            except Exception as exc:
+                last_error = exc
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Gemini request failed before a model could be selected.")
+
     @async_retry(max_attempts=3, base_delay=0.5)
-    async def _perform_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _perform_request_for_model(self, model_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(url, params={"key": self.api_key}, json=payload)
             try:
@@ -63,11 +86,24 @@ class GeminiProvider(ModelProvider):
             except httpx.HTTPStatusError:
                 self.logger.error(
                     "gemini_http_error",
+                    model=model_name,
                     status_code=response.status_code,
                     response_text=response.text[:2000],
                 )
                 raise
         return response.json()
+
+    def _candidate_models(self) -> list[str]:
+        candidates = [self.model, "gemini-2.0-flash"]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            normalized = str(item).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
 
     def _build_payload(
         self,
@@ -75,11 +111,7 @@ class GeminiProvider(ModelProvider):
         system: str,
         tools: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        contents = []
-        for message in messages:
-            content = self._message_to_content(message)
-            if content is not None:
-                contents.append(content)
+        contents = self._messages_to_contents(messages)
 
         payload: dict[str, Any] = {
             "contents": contents,
@@ -101,6 +133,36 @@ class GeminiProvider(ModelProvider):
             ]
         return payload
 
+    def _messages_to_contents(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contents: list[dict[str, Any]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            role = message.get("role", "user")
+            if role == "assistant" and message.get("tool_calls"):
+                assistant_content = self._assistant_tool_call_content(message)
+                if assistant_content is not None:
+                    contents.append(assistant_content)
+                index += 1
+                tool_parts: list[dict[str, Any]] = []
+                while index < len(messages) and messages[index].get("role") == "tool":
+                    part = self._tool_response_part(messages[index])
+                    if part is not None:
+                        tool_parts.append(part)
+                    index += 1
+                if tool_parts:
+                    contents.append({"role": "user", "parts": tool_parts})
+                continue
+
+            if role == "tool":
+                content = self._tool_response_content(message)
+            else:
+                content = self._message_to_content(message)
+            if content is not None:
+                contents.append(content)
+            index += 1
+        return contents
+
     def _sanitize_schema(self, schema: Any) -> Any:
         if isinstance(schema, list):
             return [self._sanitize_schema(item) for item in schema]
@@ -117,7 +179,9 @@ class GeminiProvider(ModelProvider):
             sanitized["description"] = description
 
         if "enum" in schema and isinstance(schema["enum"], list):
-            sanitized["enum"] = schema["enum"]
+            enum_values = schema["enum"]
+            if all(isinstance(item, str) for item in enum_values):
+                sanitized["enum"] = enum_values
         if "format" in schema and schema["format"]:
             sanitized["format"] = schema["format"]
         if "required" in schema and isinstance(schema["required"], list):
@@ -191,6 +255,12 @@ class GeminiProvider(ModelProvider):
         return {"role": "model", "parts": parts}
 
     def _tool_response_content(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        part = self._tool_response_part(message)
+        if part is None:
+            return None
+        return {"role": "user", "parts": [part]}
+
+    def _tool_response_part(self, message: dict[str, Any]) -> dict[str, Any] | None:
         name = str(message.get("name", "tool")).strip() or "tool"
         content = str(message.get("content", "")).strip()
         if not content:
@@ -200,15 +270,10 @@ class GeminiProvider(ModelProvider):
         except json.JSONDecodeError:
             response_payload = {"content": content}
         return {
-            "role": "user",
-            "parts": [
-                {
-                    "functionResponse": {
-                        "name": name,
-                        "response": response_payload,
-                    }
-                }
-            ],
+            "functionResponse": {
+                "name": name,
+                "response": response_payload,
+            }
         }
 
     def _normalize_message_text(self, message: dict[str, Any]) -> str:

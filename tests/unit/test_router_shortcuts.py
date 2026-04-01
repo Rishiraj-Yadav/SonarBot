@@ -105,11 +105,19 @@ class DummyToolRegistry:
         llm_task_response: dict[str, object] | None = None,
         has_llm_task: bool = True,
         host_tools_enabled: bool = False,
+        app_tools_enabled: bool = False,
+        screen_tools_enabled: bool = False,
+        input_tools_enabled: bool = False,
+        app_skill_tools_enabled: bool = False,
     ) -> None:
         self.calls = []
         self.llm_task_response = llm_task_response or {"content": json.dumps({"skill": "daily-briefing", "confidence": 0.91})}
         self.has_llm_task = has_llm_task
         self.host_tools_enabled = host_tools_enabled
+        self.app_tools_enabled = app_tools_enabled
+        self.screen_tools_enabled = screen_tools_enabled
+        self.input_tools_enabled = input_tools_enabled
+        self.app_skill_tools_enabled = app_skill_tools_enabled
         self.browser_runtime = type(
             "BrowserRuntimeStub",
             (),
@@ -134,6 +142,58 @@ class DummyToolRegistry:
             "browser_tab_close",
             "browser_screenshot",
             "browser_login",
+        }:
+            return True
+        if self.app_tools_enabled and tool_name in {
+            "apps_list_windows",
+            "apps_open",
+            "apps_focus",
+            "apps_minimize",
+            "apps_maximize",
+            "apps_restore",
+            "apps_snap",
+        }:
+            return True
+        if self.screen_tools_enabled and tool_name in {
+            "desktop_active_window",
+            "desktop_screenshot",
+            "desktop_window_screenshot",
+            "desktop_ocr",
+            "desktop_read_screen",
+        }:
+            return True
+        if self.input_tools_enabled and tool_name in {
+            "desktop_mouse_position",
+            "desktop_mouse_move",
+            "desktop_mouse_click",
+            "desktop_mouse_scroll",
+            "desktop_keyboard_type",
+            "desktop_keyboard_hotkey",
+            "desktop_clipboard_read",
+            "desktop_clipboard_write",
+        }:
+            return True
+        if self.app_skill_tools_enabled and tool_name in {
+            "vscode_open_target",
+            "vscode_search",
+            "document_create",
+            "document_read",
+            "document_replace_text",
+            "excel_create_workbook",
+            "excel_append_row",
+            "excel_preview",
+            "browser_workspace_open",
+            "system_open_settings",
+            "system_volume_status",
+            "system_volume_set",
+            "system_brightness_status",
+            "system_brightness_set",
+            "system_bluetooth_status",
+            "system_snapshot",
+            "task_manager_open",
+            "task_manager_summary",
+            "preset_list",
+            "preset_run",
         }:
             return True
         if self.host_tools_enabled and tool_name in {"list_host_dir", "search_host_files", "read_host_file", "exec_shell", "write_host_file"}:
@@ -364,6 +424,223 @@ class DummyToolRegistry:
             return {"path": "workspace/browser/screenshot-tab-1.png", "tab_id": "tab-1", "url": "https://github.com"}
         if tool_name == "browser_login":
             return {"site_name": payload["site_name"], "profile_name": payload.get("profile_name", "default"), "status": "active", "url": f"https://{payload['site_name']}"}
+        if tool_name == "apps_list_windows":
+            return {
+                "windows": [
+                    {
+                        "window_id": "101",
+                        "title": "Visual Studio Code",
+                        "process_name": "Code",
+                        "is_foreground": True,
+                        "is_minimized": False,
+                    },
+                    {
+                        "window_id": "202",
+                        "title": "Google Chrome",
+                        "process_name": "chrome",
+                        "is_foreground": False,
+                        "is_minimized": False,
+                    },
+                ]
+            }
+        if tool_name == "apps_open":
+            target = str(payload["target"])
+            return {"alias": target, "path": f"C:/Program Files/{target}/{target}.exe", "pid": 4321, "launched": True}
+        if tool_name == "apps_focus":
+            target = str(payload["target"])
+            return {"action": "focus", "target": target, "window": {"title": target.title(), "process_name": target}}
+        if tool_name == "apps_minimize":
+            target = str(payload["target"])
+            return {"action": "minimize", "target": target, "window": {"title": target.title(), "process_name": target}}
+        if tool_name == "apps_maximize":
+            target = str(payload["target"])
+            return {"action": "maximize", "target": target, "window": {"title": target.title(), "process_name": target}}
+        if tool_name == "apps_restore":
+            target = str(payload["target"])
+            return {"action": "restore", "target": target, "window": {"title": target.title(), "process_name": target}}
+        if tool_name == "apps_snap":
+            target = str(payload["target"])
+            return {
+                "action": "snap",
+                "target": target,
+                "position": payload["position"],
+                "window": {"title": target.title(), "process_name": target},
+            }
+        if tool_name == "desktop_active_window":
+            return {
+                "active_window": {
+                    "window_id": "101",
+                    "title": "Visual Studio Code",
+                    "process_name": "Code",
+                    "executable_path": "C:/Users/Ritesh/AppData/Local/Programs/Microsoft VS Code/Code.exe",
+                    "is_minimized": False,
+                    "is_visible": True,
+                }
+            }
+        if tool_name == "desktop_screenshot":
+            return {
+                "path": "workspace/desktop/desktop-20260331-120000.png",
+                "scope": "desktop",
+                "width": 1920,
+                "height": 1080,
+                "active_window": {"title": "Visual Studio Code", "process_name": "Code"},
+            }
+        if tool_name == "desktop_window_screenshot":
+            return {
+                "path": "workspace/desktop/window-20260331-120001.png",
+                "scope": "window",
+                "width": 1280,
+                "height": 800,
+                "active_window": {"title": "Visual Studio Code", "process_name": "Code"},
+            }
+        if tool_name == "desktop_read_screen":
+            target = str(payload.get("target", "desktop"))
+            return {
+                "target": target,
+                "path": f"workspace/desktop/{target}-20260331-120002.png",
+                "active_window": {"title": "Visual Studio Code", "process_name": "Code"},
+                "content": "This is visible screen text",
+                "truncated": False,
+            }
+        if tool_name == "desktop_mouse_position":
+            return {
+                "x": 400,
+                "y": 300,
+                "coordinate_space": "screen",
+                "active_window": {"title": "Visual Studio Code", "process_name": "Code"},
+                "status": "completed",
+            }
+        if tool_name == "desktop_mouse_move":
+            return {
+                "x": int(payload.get("x", 0)),
+                "y": int(payload.get("y", 0)),
+                "coordinate_space": str(payload.get("coordinate_space", "screen")),
+                "status": "completed",
+            }
+        if tool_name == "desktop_mouse_click":
+            return {
+                "x": int(payload.get("x", 0)),
+                "y": int(payload.get("y", 0)),
+                "coordinate_space": str(payload.get("coordinate_space", "screen")),
+                "button": str(payload.get("button", "left")),
+                "count": int(payload.get("count", 1)),
+                "status": "completed",
+            }
+        if tool_name == "desktop_mouse_scroll":
+            return {
+                "direction": str(payload.get("direction", "down")),
+                "amount": int(payload.get("amount", 1)),
+                "status": "completed",
+            }
+        if tool_name == "desktop_keyboard_type":
+            return {
+                "characters_typed": len(str(payload.get("text", ""))),
+                "status": "completed",
+            }
+        if tool_name == "desktop_keyboard_hotkey":
+            return {
+                "hotkey": str(payload.get("hotkey", "")).replace(" ", "+").lower(),
+                "status": "completed",
+            }
+        if tool_name == "desktop_clipboard_read":
+            return {
+                "content": "copied text",
+                "char_count": 11,
+                "line_count": 1,
+                "status": "completed",
+            }
+        if tool_name == "desktop_clipboard_write":
+            return {
+                "char_count": len(str(payload.get("text", ""))),
+                "status": "completed",
+            }
+        if tool_name == "vscode_open_target":
+            return {
+                "path": "R:/6_semester/mini_project",
+                "target_type": "directory",
+                "alias": "vscode",
+                "status": "completed",
+            }
+        if tool_name == "vscode_search":
+            return {
+                "matches": [
+                    {"name": "mini_project", "path": "R:/6_semester/mini_project", "is_dir": True},
+                    {"name": "app.py", "path": "R:/6_semester/mini_project/app.py", "is_dir": False},
+                ]
+            }
+        if tool_name == "document_create":
+            return {"path": str(payload.get("path", "")), "status": "completed", "approval_category": "ask_once", "approval_mode": "session_cache"}
+        if tool_name == "document_read":
+            return {"path": str(payload.get("path", "")), "content": "hello world", "bytes_read": 11, "line_count": 1}
+        if tool_name == "document_replace_text":
+            return {"path": str(payload.get("path", "")), "status": "completed", "replacements": 1, "approval_category": "always_ask", "approval_mode": "approval"}
+        if tool_name == "excel_create_workbook":
+            return {
+                "path": str(payload.get("path", "")),
+                "status": "completed",
+                "sheet_name": "Sheet1",
+                "preview": {"sheet_name": "Sheet1", "row_count": 1},
+                "approval_category": "ask_once",
+                "approval_mode": "session_cache",
+            }
+        if tool_name == "excel_append_row":
+            return {
+                "path": str(payload.get("path", "")),
+                "status": "completed",
+                "preview": {"sheet_name": "Sheet1", "row_count": 2},
+                "approval_category": "always_ask",
+                "approval_mode": "approval",
+            }
+        if tool_name == "excel_preview":
+            return {
+                "path": str(payload.get("path", "")),
+                "sheet_name": "Sheet1",
+                "rows": [["Name", "Marks"], ["Ritesh", "95"]],
+                "row_count": 2,
+            }
+        if tool_name == "browser_workspace_open":
+            workspace = str(payload.get("workspace", "study"))
+            return {"workspace": workspace, "opened": [{"title": "Docs", "url": "https://example.com"}], "count": 1}
+        if tool_name == "system_open_settings":
+            return {"page": str(payload.get("page", "settings")), "status": "completed"}
+        if tool_name == "system_volume_status":
+            return {"volume_percent": 35}
+        if tool_name == "system_volume_set":
+            return {"volume_percent": int(payload.get("percent", 0)), "status": "completed", "approval_category": "always_ask", "approval_mode": "approval"}
+        if tool_name == "system_brightness_status":
+            return {"supported": True, "brightness_percent": 60}
+        if tool_name == "system_brightness_set":
+            return {"supported": True, "brightness_percent": int(payload.get("percent", 0)), "status": "completed", "approval_category": "always_ask", "approval_mode": "approval"}
+        if tool_name == "system_bluetooth_status":
+            return {"available": True, "service_status": "Running", "device_count": 2}
+        if tool_name == "system_snapshot":
+            return {
+                "cpu_percent": 18.5,
+                "memory": {"used_percent": 42.0, "used_gb": 6.5, "total_gb": 15.8},
+                "disk": {"used_percent": 63.0, "drive": "C:\\", "free_gb": 120.5, "total_gb": 512.0},
+                "volume": {"volume_percent": 35},
+            }
+        if tool_name == "task_manager_open":
+            return {
+                "status": "completed",
+                "summary": {
+                    "cpu_percent": 22.0,
+                    "memory": {"used_percent": 48.0, "used_gb": 7.2, "total_gb": 15.8},
+                    "disk": {"used_percent": 63.0, "drive": "C:\\", "free_gb": 120.5, "total_gb": 512.0},
+                    "top_processes": [{"name": "Code", "cpu_seconds": 120.0, "memory_mb": 350.0}],
+                },
+            }
+        if tool_name == "task_manager_summary":
+            return {
+                "cpu_percent": 22.0,
+                "memory": {"used_percent": 48.0, "used_gb": 7.2, "total_gb": 15.8},
+                "disk": {"used_percent": 63.0, "drive": "C:\\", "free_gb": 120.5, "total_gb": 512.0},
+                "top_processes": [{"name": "Code", "cpu_seconds": 120.0, "memory_mb": 350.0}],
+            }
+        if tool_name == "preset_list":
+            return {"presets": [{"name": "study-mode", "description": "Open study apps."}]}
+        if tool_name == "preset_run":
+            return {"preset": str(payload.get("name", "study-mode")), "actions": ["Opened chrome", "Opened folder"], "status": "completed"}
         raise AssertionError(f"Unexpected tool: {tool_name}")
 
 
@@ -375,27 +652,28 @@ class DummyAutomationEngine:
         return []
 
     async def list_rules(self, _user_id: str):
-        return list(self.desktop_rules)
+        return [*self.desktop_rules, *self.desktop_routines]
 
     async def pause_rule(self, _user_id: str, _rule_name: str) -> None:
-        for rule in self.desktop_rules:
+        for rule in [*self.desktop_rules, *self.desktop_routines]:
             if rule["name"] == _rule_name:
                 rule["paused"] = True
                 return None
         raise KeyError(f"Unknown rule '{_rule_name}'.")
 
     async def resume_rule(self, _user_id: str, _rule_name: str) -> None:
-        for rule in self.desktop_rules:
+        for rule in [*self.desktop_rules, *self.desktop_routines]:
             if rule["name"] == _rule_name:
                 rule["paused"] = False
                 return None
         raise KeyError(f"Unknown rule '{_rule_name}'.")
 
     async def delete_rule(self, _user_id: str, _rule_name: str) -> None:
-        for index, rule in enumerate(self.desktop_rules):
-            if rule["name"] == _rule_name:
-                self.desktop_rules.pop(index)
-                return None
+        for collection in (self.desktop_rules, self.desktop_routines):
+            for index, rule in enumerate(collection):
+                if rule["name"] == _rule_name:
+                    collection.pop(index)
+                    return None
         raise KeyError(f"Unknown rule '{_rule_name}'.")
 
     async def replay_run(self, _run_id: str):
@@ -411,6 +689,8 @@ class DummyAutomationEngine:
         self.dynamic_jobs: list[dict[str, object]] = []
         self.one_time_reminders: list[dict[str, object]] = []
         self.desktop_rules: list[dict[str, object]] = []
+        self.desktop_routines: list[dict[str, object]] = []
+        self.routine_runs: list[str] = []
 
     async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, object]:
         job = {
@@ -479,6 +759,58 @@ class DummyAutomationEngine:
         self.desktop_rules = [rule]
         return rule
 
+    async def create_desktop_routine_rule(self, user_id: str, **payload) -> dict[str, object]:
+        routine = {
+            "routine_id": "routine-rule-1",
+            "user_id": user_id,
+            "name": payload.get("name", "Study mode"),
+            "trigger_type": payload.get("trigger_type", "manual"),
+            "steps": payload.get("steps", []),
+            "summary": payload.get("summary", "desktop routine"),
+            "schedule": payload.get("schedule", ""),
+            "run_at": payload.get("run_at", ""),
+            "watch_path": payload.get("watch_path", ""),
+            "event_types": payload.get("event_types", []),
+            "file_extensions": payload.get("file_extensions", []),
+            "filename_pattern": payload.get("filename_pattern", "*"),
+            "paused": False,
+        }
+        payload_rule = {
+            "name": "routine:routine-rule-1",
+            "display_name": routine["name"],
+            "trigger": "desktop_routine",
+            "trigger_type": routine["trigger_type"],
+            "schedule": routine["schedule"],
+            "run_at": routine["run_at"],
+            "watch_path": routine["watch_path"],
+            "event_types": routine["event_types"],
+            "file_extensions": routine["file_extensions"],
+            "filename_pattern": routine["filename_pattern"],
+            "summary": routine["summary"],
+            "steps": routine["steps"],
+            "step_count": len(routine["steps"]),
+            "risky_step_count": sum(
+                1
+                for step in routine["steps"]
+                if str(step.get("type", "")).lower() in {"move_host_file", "copy_host_file", "write_host_file", "delete_host_file"}
+            ),
+            "paused": False,
+            "routine": True,
+        }
+        self.desktop_routines = [payload_rule]
+        return routine
+
+    async def run_desktop_routine_now(self, user_id: str, routine_id: str, *, notify: bool = False) -> dict[str, object]:
+        self.routine_runs.append(routine_id)
+        return {
+            "status": "completed",
+            "message": f"Ran routine {routine_id}.",
+            "summary": "desktop routine",
+            "steps": [],
+            "notify": notify,
+            "user_id": user_id,
+        }
+
 
 class DummyUserProfiles:
     async def resolve_user_id(self, _identity_type: str, _identity_value: str, _metadata=None) -> str:
@@ -503,6 +835,81 @@ class DummySystemAccessManager:
             "status": decision,
             "payload": {"path": "C:/Users/Ritesh/Desktop/todo.txt"},
         }
+
+
+class DummyCoworkerService:
+    def __init__(self) -> None:
+        self.planned: list[str] = []
+        self.ran: list[str] = []
+
+    def can_handle_request(self, request_text: str) -> bool:
+        return "task manager" in request_text.lower() or "copy selected text and summarize it" in request_text.lower()
+
+    async def plan_task(self, *, user_id: str, session_key: str, request_text: str) -> dict[str, object]:
+        self.planned.append(request_text)
+        return {
+            "task_id": "coworker-1",
+            "user_id": user_id,
+            "session_key": session_key,
+            "request_text": request_text,
+            "status": "planned",
+            "summary": "Open Task Manager and summarize system usage.",
+            "steps": [
+                {"type": "task_manager_open", "title": "Open Task Manager", "verification": {"kind": "tool_status"}},
+                {"type": "task_manager_summary", "title": "Summarize CPU, memory, and disk usage", "verification": {"kind": "summary_has_keys"}},
+            ],
+            "current_step_index": 0,
+            "total_steps": 2,
+            "latest_state": {},
+            "transcript": [],
+        }
+
+    async def run_task_request(self, *, user_id: str, session_key: str, request_text: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        self.ran.append(request_text)
+        return {
+            "task_id": "coworker-1",
+            "user_id": user_id,
+            "session_key": session_key,
+            "request_text": request_text,
+            "status": "completed",
+            "summary": "Open Task Manager and summarize system usage.",
+            "steps": [
+                {"type": "task_manager_open", "title": "Open Task Manager"},
+                {"type": "task_manager_summary", "title": "Summarize CPU, memory, and disk usage"},
+            ],
+            "current_step_index": 2,
+            "total_steps": 2,
+            "latest_state": {"active_window": {"title": "Task Manager", "process_name": "Taskmgr"}},
+            "transcript": [
+                {"step_index": 0, "step_type": "task_manager_open", "summary": "Open Task Manager: completed."},
+                {"step_index": 1, "step_type": "task_manager_summary", "summary": "Summarize CPU, memory, and disk usage: CPU 22.0%, memory and disk summary captured."},
+            ],
+        }
+
+    async def run_task(self, *, user_id: str, task_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        return await self.run_task_request(user_id=user_id, session_key="webchat_main", request_text=task_id, connection_id=connection_id, channel_name=channel_name)
+
+    async def step_task(self, *, user_id: str, task_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+        return await self.run_task(user_id=user_id, task_id=task_id, connection_id=connection_id, channel_name=channel_name)
+
+    async def get_task(self, *, user_id: str, task_id: str) -> dict[str, object]:
+        return await self.run_task(user_id=user_id, task_id=task_id)
+
+    async def stop_task(self, *, user_id: str, task_id: str) -> dict[str, object]:
+        task = await self.run_task(user_id=user_id, task_id=task_id)
+        task["status"] = "stopped"
+        return task
+
+    async def list_tasks(self, *, user_id: str, limit: int = 20) -> list[dict[str, object]]:
+        return [
+            {
+                "task_id": "coworker-1",
+                "summary": "Open Task Manager and summarize system usage.",
+                "status": "completed",
+                "current_step_index": 2,
+                "total_steps": 2,
+            }
+        ]
 
 
 class FakeSkill:
@@ -1149,6 +1556,497 @@ async def test_router_host_shortcut_opens_notepad(app_config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_app_shortcut_returns_clear_message_when_disabled(app_config) -> None:
+    tool_registry = DummyToolRegistry(app_tools_enabled=True)
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-app-disabled-1",
+        request_id="req-app-disabled-1",
+        session_key="telegram:123",
+        message="maximize word",
+        metadata={"trace_id": "trace-app-disabled-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["command_response"] == "Desktop app control is not enabled."
+    assert tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_screen_shortcut_returns_clear_message_when_disabled(app_config) -> None:
+    tool_registry = DummyToolRegistry(screen_tools_enabled=True)
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-screen-disabled-1",
+        request_id="req-screen-disabled-1",
+        session_key="telegram:123",
+        message="what app is active",
+        metadata={"trace_id": "trace-screen-disabled-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["command_response"] == "Desktop vision is not enabled."
+    assert tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_screen_slash_command_flow(app_config) -> None:
+    app_config.desktop_vision.enabled = True
+    tool_registry = DummyToolRegistry(screen_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    active_response = await router.route_user_message(
+        connection_id="conn-screen-1",
+        request_id="req-screen-1",
+        session_key="telegram:123",
+        message="/screen active",
+        metadata={"trace_id": "trace-screen-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    capture_response = await router.route_user_message(
+        connection_id="conn-screen-2",
+        request_id="req-screen-2",
+        session_key="telegram:123",
+        message="/screen capture",
+        metadata={"trace_id": "trace-screen-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    window_response = await router.route_user_message(
+        connection_id="conn-screen-3",
+        request_id="req-screen-3",
+        session_key="telegram:123",
+        message="/screen window",
+        metadata={"trace_id": "trace-screen-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    read_response = await router.route_user_message(
+        connection_id="conn-screen-4",
+        request_id="req-screen-4",
+        session_key="telegram:123",
+        message="/screen read window",
+        metadata={"trace_id": "trace-screen-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert active_response.ok is True
+    assert "Active window: Visual Studio Code" in active_response.payload["command_response"]
+    assert capture_response.ok is True
+    assert "Captured a desktop screenshot." in capture_response.payload["command_response"]
+    assert window_response.ok is True
+    assert "Captured an active window screenshot." in window_response.payload["command_response"]
+    assert read_response.ok is True
+    assert "Read the window." in read_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == [
+        "desktop_active_window",
+        "desktop_screenshot",
+        "desktop_window_screenshot",
+        "desktop_read_screen",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_handles_natural_language_screen_shortcuts(app_config) -> None:
+    app_config.desktop_vision.enabled = True
+    tool_registry = DummyToolRegistry(screen_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    active_response = await router.route_user_message(
+        connection_id="conn-screen-nl-1",
+        request_id="req-screen-nl-1",
+        session_key="telegram:123",
+        message="what app is active",
+        metadata={"trace_id": "trace-screen-nl-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    capture_response = await router.route_user_message(
+        connection_id="conn-screen-nl-2",
+        request_id="req-screen-nl-2",
+        session_key="telegram:123",
+        message="take a screenshot of my desktop",
+        metadata={"trace_id": "trace-screen-nl-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    read_response = await router.route_user_message(
+        connection_id="conn-screen-nl-3",
+        request_id="req-screen-nl-3",
+        session_key="telegram:123",
+        message="read the active window",
+        metadata={"trace_id": "trace-screen-nl-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert active_response.ok is True
+    assert "Active window: Visual Studio Code" in active_response.payload["command_response"]
+    assert capture_response.ok is True
+    assert "Captured a desktop screenshot." in capture_response.payload["command_response"]
+    assert read_response.ok is True
+    assert "Read the window." in read_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == [
+        "desktop_active_window",
+        "desktop_screenshot",
+        "desktop_read_screen",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_input_shortcut_returns_clear_message_when_disabled(app_config) -> None:
+    tool_registry = DummyToolRegistry(input_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-input-disabled-1",
+        request_id="req-input-disabled-1",
+        session_key="telegram:123",
+        message="move mouse to 400 300",
+        metadata={"trace_id": "trace-input-disabled-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["command_response"] == "Desktop input is not enabled."
+    assert tool_registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_router_input_slash_command_flow(app_config) -> None:
+    app_config.desktop_input.enabled = True
+    tool_registry = DummyToolRegistry(input_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    position_response = await router.route_user_message(
+        connection_id="conn-input-1",
+        request_id="req-input-1",
+        session_key="telegram:123",
+        message="/input position",
+        metadata={"trace_id": "trace-input-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    click_response = await router.route_user_message(
+        connection_id="conn-input-2",
+        request_id="req-input-2",
+        session_key="telegram:123",
+        message="/input click 400 300",
+        metadata={"trace_id": "trace-input-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    type_response = await router.route_user_message(
+        connection_id="conn-input-3",
+        request_id="req-input-3",
+        session_key="telegram:123",
+        message="/input type hello world",
+        metadata={"trace_id": "trace-input-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    clipboard_response = await router.route_user_message(
+        connection_id="conn-input-4",
+        request_id="req-input-4",
+        session_key="telegram:123",
+        message="/clipboard get",
+        metadata={"trace_id": "trace-input-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert position_response.ok is True
+    assert "Cursor position: (400, 300)" in position_response.payload["command_response"]
+    assert click_response.ok is True
+    assert "Clicked at (400, 300)." in click_response.payload["command_response"]
+    assert type_response.ok is True
+    assert "Typed 11 character(s)" in type_response.payload["command_response"]
+    assert clipboard_response.ok is True
+    assert "Clipboard text:" in clipboard_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == [
+        "desktop_mouse_position",
+        "desktop_mouse_click",
+        "desktop_keyboard_type",
+        "desktop_clipboard_read",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_handles_natural_language_input_shortcuts(app_config) -> None:
+    app_config.desktop_input.enabled = True
+    tool_registry = DummyToolRegistry(input_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    move_response = await router.route_user_message(
+        connection_id="conn-input-nl-1",
+        request_id="req-input-nl-1",
+        session_key="telegram:123",
+        message="move mouse to 400 300",
+        metadata={"trace_id": "trace-input-nl-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    hotkey_response = await router.route_user_message(
+        connection_id="conn-input-nl-2",
+        request_id="req-input-nl-2",
+        session_key="telegram:123",
+        message="press ctrl c",
+        metadata={"trace_id": "trace-input-nl-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    copy_response = await router.route_user_message(
+        connection_id="conn-input-nl-3",
+        request_id="req-input-nl-3",
+        session_key="telegram:123",
+        message="copy selected text",
+        metadata={"trace_id": "trace-input-nl-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert move_response.ok is True
+    assert "Moved the mouse to (400, 300)." in move_response.payload["command_response"]
+    assert hotkey_response.ok is True
+    assert "pressed ctrl+c." in hotkey_response.payload["command_response"].lower()
+    assert copy_response.ok is True
+    assert "Clipboard text:" in copy_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == [
+        "desktop_mouse_move",
+        "desktop_keyboard_hotkey",
+        "desktop_keyboard_hotkey",
+        "desktop_clipboard_read",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_apps_slash_command_flow(app_config) -> None:
+    app_config.desktop_apps.enabled = True
+    tool_registry = DummyToolRegistry(app_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    list_response = await router.route_user_message(
+        connection_id="conn-apps-1",
+        request_id="req-apps-1",
+        session_key="telegram:123",
+        message="/apps list",
+        metadata={"trace_id": "trace-apps-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    open_response = await router.route_user_message(
+        connection_id="conn-apps-2",
+        request_id="req-apps-2",
+        session_key="telegram:123",
+        message="/apps open chrome",
+        metadata={"trace_id": "trace-apps-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    focus_response = await router.route_user_message(
+        connection_id="conn-apps-3",
+        request_id="req-apps-3",
+        session_key="telegram:123",
+        message="/apps focus vscode",
+        metadata={"trace_id": "trace-apps-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    maximize_response = await router.route_user_message(
+        connection_id="conn-apps-4",
+        request_id="req-apps-4",
+        session_key="telegram:123",
+        message="/apps maximize word",
+        metadata={"trace_id": "trace-apps-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    left_response = await router.route_user_message(
+        connection_id="conn-apps-5",
+        request_id="req-apps-5",
+        session_key="telegram:123",
+        message="/apps left chrome",
+        metadata={"trace_id": "trace-apps-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert list_response.ok is True
+    assert "Visible app windows:" in list_response.payload["command_response"]
+    assert "Visual Studio Code" in list_response.payload["command_response"]
+    assert open_response.ok is True
+    assert "Launched chrome" in open_response.payload["command_response"]
+    assert focus_response.ok is True
+    assert "Focused 'Vscode'." in focus_response.payload["command_response"]
+    assert maximize_response.ok is True
+    assert "Maximized 'Word'." in maximize_response.payload["command_response"]
+    assert left_response.ok is True
+    assert "Snapped 'Chrome' to the left side." in left_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == [
+        "apps_list_windows",
+        "apps_open",
+        "apps_focus",
+        "apps_maximize",
+        "apps_snap",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_handles_natural_language_app_shortcuts(app_config) -> None:
+    app_config.desktop_apps.enabled = True
+    tool_registry = DummyToolRegistry(app_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    open_response = await router.route_user_message(
+        connection_id="conn-app-nl-1",
+        request_id="req-app-nl-1",
+        session_key="telegram:123",
+        message="open chrome",
+        metadata={"trace_id": "trace-app-nl-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    focus_response = await router.route_user_message(
+        connection_id="conn-app-nl-2",
+        request_id="req-app-nl-2",
+        session_key="telegram:123",
+        message="switch to vscode",
+        metadata={"trace_id": "trace-app-nl-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    snap_response = await router.route_user_message(
+        connection_id="conn-app-nl-3",
+        request_id="req-app-nl-3",
+        session_key="telegram:123",
+        message="put chrome on left",
+        metadata={"trace_id": "trace-app-nl-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert open_response.ok is True
+    assert "Launched chrome" in open_response.payload["command_response"]
+    assert focus_response.ok is True
+    assert "Focused 'Vscode'." in focus_response.payload["command_response"]
+    assert snap_response.ok is True
+    assert "Snapped 'Chrome' to the left side." in snap_response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls] == ["apps_open", "apps_focus", "apps_snap"]
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_creates_desktop_note_when_filename_and_content_are_given(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     session_manager = DummySessionManager()
@@ -1267,6 +2165,49 @@ async def test_router_host_shortcut_creates_file_with_inside_this_after_folder_l
     assert response.ok is True
     assert tool_registry.calls[0][0] == "write_host_file"
     assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/OneDrive/Desktop/new.pdf"
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_creates_file_with_in_this_folder_after_r_drive_listing(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-host-folder-r-1",
+            "role": "assistant",
+            "content": "Here is the content of the `5_sem` folder on your R drive:\n\n**Files:**\n\n*   testing.txt",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-4bb-r",
+        request_id="req-host-4bb-r",
+        session_key="telegram:123",
+        message="create time.pdf file with content python is running in this folder",
+        metadata={"trace_id": "trace-host-4bb-r", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert tool_registry.calls[0][0] == "search_host_files"
+    assert tool_registry.calls[1][0] == "write_host_file"
+    assert tool_registry.calls[1][1]["path"] == "R:/college/5sem/time.pdf"
 
 
 @pytest.mark.asyncio
@@ -1988,6 +2929,244 @@ async def test_router_desktop_slash_command_flow(app_config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_creates_manual_desktop_routine_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.desktop_apps.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True, app_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-1",
+        request_id="req-routine-create-1",
+        session_key="telegram:123",
+        message="create a study mode that opens chrome and 6_semester folder",
+        metadata={"trace_id": "trace-routine-create-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'study mode'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["trigger_type"] == "manual"
+    assert [step["type"] for step in automation_engine.desktop_routines[0]["steps"]] == ["open_app", "open_host_path"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_reminder_desktop_routine_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-2",
+        request_id="req-routine-create-2",
+        session_key="telegram:123",
+        message="remind me tomorrow at 8 pm to study and open 6_semester folder",
+        metadata={"trace_id": "trace-routine-create-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'study'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["trigger_type"] == "reminder"
+    assert automation_engine.desktop_routines[0]["run_at"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_file_watch_desktop_routine_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-3",
+        request_id="req-routine-create-3",
+        session_key="telegram:123",
+        message="when a pdf file appears in download2, move it to documents and notify me",
+        metadata={"trace_id": "trace-routine-create-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'Process Download2'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["trigger_type"] == "file_watch"
+    assert automation_engine.desktop_routines[0]["file_extensions"] == ["pdf"]
+    assert automation_engine.desktop_routines[0]["steps"][0]["type"] == "move_host_file"
+
+
+@pytest.mark.asyncio
+async def test_router_routine_management_flow(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    automation_engine = DummyAutomationEngine()
+    automation_engine.desktop_routines = [
+        {
+            "name": "routine:routine-rule-1",
+            "display_name": "Study mode",
+            "trigger": "desktop_routine",
+            "trigger_type": "manual",
+            "summary": "open chrome, open R:/6_semester",
+            "steps": [{"type": "open_app", "target": "chrome"}],
+            "step_count": 1,
+            "risky_step_count": 0,
+            "paused": False,
+            "routine": True,
+        }
+    ]
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True, app_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    list_response = await router.route_user_message(
+        connection_id="conn-routine-manage-1",
+        request_id="req-routine-manage-1",
+        session_key="telegram:123",
+        message="show my routines",
+        metadata={"trace_id": "trace-routine-manage-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    run_response = await router.route_user_message(
+        connection_id="conn-routine-manage-2",
+        request_id="req-routine-manage-2",
+        session_key="telegram:123",
+        message="run study mode",
+        metadata={"trace_id": "trace-routine-manage-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    pause_response = await router.route_user_message(
+        connection_id="conn-routine-manage-3",
+        request_id="req-routine-manage-3",
+        session_key="telegram:123",
+        message="/routine pause Study mode",
+        metadata={"trace_id": "trace-routine-manage-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    resume_response = await router.route_user_message(
+        connection_id="conn-routine-manage-4",
+        request_id="req-routine-manage-4",
+        session_key="telegram:123",
+        message="/routine resume Study mode",
+        metadata={"trace_id": "trace-routine-manage-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    delete_response = await router.route_user_message(
+        connection_id="conn-routine-manage-5",
+        request_id="req-routine-manage-5",
+        session_key="telegram:123",
+        message="/routine delete Study mode",
+        metadata={"trace_id": "trace-routine-manage-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert list_response.ok is True
+    assert "Desktop routines:" in list_response.payload["command_response"]
+    assert "Study mode" in list_response.payload["command_response"]
+    assert run_response.ok is True
+    assert "Ran routine routine-rule-1." in run_response.payload["command_response"]
+    assert automation_engine.routine_runs == ["routine-rule-1"]
+    assert pause_response.ok is True
+    assert "Paused desktop routine 'Study mode'." in pause_response.payload["command_response"]
+    assert resume_response.ok is True
+    assert "Resumed desktop routine 'Study mode'." in resume_response.payload["command_response"]
+    assert delete_response.ok is True
+    assert "Deleted desktop routine 'Study mode'." in delete_response.payload["command_response"]
+    assert automation_engine.desktop_routines == []
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_lists_contents_from_give_content_phrase(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(
@@ -2629,3 +3808,282 @@ async def test_router_uses_classifier_for_plausible_skill_candidates(app_config)
     assert response.payload["activated_skill"] == "daily-briefing"
     enqueued = agent_loop.enqueued[-1]
     assert enqueued.metadata["skill_activation_source"] == "classifier"
+
+
+@pytest.mark.asyncio
+async def test_router_vscode_slash_command_opens_project(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-1",
+        request_id="req-skill-1",
+        session_key="telegram:123",
+        message="/vscode open 6_semester",
+        metadata={"trace_id": "trace-skill-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "opened r:/6_semester/mini_project in vs code" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "vscode_open_target"
+
+
+@pytest.mark.asyncio
+async def test_router_doc_slash_command_creates_document(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-2",
+        request_id="req-skill-2",
+        session_key="telegram:123",
+        message="/doc create R:/6_semester/notes.docx :: hello world",
+        metadata={"trace_id": "trace-skill-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "created or updated" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "document_create"
+
+
+@pytest.mark.asyncio
+async def test_router_excel_slash_command_previews_workbook(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-3",
+        request_id="req-skill-3",
+        session_key="telegram:123",
+        message="/excel preview R:/marks.xlsx",
+        metadata={"trace_id": "trace-skill-3", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "workbook preview" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "excel_preview"
+
+
+@pytest.mark.asyncio
+async def test_router_natural_language_opens_task_manager_with_summary(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-4",
+        request_id="req-skill-4",
+        session_key="telegram:123",
+        message="open task manager",
+        metadata={"trace_id": "trace-skill-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "opened task manager" in response.payload["command_response"].lower()
+    assert "cpu:" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "task_manager_open"
+
+
+@pytest.mark.asyncio
+async def test_router_natural_language_opens_bluetooth_settings(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-5",
+        request_id="req-skill-5",
+        session_key="telegram:123",
+        message="open bluetooth settings",
+        metadata={"trace_id": "trace-skill-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "opened bluetooth settings" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "system_open_settings"
+
+
+@pytest.mark.asyncio
+async def test_router_natural_language_runs_study_mode_preset(app_config) -> None:
+    app_config.app_skills.enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-skill-6",
+        request_id="req-skill-6",
+        session_key="telegram:123",
+        message="study mode",
+        metadata={"trace_id": "trace-skill-6", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "ran study-mode" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "preset_run"
+
+
+@pytest.mark.asyncio
+async def test_router_coworker_plan_command_returns_preview(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-1",
+        request_id="req-coworker-1",
+        session_key="webchat_main",
+        message="/coworker plan open task manager and summarize system usage",
+        metadata={"trace_id": "trace-coworker-1"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Coworker task coworker-1" in response.payload["command_response"]
+    assert "Planned steps:" in response.payload["command_response"]
+    assert coworker_service.planned == ["open task manager and summarize system usage"]
+
+
+@pytest.mark.asyncio
+async def test_router_natural_language_coworker_shortcut_runs_task(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-2",
+        request_id="req-coworker-2",
+        session_key="webchat_main",
+        message="help me open task manager and summarize system usage",
+        metadata={"trace_id": "trace-coworker-2"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Status: completed" in response.payload["command_response"]
+    assert "Latest window: Task Manager" in response.payload["command_response"]
+    assert coworker_service.ran == ["help me open task manager and summarize system usage"]
+    assert [message["role"] for message in session_manager.messages] == ["user", "assistant"]

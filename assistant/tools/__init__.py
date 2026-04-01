@@ -2,7 +2,11 @@
 
 from assistant.tools.acp_tool import build_acp_tools
 from assistant.tools.agent_send_tool import build_agent_send_tool
+from assistant.tools.app_skills_tool import build_app_skills_tools
+from assistant.tools.app_control_tool import build_app_control_tools
 from assistant.tools.browser_tool import build_browser_tools
+from assistant.tools.desktop_input_tool import build_desktop_input_tools
+from assistant.tools.desktop_vision_tool import build_desktop_vision_tools
 from assistant.tools.exec_tool import build_exec_tool
 from assistant.tools.file_tool import build_file_tools
 from assistant.tools.github_tool import build_github_tools
@@ -55,6 +59,30 @@ def create_default_tool_registry(
         registry.register(tool)
     registry.browser_runtime = browser_runtime
     registry.register_cleanup(browser_runtime.close)
+    if getattr(config.desktop_apps, "enabled", False):
+        app_tools, app_runtime = build_app_control_tools(config)
+        for tool in app_tools:
+            registry.register(tool)
+        registry.app_control_runtime = app_runtime
+    if getattr(config.desktop_input, "enabled", False):
+        input_tools, input_runtime = build_desktop_input_tools(config, system_access_manager=system_access_manager)
+        for tool in input_tools:
+            registry.register(tool)
+        registry.desktop_input_runtime = input_runtime
+    if getattr(config.desktop_vision, "enabled", False):
+        vision_tools, vision_runtime = build_desktop_vision_tools(config)
+        for tool in vision_tools:
+            registry.register(tool)
+        registry.desktop_vision_runtime = vision_runtime
+    if getattr(config.app_skills, "enabled", False):
+        app_skill_tools, app_skills_manager = build_app_skills_tools(
+            config,
+            registry,
+            system_access_manager=system_access_manager,
+        )
+        for tool in app_skill_tools:
+            registry.register(tool)
+        registry.app_skills_manager = app_skills_manager
     for tool in build_pdf_tools(config):
         registry.register(tool)
     for tool in build_search_tools(config):

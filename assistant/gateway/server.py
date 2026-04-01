@@ -32,6 +32,7 @@ from assistant.channels.telegram.adapter import TelegramChannel
 from assistant.channels.webchat import get_webchat_device_id
 from assistant.config import AppConfig, load_config
 from assistant.context_engine import ContextEngine
+from assistant.desktop_coworker import DesktopCoworkerService
 from assistant.gateway.auth import authenticate_token
 from assistant.gateway.connection_manager import ConnectionManager
 from assistant.gateway.device_registry import DeviceRegistry
@@ -87,6 +88,7 @@ class GatewayServices:
     context_engine: ContextEngine
     system_access_manager: SystemAccessManager
     browser_runtime: Any
+    coworker_service: DesktopCoworkerService | None = None
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -144,6 +146,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         )
         browser_runtime = getattr(tool_registry, "browser_runtime", None)
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
+        coworker_service = DesktopCoworkerService(runtime_config, tool_registry)
+        await coworker_service.initialize()
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
             config=runtime_config,
@@ -178,6 +182,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             tool_registry=tool_registry,
             automation_engine=None,
             system_access_manager=system_access_manager,
+            coworker_service=coworker_service,
             user_profiles=user_profiles,
             started_at=started_at,
         )
@@ -195,6 +200,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             automation_store,
             notification_dispatcher,
             system_access_manager=system_access_manager,
+            tool_registry=tool_registry,
         )
         await automation_engine.initialize()
         desktop_watcher = DesktopAutomationWatcher(runtime_config, automation_engine)
@@ -245,6 +251,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             context_engine=context_engine,
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
+            coworker_service=coworker_service,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()
@@ -372,10 +379,91 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         deleted = await services.automation_engine.delete_rule(user_id, name)
         return {"ok": deleted, "name": name}
 
+    @app.post("/api/automation/rules/{name}/run")
+    async def run_automation_rule(name: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        if not name.startswith("routine:"):
+            return {"ok": False, "error": "Only desktop routines support run-now in this phase."}
+        result = await services.automation_engine.run_desktop_routine_now(
+            user_id=user_id,
+            routine_id=name.removeprefix("routine:"),
+            notify=False,
+        )
+        return {"ok": True, "name": name, "result": result}
+
     @app.post("/api/automation/runs/{run_id}/replay")
     async def replay_automation_run(run_id: str) -> dict[str, Any]:
         services: GatewayServices = app.state.services
         return {"ok": True, "result": await services.automation_engine.replay_run(run_id)}
+
+    @app.get("/api/coworker/tasks")
+    async def coworker_tasks(request: Request, limit: int = 20) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"tasks": [], "enabled": False}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        tasks = await services.coworker_service.list_tasks(user_id=user_id, limit=max(1, min(limit, 100)))
+        return {"tasks": tasks, "enabled": True}
+
+    @app.get("/api/coworker/tasks/{task_id}")
+    async def coworker_task(task_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"ok": False, "error": "Desktop coworker is not enabled."}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        return {"ok": True, "task": await services.coworker_service.get_task(user_id=user_id, task_id=task_id)}
+
+    @app.post("/api/coworker/tasks/plan")
+    async def coworker_plan(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"ok": False, "error": "Desktop coworker is not enabled."}
+        payload = await request.json()
+        task_request = str(payload.get("task", "")).strip()
+        if not task_request:
+            return {"ok": False, "error": "Task text is required."}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        task = await services.coworker_service.plan_task(user_id=user_id, session_key="webchat_main", request_text=task_request)
+        return {"ok": True, "task": task}
+
+    @app.post("/api/coworker/tasks/run")
+    async def coworker_run(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"ok": False, "error": "Desktop coworker is not enabled."}
+        payload = await request.json()
+        task_request = str(payload.get("task", "")).strip()
+        if not task_request:
+            return {"ok": False, "error": "Task text is required."}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        task = await services.coworker_service.run_task_request(user_id=user_id, session_key="webchat_main", request_text=task_request)
+        return {"ok": True, "task": task}
+
+    @app.post("/api/coworker/tasks/{task_id}/step")
+    async def coworker_step(task_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"ok": False, "error": "Desktop coworker is not enabled."}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        task = await services.coworker_service.step_task(user_id=user_id, task_id=task_id)
+        return {"ok": True, "task": task}
+
+    @app.post("/api/coworker/tasks/{task_id}/stop")
+    async def coworker_stop(task_id: str, request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.coworker_service is None or not services.config.desktop_coworker.enabled:
+            return {"ok": False, "error": "Desktop coworker is not enabled."}
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        task = await services.coworker_service.stop_task(user_id=user_id, task_id=task_id)
+        return {"ok": True, "task": task}
 
     @app.get("/api/approvals")
     async def approvals(request: Request) -> dict[str, Any]:

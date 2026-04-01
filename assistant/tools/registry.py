@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 ToolHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CleanupHandler = Callable[[], Awaitable[None]]
 ResultRedactor = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+InputRedactor = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -20,6 +21,7 @@ class ToolDefinition:
     handler: ToolHandler
     persistence_policy: str = "full"
     redactor: ResultRedactor | None = None
+    input_redactor: InputRedactor | None = None
 
 
 class ToolRegistry:
@@ -70,6 +72,12 @@ class ToolRegistry:
         if definition.persistence_policy != "redacted" or definition.redactor is None:
             return tool_result
         return definition.redactor(tool_input, tool_result)
+
+    def redact_input(self, tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+        definition = self.get(tool_name)
+        if definition.persistence_policy != "redacted" or definition.input_redactor is None:
+            return tool_input
+        return definition.input_redactor(tool_input)
 
     async def close(self) -> None:
         if not self._cleanup_handlers:

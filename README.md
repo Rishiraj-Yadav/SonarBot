@@ -12,6 +12,12 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Phase 6 service integrations: Gmail search/read/send/draft tools, GitHub repo/issue/PR read tools, Gmail briefing skill, GitHub PR summary skill, OAuth token fallback for connected accounts
 - [x] Automation V2: unified user profiles, persisted automation runs, background cron/heartbeat/webhook execution, notification inbox, primary-channel delivery, rule pause/resume controls
 - [x] Browser Automation V2: named browser profiles, multi-tab Playwright runtime, downloads/log capture, table extraction, form fill helpers, and a live browser panel in WebChat
+- [x] App/Window Control V1: optional Windows-only app launch, window listing, focus/minimize/maximize/restore, and left/right snap commands
+- [x] Desktop Vision V1: optional Windows-only active-window awareness, desktop/window screenshots, and OCR-backed screen reading
+- [x] Desktop Input V1: optional Windows-only mouse position/move/click, keyboard typing/hotkeys, clipboard read/write, and approval-gated `/input` + `/clipboard` commands
+- [x] Desktop Routines V1: optional structured routines that combine app control, host file actions, desktop vision, and desktop input into manual, scheduled, reminder, and file-watch workflows
+- [x] App Skills V1: optional higher-level VS Code, document, Excel, system control, Task Manager, browser workspace, and study/work preset commands built on the current desktop primitives
+- [x] Desktop Coworker V1: optional bounded `/coworker` task planning and verified execution for multi-step desktop flows with transcripts, step-by-step verification, and safe skill-first fallbacks
 
 ## What You Can Use Today
 
@@ -22,6 +28,12 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
 - advanced browser automation with named profiles, multi-tab control, uploads/downloads, logs, table extraction, and form autofill
+- optional Windows app/window control with `/apps` commands and bounded natural-language shortcuts
+- optional Windows desktop screenshots, active-window inspection, and OCR-backed `/screen` commands
+- optional Windows desktop keyboard/mouse/clipboard control with `/input` and `/clipboard` commands
+- optional Windows desktop routines with `/routine` commands plus bounded natural-language setup phrases such as `create a study mode that opens chrome and 6_semester folder`
+- optional Windows app skills with `/vscode`, `/doc`, `/excel`, `/system`, `/task`, `/preset`, and `/browser-skill`
+- optional Windows coworker tasks with `/coworker` commands for verified multi-step desktop work such as `open task manager and summarize system usage`
 - host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
@@ -90,6 +102,317 @@ The browser subsystem now includes:
 Browser downloads are stored under the workspace by default:
 
 - `workspace/inbox/browser_downloads`
+
+## Windows App Control V1
+
+SonarBot now includes an optional Windows-only app/window control layer for safe desktop actions.
+
+Phase 1 includes:
+
+- launch configured app aliases such as Chrome, Edge, VS Code, Notepad, Explorer, Word, Excel, and WhatsApp
+- list visible app windows
+- focus, minimize, maximize, and restore windows
+- snap a window to the left or right side of the monitor work area
+
+Phase 1 does not include:
+
+- close-window actions
+- semantic keyboard or mouse automation
+- clipboard workflows
+- OCR or general desktop vision
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[desktop_apps]
+enabled = true
+allow_layout_changes = true
+launch_timeout_seconds = 8
+known_apps = { chrome = "C:/Program Files/Google/Chrome/Application/chrome.exe", edge = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", vscode = "~/AppData/Local/Programs/Microsoft VS Code/Code.exe", notepad = "C:/Windows/System32/notepad.exe", explorer = "C:/Windows/explorer.exe", word = "C:/Program Files (x86)/Microsoft Office/root/Office16/WINWORD.EXE", excel = "C:/Program Files (x86)/Microsoft Office/root/Office16/EXCEL.EXE", outlook = "C:/Program Files (x86)/Microsoft Office/root/Office16/OUTLOOK.EXE", whatsapp = "~/AppData/Local/WhatsApp/WhatsApp.exe", taskmanager = "C:/Windows/System32/taskmgr.exe", settings = "C:/Windows/ImmersiveControlPanel/SystemSettings.exe", calculator = "C:/Windows/System32/calc.exe", cmd = "C:/Windows/System32/cmd.exe", powershell = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" }
+```
+
+Example commands:
+
+- `/apps list`
+- `/apps open chrome`
+- `/apps focus vscode`
+- `/apps maximize word`
+- `/apps left chrome`
+- `open chrome`
+- `switch to vscode`
+- `maximize word`
+- `put chrome on left`
+
+This feature is Windows-only and disabled by default so existing installs keep their current behavior.
+
+## Desktop Vision V1
+
+SonarBot also includes an optional Windows-only desktop vision layer for safe read-only screen awareness.
+
+Phase 2 includes:
+
+- inspect the currently active window
+- capture a full desktop screenshot into the workspace
+- capture a screenshot of the active window
+- OCR desktop screenshots or active-window captures
+- combined screen-read flow through `/screen read`
+
+Phase 2 does not include:
+
+- clicks, typing, or hotkeys
+- clipboard automation
+- window close automation
+- general desktop control beyond reading/capture
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[desktop_vision]
+enabled = true
+ocr_enabled = true
+screenshots_subdir = "desktop"
+capture_format = "png"
+max_ocr_characters = 12000
+```
+
+Example commands:
+
+- `/screen active`
+- `/screen capture`
+- `/screen window`
+- `/screen read`
+- `/screen read window`
+- `what app is active`
+- `take a screenshot of my desktop`
+- `capture the active window`
+- `read the text on my screen`
+- `read the active window`
+
+Desktop Vision is Windows-only, stores captures inside the workspace, and remains disabled by default.
+
+## Desktop Input V1
+
+SonarBot also includes an optional Windows-only desktop input layer for safe manual keyboard, mouse, and clipboard control.
+
+Phase 3 includes:
+
+- get the current cursor position
+- move the cursor to explicit coordinates
+- left-click, right-click, and double-click at explicit coordinates
+- scroll up or down by an explicit amount
+- type text into the active window
+- press explicit hotkeys such as `Ctrl+C`
+- read and write clipboard text
+- `copy selected text` as a combined `Ctrl+C` + clipboard-read flow
+
+Phase 3 does not include:
+
+- semantic clicking like `click the save button`
+- OCR-targeted clicking
+- drag and drop
+- macros or multi-step replay
+- automation-triggered input actions
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[desktop_input]
+enabled = true
+keyboard_enabled = true
+mouse_enabled = true
+clipboard_enabled = true
+allow_absolute_coordinates = true
+max_type_chars = 500
+confirm_clicks = true
+confirm_typing = true
+confirm_clipboard_write = true
+confirm_risky_hotkeys = true
+safe_hotkeys = ["ctrl+c", "ctrl+a", "ctrl+f", "tab", "shift+tab", "up", "down", "left", "right", "pageup", "pagedown", "home", "end", "esc"]
+```
+
+Example commands:
+
+- `/input position`
+- `/input move 400 300`
+- `/input click 400 300`
+- `/input right-click 400 300`
+- `/input double-click 400 300`
+- `/input scroll down 5`
+- `/input type hello world`
+- `/input hotkey ctrl+c`
+- `/clipboard get`
+- `/clipboard set hello`
+- `move mouse to 400 300`
+- `click at 400 300`
+- `type hello world`
+- `press ctrl c`
+- `what is on my clipboard`
+- `copy selected text`
+
+Desktop Input is Windows-only, disabled by default, and reuses the existing `/host-approvals` flow for risky actions such as clicks, typing, clipboard writes, and non-allowlisted hotkeys.
+
+## Desktop Routines V1
+
+SonarBot also includes an optional Windows-only desktop routine layer for chaining the existing app, host-file, screen, and input primitives into bounded multi-step workflows.
+
+Phase 4 includes:
+
+- manual named routines such as `study mode`
+- scheduled routines built from chat phrases like `every weekday at 9 am open chrome and vscode`
+- reminder-style routines that notify and then open apps or folders
+- file-watch routines that can move or copy matching files and notify you
+- `/routine` commands to list, show, run, pause, resume, and delete desktop routines
+- WebChat rule cards for running and managing saved routines
+
+Phase 4 does not include:
+
+- open-ended autonomous desktop loops
+- OCR-targeted clicking
+- drag-and-drop or macros
+- app-specific deep Word/Excel/VS Code workflows
+- automation-triggered freeform keyboard or mouse control outside structured routine steps
+
+Enable desktop routines in `~/.assistant/config.toml` by turning on desktop automation:
+
+```toml
+[automation.desktop]
+enabled = true
+watch_enabled = true
+```
+
+`watch_enabled` is only required for file-watch triggers. Manual, scheduled, and reminder routines work with `watch_enabled = false`.
+
+Example commands:
+
+- `/routine list`
+- `/routine show Study mode`
+- `/routine run Study mode`
+- `/routine pause Study mode`
+- `/routine resume Study mode`
+- `/routine delete Study mode`
+- `create a study mode that opens chrome and 6_semester folder`
+- `every weekday at 9 am open chrome and vscode`
+- `remind me tomorrow at 8 pm to study and open 6_semester folder`
+- `when a pdf file appears in download2, move it to documents and notify me`
+
+Desktop Routines reuse the current approval system. Safe steps can auto-run, while risky steps like typing, clicking, overwriting files, or non-allowlisted hotkeys still require approval at execution time.
+
+## App Skills V1
+
+SonarBot also includes an optional Windows-only app-skills layer that builds on the existing host file access, app control, browser tools, desktop input, and desktop routine primitives instead of duplicating them.
+
+Phase 5 includes:
+
+- VS Code helpers for opening project folders or files and searching allowed host paths
+- document helpers for reading, creating, and replacing text in `.txt`, `.md`, and `.docx`
+- Excel helpers for creating simple `.xlsx` workbooks, appending rows, and previewing sheet data
+- system helpers for opening Windows Settings pages plus reading/setting volume and brightness when supported
+- Task Manager helpers that open Task Manager and return a brief CPU, memory, disk, and top-process summary
+- built-in `study-mode`, `work-mode`, and `meeting-mode` presets
+- a separate browser workspace adapter for opening configured study/work/meeting tab sets without modifying the core browser runtime path
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[app_skills]
+enabled = true
+vscode_enabled = true
+documents_enabled = true
+excel_enabled = true
+browser_enabled = true
+system_enabled = true
+task_manager_enabled = true
+presets_enabled = true
+browser_headed_for_workspaces = true
+
+[app_skills.presets]
+enabled = true
+study_apps = ["explorer", "chrome"]
+study_folder_hints = ["6_semester", "6 semester", "5_sem", "5 sem"]
+study_browser_urls = []
+work_apps = ["vscode", "chrome"]
+work_folder_hints = ["workspace", "documents"]
+work_browser_urls = []
+meeting_apps = ["chrome"]
+meeting_browser_urls = []
+```
+
+Example commands:
+
+- `/vscode open 6_semester`
+- `/vscode file R:/6_semester/mini_project/app.py`
+- `/doc create R:/6_semester/notes.docx :: hello world`
+- `/doc replace R:/6_semester/notes.docx :: hello :: hi`
+- `/excel create R:/6_semester/marks.xlsx :: Name,Score`
+- `/excel append-row R:/6_semester/marks.xlsx :: Ritesh,95`
+- `/system volume`
+- `/system volume set 40`
+- `/system brightness`
+- `/system settings bluetooth`
+- `/task open`
+- `/preset run study-mode`
+- `/browser-skill open study`
+- `open task manager`
+- `open bluetooth settings`
+- `open mini_project in vscode`
+- `study mode`
+
+App Skills V1 is disabled by default. Document and Excel operations continue to use the existing host approval model, and the browser workspace pack is intentionally isolated from the main browser runtime implementation path.
+
+## Desktop Coworker V1
+
+SonarBot now also includes an optional Windows-only coworker layer that plans and executes short verified desktop tasks on top of the existing app control, desktop vision, desktop input, routines, and app skills.
+
+Phase 6A includes:
+
+- persisted coworker task records and transcripts
+- `/coworker plan`, `/coworker run`, `/coworker step`, `/coworker status`, `/coworker stop`, and `/coworker history`
+- bounded task planning for supported multi-step requests such as:
+  - open Task Manager and summarize system usage
+  - open Bluetooth settings and report Bluetooth availability
+  - open a project in VS Code and verify focus
+  - update a document and verify the text change
+  - copy selected text and summarize it
+- step-by-step verification using active-window state, screen capture, OCR, clipboard state, or structured tool results
+- safe reuse of Phase 5 app skills first, with lower-level desktop primitives only when needed
+
+Phase 6A does not include:
+
+- open-ended autonomous desktop control
+- semantic clicking like `click the save button`
+- drag-and-drop or macro recording
+- submit/send/finalize actions without explicit approval
+- unrestricted multi-step planning outside the supported bounded patterns
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[desktop_coworker]
+enabled = true
+max_steps_per_task = 6
+max_retries_per_step = 2
+verification_required_by_default = true
+ask_before_submission = true
+screenshot_after_each_step = true
+ocr_after_each_step = false
+store_transcripts = true
+allow_semantic_clicks = false
+allow_ui_text_entry = true
+stop_on_low_confidence = true
+```
+
+Example commands:
+
+- `/coworker plan open task manager and summarize system usage`
+- `/coworker run open task manager and summarize system usage`
+- `/coworker run open bluetooth settings and tell me whether bluetooth is available`
+- `/coworker run open R:/6_semester/mini_project in vscode and confirm the window is focused`
+- `/coworker status <task_id>`
+- `/coworker history`
+- `help me open task manager and summarize system usage`
+- `help me copy selected text and summarize it`
+
+Desktop Coworker V1 is disabled by default, remains intentionally bounded, and prefers deterministic Phase 5 skills before falling back to lower-level desktop actions.
 
 ## Proactive Life Context Engine
 

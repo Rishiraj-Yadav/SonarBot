@@ -1,0 +1,270 @@
+{
+  "generated_at": "2026-04-01T14:06:44.348353+00:00",
+  "user_id": "default",
+  "memory": {
+    "long_term": "# Long-Term Memory Phase 1 does not yet maintain structured long-term memory beyond this starter file.",
+    "recent_daily": ""
+  },
+  "recent_sessions": [
+    {
+      "session_key": "main",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "The model request could not be completed right now. Please try again."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        },
+        {
+          "role": "assistant",
+          "content": "The model request could not be completed right now. Please try again."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        },
+        {
+          "role": "assistant",
+          "content": "The model request could not be completed right now. Please try again."
+        },
+        {
+          "role": "user",
+          "content": "Review the workspace instructions, refresh your sense of the user's preferences, and quietly prepare for the next conversation turn."
+        }
+      ]
+    },
+    {
+      "session_key": "webchat_main",
+      "messages": [
+        {
+          "role": "user",
+          "content": "open settings"
+        },
+        {
+          "role": "assistant",
+          "content": "App skills are not enabled."
+        },
+        {
+          "role": "user",
+          "content": "open notepad"
+        },
+        {
+          "role": "assistant",
+          "content": "I launched notepad on your computer."
+        },
+        {
+          "role": "user",
+          "content": "write hello world into that"
+        },
+        {
+          "role": "assistant",
+          "content": "I am sorry, I can open applications like Notepad, but I don't have the ability to type or interact with them directly. Is there something else I can help you with?"
+        }
+      ]
+    },
+    {
+      "session_key": "telegram:8616242206",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Now save this file in 6 semester folder named test.txt"
+        },
+        {
+          "role": "assistant",
+          "content": "I have opened the \"Save As\" dialog. Now, I will type the file path and name. I am unable to complete the request. The `desktop_keyboard_type` tool failed with the following error: 'text'."
+        }
+      ]
+    }
+  ],
+  "automation": {
+    "notifications": [
+      {
+        "title": "The model request could not be completed right now. Please try again.",
+        "body": "The model request could not be completed right now. Please try again.",
+        "source": "cron:0",
+        "created_at": "2026-04-01T14:00:05.075952+00:00"
+      },
+      {
+        "title": "Critical: Automations Failing Due to Google AI Studio Account",
+        "body": "Your core automations ('cron:0', 'heartbeat') are consistently failing with API errors from Google. This coincides directly with an 'Action Required' email from Google AI Studio (received yesterday) regarding your usage…",
+        "source": "context-engine",
+        "created_at": "2026-04-01T13:52:42.915790+00:00"
+      },
+      {
+        "title": "The model request could not be completed right now. Please try again.",
+        "body": "The model request could not be completed right now. Please try again.",
+        "source": "cron:0",
+        "created_at": "2026-04-01T13:50:09.935999+00:00"
+      },
+      {
+        "title": "Automation Failures Likely Linked to Google AI Studio Account",
+        "body": "Your 'cron:0' and 'heartbeat' automations are repeatedly failing with API errors. This is likely related to the email from Google AI Studio (received yesterday) requiring action on your usage tier for April. Please revi…",
+        "source": "context-engine",
+        "created_at": "2026-04-01T13:47:36.094900+00:00"
+      },
+      {
+        "title": "The model request could not be completed right now. Please try again.",
+        "body": "The model request could not be completed right now. Please try again.",
+        "source": "heartbeat:standing-orders",
+        "created_at": "2026-04-01T13:30:41.115707+00:00"
+      },
+      {
+        "title": "The model request could not be completed right now. Please try again.",
+        "body": "The model request could not be completed right now. Please try again.",
+        "source": "cron:0",
+        "created_at": "2026-04-01T13:30:04.844816+00:00"
+      },
+      {
+        "title": "Moved Namrata synos.pdf to C:/Users/Ritesh/OneDrive/Documents/Namrata synos.pdf.",
+        "body": "Moved Namrata synos.pdf to C:/Users/Ritesh/OneDrive/Documents/Namrata synos.pdf. Moved Namrata synos.pdf to C:/Users/Ritesh/OneDrive/Documents.",
+        "source": "routine:cd4701651f4a",
+        "created_at": "2026-04-01T13:25:48.070407+00:00"
+      },
+      {
+        "title": "Moved AOA EXPT 10.pdf to C:/Users/Ritesh/OneDrive/Documents/AOA EXPT 10.pdf.",
+        "body": "Moved AOA EXPT 10.pdf to C:/Users/Ritesh/OneDrive/Documents/AOA EXPT 10.pdf. Moved AOA EXPT 10.pdf to C:/Users/Ritesh/OneDrive/Documents.",
+        "source": "routine:cd4701651f4a",
+        "created_at": "2026-04-01T13:25:44.125132+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-04-01T14:02:28.766632+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "The model request could not be completed right now. Please try again.",
+        "created_at": "2026-04-01T14:00:00.080209+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-04-01T13:57:16.299148+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "The model request could not be completed right now. Please try again.",
+        "created_at": "2026-04-01T13:50:00.093945+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "The model request could not be completed right now. Please try again.",
+        "created_at": "2026-04-01T13:30:36.541846+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "The model request could not be completed right now. Please try again.",
+        "created_at": "2026-04-01T13:30:00.108280+00:00"
+      },
+      {
+        "rule_name": "routine:cd4701651f4a",
+        "status": "completed",
+        "result_text": "Moved Namrata synos.pdf to C:/Users/Ritesh/OneDrive/Documents/Namrata synos.pdf. Moved Namrata synos.pdf to C:/Users/Ritesh/OneDrive/Documents.",
+        "created_at": "2026-04-01T13:25:46.094180+00:00"
+      },
+      {
+        "rule_name": "routine:cd4701651f4a",
+        "status": "completed",
+        "result_text": "Moved AOA EXPT 10.pdf to C:/Users/Ritesh/OneDrive/Documents/AOA EXPT 10.pdf. Moved AOA EXPT 10.pdf to C:/Users/Ritesh/OneDrive/Documents.",
+        "created_at": "2026-04-01T13:25:36.039632+00:00"
+      }
+    ]
+  },
+  "google": {
+    "connected": true,
+    "gmail_threads": [
+      {
+        "thread_id": "19d492d516b2df87",
+        "subject": "[ngrok news] Sam made an interactive post about LLM quantization and it's a banger",
+        "from": "\"Joel @ ngrok\" <team@m.ngrok.com>",
+        "date": "Wed, 1 Apr 2026 06:11:23 -0700",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d462c5f7032be3",
+        "subject": "[Action Required] Review your Google AI Studio usage tier status to avoid service disruption in Apr 2026",
+        "from": "Google AI Studio <googleaistudio-noreply@google.com>",
+        "date": "Tue, 31 Mar 2026 16:13:25 -0700",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d45e7e0348ff52",
+        "subject": "Standardized Agent Exams: Zero-Setup Evaluation for Your AI Agents",
+        "from": "Kaggle <noreply@kaggle.com>",
+        "date": "Tue, 31 Mar 2026 14:58:37 -0700",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d45ac6fd1991a1",
+        "subject": "OpenAI Dev News: GPT-5.4, Plugins in Codex, and other fun things",
+        "from": "OpenAI <noreply@email.openai.com>",
+        "date": "Tue, 31 Mar 2026 20:53:27 +0000 (UTC)",
+        "snippet": ""
+      },
+      {
+        "thread_id": "19d4493435b2cc1f",
+        "subject": "\"Female Friend texted me this, What should I do?\"",
+        "from": "Reddit <noreply@redditmail.com>",
+        "date": "Tue, 31 Mar 2026 15:46:34 +0000",
+        "snippet": ""
+      }
+    ],
+    "calendar_events": [
+      {
+        "summary": "Happy birthday!",
+        "start": "2026-09-03",
+        "end": "2026-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2027-09-03",
+        "end": "2027-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2028-09-03",
+        "end": "2028-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2029-09-03",
+        "end": "2029-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2030-09-03",
+        "end": "2030-09-04",
+        "location": ""
+      },
+      {
+        "summary": "Happy birthday!",
+        "start": "2031-09-03",
+        "end": "2031-09-04",
+        "location": ""
+      }
+    ]
+  },
+  "signals": {
+    "connected_providers": [
+      "github",
+      "google"
+    ],
+    "session_count": 3,
+    "notification_count": 8,
+    "automation_run_count": 8
+  }
+}

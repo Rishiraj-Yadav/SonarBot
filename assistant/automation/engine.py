@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from assistant.agent.queue import AgentRequest, QueueMode
 from assistant.automation.delivery import NotificationDispatcher
 from assistant.automation.desktop_executor import DesktopAutomationExecutor
+from assistant.automation.desktop_routine_executor import DesktopRoutineExecutor
 from assistant.automation.models import (
     ApprovalRequest,
     AutomationEvent,
     AutomationRule,
     AutomationRun,
     DesktopAutomationRule,
+    DesktopRoutineRule,
     DynamicCronJob,
     Notification,
     OneTimeReminder,
@@ -37,6 +41,7 @@ class AutomationEngine:
         store,
         dispatcher: NotificationDispatcher,
         system_access_manager=None,
+        tool_registry=None,
     ) -> None:
         self.config = config
         self.agent_loop = agent_loop
@@ -48,6 +53,10 @@ class AutomationEngine:
         self.scheduler = None
         self.system_access_manager = system_access_manager
         self.desktop_executor = DesktopAutomationExecutor(system_access_manager) if system_access_manager is not None else None
+        self.tool_registry = tool_registry
+        self.desktop_routine_executor = (
+            DesktopRoutineExecutor(tool_registry, config) if tool_registry is not None else None
+        )
 
     async def initialize(self) -> None:
         await self.store.initialize()
@@ -164,6 +173,14 @@ class AutomationEngine:
         desktop_rules = await self.store.list_desktop_rules(user_id)
         for desktop_rule in desktop_rules:
             rules.append(self._desktop_rule_to_payload(desktop_rule, state.get(self._desktop_rule_name(str(desktop_rule["rule_id"])), {})))
+        desktop_routines = await self.store.list_desktop_routines(user_id)
+        for routine in desktop_routines:
+            rules.append(
+                self._desktop_routine_to_payload(
+                    routine,
+                    state.get(self._desktop_routine_rule_name(str(routine["routine_id"])), {}),
+                )
+            )
         webhook_names = sorted(self.config.automation.webhooks.keys())
         for webhook_name in webhook_names:
             rule = self._webhook_rule(webhook_name, f"Webhook event from {webhook_name}")
@@ -188,6 +205,9 @@ class AutomationEngine:
         if rule_name.startswith("desktop:"):
             await self.pause_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
             return
+        if rule_name.startswith("routine:"):
+            await self.pause_desktop_routine(user_id, rule_name.removeprefix("routine:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, True)
 
     async def resume_rule(self, user_id: str, rule_name: str) -> None:
@@ -197,6 +217,9 @@ class AutomationEngine:
         if rule_name.startswith("desktop:"):
             await self.resume_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
             return
+        if rule_name.startswith("routine:"):
+            await self.resume_desktop_routine(user_id, rule_name.removeprefix("routine:"))
+            return
         await self.store.set_rule_paused(user_id, rule_name, False)
 
     async def delete_rule(self, user_id: str, rule_name: str) -> bool:
@@ -204,6 +227,8 @@ class AutomationEngine:
             return await self.delete_dynamic_cron_job(user_id, rule_name.removeprefix("dynamic-cron:"))
         if rule_name.startswith("desktop:"):
             return await self.delete_desktop_rule(user_id, rule_name.removeprefix("desktop:"))
+        if rule_name.startswith("routine:"):
+            return await self.delete_desktop_routine(user_id, rule_name.removeprefix("routine:"))
         return False
 
     async def create_dynamic_cron_job(self, user_id: str, schedule: str, message: str) -> dict[str, Any]:
@@ -340,6 +365,114 @@ class AutomationEngine:
     async def list_all_desktop_rules(self) -> list[dict[str, Any]]:
         return await self.store.list_all_desktop_rules(include_paused=False)
 
+    async def create_desktop_routine_rule(
+        self,
+        user_id: str,
+        *,
+        name: str,
+        trigger_type: str,
+        steps: list[dict[str, Any]],
+        summary: str = "",
+        schedule: str = "",
+        run_at: str = "",
+        watch_path: str = "",
+        event_types: list[str] | None = None,
+        file_extensions: list[str] | None = None,
+        filename_pattern: str = "*",
+        cooldown_seconds: int = 30,
+        dedupe_window_seconds: int = 30,
+        delivery_policy: str = "primary",
+        severity: str = "info",
+        approval_mode: str = "ask_on_risky_step",
+    ) -> dict[str, Any]:
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("Desktop routine name cannot be empty.")
+        if trigger_type not in {"manual", "schedule", "reminder", "file_watch"}:
+            raise ValueError("Desktop routine trigger_type must be manual, schedule, reminder, or file_watch.")
+        if not steps:
+            raise ValueError("Desktop routines require at least one step.")
+        normalized_schedule = ""
+        normalized_run_at = ""
+        normalized_watch_path = watch_path.strip()
+        if trigger_type == "schedule":
+            normalized_schedule = self._validate_cron_schedule(schedule)
+        if trigger_type == "reminder":
+            if not run_at.strip():
+                raise ValueError("Reminder routines require run_at.")
+            normalized_run_at = datetime.fromisoformat(run_at).astimezone(timezone.utc).isoformat()
+        if trigger_type == "file_watch" and not normalized_watch_path:
+            raise ValueError("File-watch routines require a watch path.")
+        rule = DesktopRoutineRule(
+            routine_id=uuid4().hex[:12],
+            user_id=user_id,
+            name=cleaned_name,
+            trigger_type=trigger_type,
+            steps=steps,
+            summary=summary.strip() or self._routine_summary_from_steps(steps),
+            schedule=normalized_schedule,
+            run_at=normalized_run_at,
+            watch_path=normalized_watch_path,
+            event_types=event_types or (["file_created"] if trigger_type == "file_watch" else ["manual"]),
+            file_extensions=[item.strip().lstrip(".").lower() for item in (file_extensions or []) if item.strip()],
+            filename_pattern=filename_pattern.strip() or "*",
+            cooldown_seconds=max(0, int(cooldown_seconds)),
+            dedupe_window_seconds=max(0, int(dedupe_window_seconds)),
+            delivery_policy=delivery_policy,
+            severity=severity,
+            approval_mode=approval_mode,
+        )
+        await self.store.create_desktop_routine(rule)
+        await self.store.set_rule_paused(user_id, self._desktop_routine_rule_name(rule.routine_id), False)
+        created = await self.store.get_desktop_routine(user_id, rule.routine_id) or {}
+        if self.scheduler is not None and rule.trigger_type in {"schedule", "reminder"}:
+            await self.scheduler.register_desktop_routine(created)
+        return created
+
+    async def list_all_desktop_routines(self) -> list[dict[str, Any]]:
+        return await self.store.list_all_desktop_routines(include_paused=False)
+
+    async def pause_desktop_routine(self, user_id: str, routine_id: str) -> dict[str, Any]:
+        routine = await self.store.set_desktop_routine_paused(user_id, routine_id, True)
+        if routine is None:
+            raise KeyError(f"Unknown desktop routine '{routine_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_routine_rule_name(routine_id), True)
+        if self.scheduler is not None:
+            await self.scheduler.remove_desktop_routine(routine_id)
+        return routine
+
+    async def resume_desktop_routine(self, user_id: str, routine_id: str) -> dict[str, Any]:
+        routine = await self.store.set_desktop_routine_paused(user_id, routine_id, False)
+        if routine is None:
+            raise KeyError(f"Unknown desktop routine '{routine_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_routine_rule_name(routine_id), False)
+        if self.scheduler is not None and str(routine.get("trigger_type")) in {"schedule", "reminder"}:
+            await self.scheduler.register_desktop_routine(routine)
+        return routine
+
+    async def delete_desktop_routine(self, user_id: str, routine_id: str) -> bool:
+        deleted = await self.store.delete_desktop_routine(user_id, routine_id)
+        if not deleted:
+            raise KeyError(f"Unknown desktop routine '{routine_id}'.")
+        await self.store.set_rule_paused(user_id, self._desktop_routine_rule_name(routine_id), True)
+        if self.scheduler is not None:
+            await self.scheduler.remove_desktop_routine(routine_id)
+        return True
+
+    async def run_desktop_routine_now(self, user_id: str, routine_id: str, *, notify: bool = False) -> dict[str, Any]:
+        routine = await self.store.get_desktop_routine(user_id, routine_id)
+        if routine is None:
+            raise KeyError(f"Unknown desktop routine '{routine_id}'.")
+        event = self._build_event(
+            event_type="routine:manual",
+            user_id=user_id,
+            source=self._desktop_routine_rule_name(routine_id),
+            payload={"trigger_type": "manual"},
+            dedupe_key=f"{routine_id}:manual:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')}",
+            priority=58,
+        )
+        return await self._run_desktop_routine_event(event, routine, notify=notify)
+
     async def pause_desktop_rule(self, user_id: str, rule_id: str) -> dict[str, Any]:
         rule = await self.store.set_desktop_rule_paused(user_id, rule_id, True)
         if rule is None:
@@ -396,6 +529,50 @@ class AutomationEngine:
             priority=55,
         )
         return await self._run_desktop_event(event, rule)
+
+    async def handle_desktop_routine_watch_event(self, routine_id: str, user_id: str, event_type: str, path: str) -> dict[str, Any]:
+        routine = await self.store.get_desktop_routine(user_id, routine_id)
+        if routine is None or self.desktop_routine_executor is None:
+            return {"status": "skipped", "reason": "missing-routine"}
+        if not self._routine_matches_event(routine, event_type=event_type, path=path):
+            return {"status": "skipped", "reason": "filter"}
+        event = self._build_event(
+            event_type=f"routine:{event_type}",
+            user_id=user_id,
+            source=self._desktop_routine_rule_name(routine_id),
+            payload={"path": path, "event_type": event_type, "trigger_type": "file_watch"},
+            dedupe_key=f"{routine_id}:{event_type}:{path}",
+            priority=56,
+        )
+        return await self._run_desktop_routine_event(event, routine)
+
+    async def handle_desktop_routine_schedule_rule(self, routine_id: str, user_id: str) -> dict[str, Any]:
+        routine = await self.store.get_desktop_routine(user_id, routine_id)
+        if routine is None or self.desktop_routine_executor is None:
+            return {"status": "skipped", "reason": "missing-routine"}
+        event = self._build_event(
+            event_type="routine:schedule",
+            user_id=user_id,
+            source=self._desktop_routine_rule_name(routine_id),
+            payload={"trigger_type": "schedule"},
+            dedupe_key=f"{routine_id}:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}",
+            priority=56,
+        )
+        return await self._run_desktop_routine_event(event, routine)
+
+    async def handle_desktop_routine_reminder(self, routine_id: str, user_id: str, run_at: str) -> dict[str, Any]:
+        routine = await self.store.get_desktop_routine(user_id, routine_id)
+        if routine is None or self.desktop_routine_executor is None:
+            return {"status": "skipped", "reason": "missing-routine"}
+        event = self._build_event(
+            event_type="routine:reminder",
+            user_id=user_id,
+            source=self._desktop_routine_rule_name(routine_id),
+            payload={"trigger_type": "reminder", "run_at": run_at},
+            dedupe_key=f"{routine_id}:{run_at}",
+            priority=56,
+        )
+        return await self._run_desktop_routine_event(event, routine)
 
     async def list_dynamic_cron_jobs(self, user_id: str) -> list[dict[str, Any]]:
         return await self.store.list_dynamic_cron_jobs(user_id)
@@ -471,6 +648,12 @@ class AutomationEngine:
             return await self.handle_desktop_schedule_rule(
                 rule_name.removeprefix("desktop:"),
                 user_id=str(run["user_id"]),
+            )
+        if rule_name.startswith("routine:"):
+            return await self.run_desktop_routine_now(
+                user_id=str(run["user_id"]),
+                routine_id=rule_name.removeprefix("routine:"),
+                notify=True,
             )
         if rule_name.startswith("webhook:"):
             return await self.handle_webhook(
@@ -653,6 +836,85 @@ class AutomationEngine:
         await self.store.update_event_status(event.event_id, "completed")
         await self.store.update_desktop_rule_last_event(event.user_id, str(rule["rule_id"]), utc_now_iso())
         return {"status": "completed", "notification_id": delivered.notification_id, "rule_name": rule["name"]}
+
+    async def _run_desktop_routine_event(
+        self,
+        event: AutomationEvent,
+        routine: dict[str, Any],
+        *,
+        notify: bool = True,
+    ) -> dict[str, Any]:
+        should_skip, reason = await self.store.should_skip_for_dedupe(
+            event.user_id,
+            self._desktop_routine_rule_name(str(routine["routine_id"])),
+            event.dedupe_key,
+            int(routine.get("dedupe_window_seconds", 30)),
+            int(routine.get("cooldown_seconds", 30)),
+        )
+        await self.store.record_event(event, status="skipped" if should_skip else "queued")
+        if should_skip:
+            return {"status": "skipped", "reason": reason, "rule_name": self._desktop_routine_rule_name(str(routine["routine_id"]))}
+        session_key = f"automation:{event.user_id}:{self._slug(str(routine['name']))}"
+        run = AutomationRun(
+            run_id=uuid4().hex,
+            event_id=event.event_id,
+            user_id=event.user_id,
+            rule_name=self._desktop_routine_rule_name(str(routine["routine_id"])),
+            session_key=session_key,
+            status="running",
+            prompt=str(routine["name"]),
+            created_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+        )
+        await self.store.create_run(run)
+        await self.store.update_event_status(event.event_id, "running")
+        result = await self.desktop_routine_executor.execute(
+            rule=routine,
+            event_payload=event.payload,
+            session_key=session_key,
+            session_id=run.run_id,
+            user_id=event.user_id,
+        )
+        message = str(result.get("message", "")).strip()
+        notification_id: str | None = None
+        if notify and message:
+            notification = Notification(
+                notification_id=uuid4().hex,
+                user_id=event.user_id,
+                title=message.splitlines()[0][:80] or f"Desktop routine: {routine['name']}",
+                body=message,
+                source=self._desktop_routine_rule_name(str(routine["routine_id"])),
+                severity=str(routine.get("severity", "info")),
+                delivery_mode=str(routine.get("delivery_policy", "primary")),
+                status="queued",
+                target_channels=[],
+                metadata={
+                    "routine_name": routine["name"],
+                    "event_id": event.event_id,
+                    "desktop_routine_id": routine["routine_id"],
+                    "summary": result.get("summary", ""),
+                    "steps": result.get("steps", []),
+                },
+            )
+            delivered = await self.dispatcher.dispatch(notification)
+            notification_id = delivered.notification_id
+        await self.store.finish_run(
+            run.run_id,
+            status=str(result.get("status", "completed")),
+            result_text=message,
+            notification_id=notification_id,
+            error="" if str(result.get("status", "completed")) == "completed" else message,
+        )
+        await self.store.update_event_status(event.event_id, str(result.get("status", "completed")))
+        await self.store.update_desktop_routine_last_event(event.user_id, str(routine["routine_id"]), utc_now_iso())
+        return {
+            "status": str(result.get("status", "completed")),
+            "notification_id": notification_id,
+            "rule_name": routine["name"],
+            "message": message,
+            "steps": result.get("steps", []),
+            "summary": result.get("summary", ""),
+        }
 
     def _build_event(
         self,
@@ -846,6 +1108,9 @@ class AutomationEngine:
     def _desktop_rule_name(self, rule_id: str) -> str:
         return f"desktop:{rule_id}"
 
+    def _desktop_routine_rule_name(self, routine_id: str) -> str:
+        return f"routine:{routine_id}"
+
     def _rule_to_payload(self, rule: AutomationRule, state: dict[str, Any]) -> dict[str, Any]:
         return {
             "name": rule.name,
@@ -882,6 +1147,51 @@ class AutomationEngine:
             "severity": str(rule.get("severity", "info")),
             "delivery_policy": str(rule.get("delivery_policy", "primary")),
         }
+
+    def _desktop_routine_to_payload(self, routine: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        steps = list(routine.get("steps", []))
+        risky_step_count = self.desktop_routine_executor.risky_step_count(steps) if self.desktop_routine_executor is not None else 0
+        return {
+            "name": self._desktop_routine_rule_name(str(routine["routine_id"])),
+            "display_name": str(routine["name"]),
+            "trigger": "desktop_routine",
+            "trigger_type": str(routine.get("trigger_type", "manual")),
+            "schedule": str(routine.get("schedule", "")),
+            "run_at": str(routine.get("run_at", "")),
+            "watch_path": str(routine.get("watch_path", "")),
+            "event_types": list(routine.get("event_types", [])),
+            "file_extensions": list(routine.get("file_extensions", [])),
+            "filename_pattern": str(routine.get("filename_pattern", "*")),
+            "summary": str(routine.get("summary", "")),
+            "steps": steps,
+            "step_count": len(steps),
+            "risky_step_count": risky_step_count,
+            "approval_mode": str(routine.get("approval_mode", "ask_on_risky_step")),
+            "paused": bool(routine.get("paused", False) or state.get("paused", False)),
+            "last_run_at": state.get("last_run_at", ""),
+            "last_notification_at": state.get("last_notification_at", ""),
+            "last_event_at": str(routine.get("last_event_at", "")),
+            "severity": str(routine.get("severity", "info")),
+            "delivery_policy": str(routine.get("delivery_policy", "primary")),
+            "routine": True,
+        }
+
+    def _routine_matches_event(self, routine: dict[str, Any], *, event_type: str, path: str) -> bool:
+        event_types = [str(item).lower() for item in routine.get("event_types", [])]
+        if event_types and event_type.lower() not in event_types:
+            return False
+        candidate = Path(path)
+        suffix = candidate.suffix.lower().lstrip(".")
+        allowed_extensions = [str(item).lower().lstrip(".") for item in routine.get("file_extensions", []) if item]
+        if allowed_extensions and suffix not in allowed_extensions:
+            return False
+        pattern = str(routine.get("filename_pattern", "*") or "*")
+        return fnmatch.fnmatch(candidate.name.lower(), pattern.lower())
+
+    def _routine_summary_from_steps(self, steps: list[dict[str, Any]]) -> str:
+        if self.desktop_routine_executor is None:
+            return "desktop routine"
+        return self.desktop_routine_executor.summarize_steps(steps)
 
     def _hash_payload(self, source: str, payload: dict[str, Any]) -> str:
         raw = json.dumps({"source": source, "payload": payload}, ensure_ascii=False, sort_keys=True)

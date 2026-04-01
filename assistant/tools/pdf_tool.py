@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from assistant.tools.image_ocr import ocr_image_with_gemini
 from assistant.tools.registry import ToolDefinition
 
 
@@ -29,7 +27,11 @@ def build_pdf_tools(config) -> list[ToolDefinition]:
         ocr_chunks = []
         for image_path in images[:5]:
             try:
-                chunk = await _ocr_image_with_gemini(config, image_path)
+                chunk = await ocr_image_with_gemini(
+                    config,
+                    image_path,
+                    prompt="Extract the text from this scanned PDF page. Return plain text only.",
+                )
             except Exception as exc:  # pragma: no cover - best effort path
                 chunk = f"[OCR unavailable for {image_path.name}: {exc}]"
             ocr_chunks.append(chunk)
@@ -81,39 +83,3 @@ def _render_pdf_to_images(path: Path, output_dir: Path) -> list[Path]:
         page.save(target, "PNG")
         image_paths.append(target)
     return image_paths
-
-
-async def _ocr_image_with_gemini(config, image_path: Path) -> str:
-    if not config.llm.gemini_api_key:
-        raise RuntimeError("Missing GEMINI_API_KEY.")
-
-    image_bytes = await asyncio.to_thread(image_path.read_bytes)
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"text": "Extract the text from this scanned PDF page. Return plain text only."},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/png",
-                            "data": base64.b64encode(image_bytes).decode("ascii"),
-                        }
-                    },
-                ],
-            }
-        ]
-    }
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.agent.model}:generateContent"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(url, params={"key": config.llm.gemini_api_key}, json=payload)
-        response.raise_for_status()
-
-    data = response.json()
-    chunks: list[str] = []
-    for candidate in data.get("candidates", []):
-        parts = candidate.get("content", {}).get("parts", [])
-        for part in parts:
-            if "text" in part:
-                chunks.append(part["text"])
-    return "\n".join(chunks).strip()

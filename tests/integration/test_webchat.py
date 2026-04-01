@@ -189,3 +189,81 @@ def test_webchat_automation_rules_api_includes_desktop_rules(app_config) -> None
         assert response.status_code == 200
         rules = response.json()["rules"]
         assert any(rule["name"] == f"desktop:{created['rule_id']}" for rule in rules)
+
+
+def test_webchat_automation_rules_api_includes_desktop_routines_and_run_endpoint(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.desktop_apps.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app) as client:
+        services = app.state.services
+        created = asyncio.run(
+            services.automation_engine.create_desktop_routine_rule(
+                app_config.users.default_user_id,
+                name="Study mode",
+                trigger_type="manual",
+                steps=[
+                    {"type": "notify", "text": "Study mode ready."},
+                ],
+            )
+        )
+
+        response = client.get("/api/automation/rules")
+        run_response = client.post(f"/api/automation/rules/routine:{created['routine_id']}/run")
+
+        assert response.status_code == 200
+        rules = response.json()["rules"]
+        assert any(rule["name"] == f"routine:{created['routine_id']}" for rule in rules)
+        assert run_response.status_code == 200
+        assert run_response.json()["ok"] is True
+
+
+def test_webchat_coworker_api_supports_plan_and_history(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    class FakeCoworkerService:
+        async def plan_task(self, *, user_id: str, session_key: str, request_text: str) -> dict[str, object]:
+            return {
+                "task_id": "coworker-1",
+                "user_id": user_id,
+                "session_key": session_key,
+                "request_text": request_text,
+                "status": "planned",
+                "summary": "Open Task Manager and summarize system usage.",
+                "steps": [{"type": "task_manager_open", "title": "Open Task Manager"}],
+                "current_step_index": 0,
+                "total_steps": 1,
+                "latest_state": {},
+                "transcript": [],
+            }
+
+        async def list_tasks(self, *, user_id: str, limit: int = 20) -> list[dict[str, object]]:
+            return [
+                {
+                    "task_id": "coworker-1",
+                    "summary": "Open Task Manager and summarize system usage.",
+                    "status": "planned",
+                    "current_step_index": 0,
+                    "total_steps": 1,
+                }
+            ]
+
+    with TestClient(app) as client:
+        app.state.services.coworker_service = FakeCoworkerService()
+
+        plan_response = client.post(
+            "/api/coworker/tasks/plan",
+            json={"task": "open task manager and summarize system usage"},
+        )
+        history_response = client.get("/api/coworker/tasks")
+
+        assert plan_response.status_code == 200
+        assert plan_response.json()["ok"] is True
+        assert plan_response.json()["task"]["task_id"] == "coworker-1"
+        assert history_response.status_code == 200
+        assert history_response.json()["enabled"] is True
+        assert history_response.json()["tasks"][0]["task_id"] == "coworker-1"

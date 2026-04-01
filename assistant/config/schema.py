@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -159,6 +160,139 @@ class DesktopAutomationConfig(BaseModel):
     poll_interval_seconds: int = 3
 
 
+class AppSkillsPresetConfig(BaseModel):
+    enabled: bool = True
+    study_apps: list[str] = Field(default_factory=lambda: ["explorer", "chrome"])
+    study_folder_hints: list[str] = Field(default_factory=lambda: ["6_semester", "6 semester", "5_sem", "5 sem"])
+    study_browser_urls: list[str] = Field(default_factory=list)
+    work_apps: list[str] = Field(default_factory=lambda: ["vscode", "chrome"])
+    work_folder_hints: list[str] = Field(default_factory=lambda: ["workspace", "documents"])
+    work_browser_urls: list[str] = Field(default_factory=list)
+    meeting_apps: list[str] = Field(default_factory=lambda: ["chrome"])
+    meeting_browser_urls: list[str] = Field(default_factory=list)
+
+
+class AppSkillsConfig(BaseModel):
+    enabled: bool = False
+    vscode_enabled: bool = True
+    documents_enabled: bool = True
+    excel_enabled: bool = True
+    browser_enabled: bool = True
+    system_enabled: bool = True
+    task_manager_enabled: bool = True
+    presets_enabled: bool = True
+    browser_headed_for_workspaces: bool = True
+    presets: AppSkillsPresetConfig = Field(default_factory=AppSkillsPresetConfig)
+
+
+class DesktopCoworkerConfig(BaseModel):
+    enabled: bool = False
+    max_steps_per_task: int = 6
+    max_retries_per_step: int = 2
+    verification_required_by_default: bool = True
+    ask_before_submission: bool = True
+    screenshot_after_each_step: bool = True
+    ocr_after_each_step: bool = False
+    store_transcripts: bool = True
+    allow_semantic_clicks: bool = False
+    allow_ui_text_entry: bool = True
+    stop_on_low_confidence: bool = True
+
+
+def _default_desktop_known_apps() -> dict[str, Path]:
+    program_files = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return {
+        "chrome": _expand_path(program_files / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        "edge": _expand_path(program_files_x86 / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+        "vscode": _expand_path(local_app_data / "Programs" / "Microsoft VS Code" / "Code.exe"),
+        "notepad": _expand_path(Path("C:/Windows/System32/notepad.exe")),
+        "explorer": _expand_path(Path("C:/Windows/explorer.exe")),
+        "word": _expand_path(program_files / "Microsoft Office" / "root" / "Office16" / "WINWORD.EXE"),
+        "excel": _expand_path(program_files / "Microsoft Office" / "root" / "Office16" / "EXCEL.EXE"),
+        "whatsapp": _expand_path(local_app_data / "WhatsApp" / "WhatsApp.exe"),
+        "taskmanager": _expand_path(Path("C:/Windows/System32/taskmgr.exe")),
+        "settings": _expand_path(Path("C:/Windows/ImmersiveControlPanel/SystemSettings.exe")),
+        "calculator": _expand_path(Path("C:/Windows/System32/calc.exe")),
+        "cmd": _expand_path(Path("C:/Windows/System32/cmd.exe")),
+        "powershell": _expand_path(Path("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")),
+        "outlook": _expand_path(program_files_x86 / "Microsoft Office" / "root" / "Office16" / "OUTLOOK.EXE"),
+    }
+
+
+class DesktopAppsConfig(BaseModel):
+    enabled: bool = False
+    allow_layout_changes: bool = True
+    launch_timeout_seconds: int = 8
+    known_apps: dict[str, Path] = Field(default_factory=_default_desktop_known_apps)
+
+    @field_validator("known_apps", mode="before")
+    @classmethod
+    def validate_known_apps(cls, value: object) -> dict[str, Path]:
+        defaults = _default_desktop_known_apps()
+        if value in (None, "", {}):
+            return defaults
+        if not isinstance(value, dict):
+            raise TypeError("desktop_apps.known_apps must be a mapping of alias to executable path.")
+        merged = dict(defaults)
+        for key, item in value.items():
+            merged[str(key).strip().lower()] = _expand_path(item)
+        return merged
+
+
+class DesktopVisionConfig(BaseModel):
+    enabled: bool = False
+    ocr_enabled: bool = True
+    screenshots_subdir: str = "desktop"
+    capture_format: Literal["png"] = "png"
+    max_ocr_characters: int = 12000
+
+
+class DesktopInputConfig(BaseModel):
+    enabled: bool = False
+    keyboard_enabled: bool = True
+    mouse_enabled: bool = True
+    clipboard_enabled: bool = True
+    allow_absolute_coordinates: bool = True
+    max_type_chars: int = 500
+    confirm_clicks: bool = True
+    confirm_typing: bool = True
+    confirm_clipboard_write: bool = True
+    confirm_risky_hotkeys: bool = True
+    safe_hotkeys: list[str] = Field(
+        default_factory=lambda: [
+            "ctrl+c",
+            "ctrl+a",
+            "ctrl+f",
+            "tab",
+            "shift+tab",
+            "up",
+            "down",
+            "left",
+            "right",
+            "pageup",
+            "pagedown",
+            "home",
+            "end",
+            "esc",
+        ]
+    )
+
+    @field_validator("safe_hotkeys", mode="before")
+    @classmethod
+    def validate_safe_hotkeys(cls, value: object) -> list[str]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raise TypeError("desktop_input.safe_hotkeys must be a list or comma-separated string.")
+        return [item.lower() for item in items]
+
+
 class AutomationConfig(BaseModel):
     heartbeat_interval_minutes: int = 15
     cron_jobs: list[CronJobConfig] = Field(default_factory=list)
@@ -287,6 +421,11 @@ class AppConfig(BaseModel):
     automation: AutomationConfig = Field(default_factory=AutomationConfig)
     context_engine: ContextEngineConfig = Field(default_factory=ContextEngineConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    desktop_apps: DesktopAppsConfig = Field(default_factory=DesktopAppsConfig)
+    desktop_vision: DesktopVisionConfig = Field(default_factory=DesktopVisionConfig)
+    desktop_input: DesktopInputConfig = Field(default_factory=DesktopInputConfig)
+    app_skills: AppSkillsConfig = Field(default_factory=AppSkillsConfig)
+    desktop_coworker: DesktopCoworkerConfig = Field(default_factory=DesktopCoworkerConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     system_access: SystemAccessConfig = Field(default_factory=SystemAccessConfig)

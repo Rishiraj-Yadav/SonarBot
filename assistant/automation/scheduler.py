@@ -53,6 +53,22 @@ class AutomationScheduler:
                 user_id=str(rule["user_id"]),
                 schedule=str(rule["schedule"]),
             )
+        for routine in await self.automation_engine.list_all_desktop_routines():
+            if bool(routine.get("paused")):
+                continue
+            trigger_type = str(routine.get("trigger_type"))
+            if trigger_type == "schedule":
+                self._add_routine_schedule_job(
+                    routine_id=str(routine["routine_id"]),
+                    user_id=str(routine["user_id"]),
+                    schedule=str(routine["schedule"]),
+                )
+            elif trigger_type == "reminder":
+                self._add_routine_reminder_job(
+                    routine_id=str(routine["routine_id"]),
+                    user_id=str(routine["user_id"]),
+                    run_at=str(routine["run_at"]),
+                )
         self.scheduler.start()
 
     async def stop(self) -> None:
@@ -131,6 +147,31 @@ class AutomationScheduler:
         if job is not None:
             self.scheduler.remove_job(self._desktop_job_id(rule_id))
 
+    async def register_desktop_routine(self, routine: dict[str, object]) -> None:
+        if self.scheduler is None or bool(routine.get("paused")):
+            return
+        trigger_type = str(routine.get("trigger_type", "manual"))
+        if trigger_type == "schedule":
+            self._add_routine_schedule_job(
+                routine_id=str(routine["routine_id"]),
+                user_id=str(routine["user_id"]),
+                schedule=str(routine["schedule"]),
+            )
+        elif trigger_type == "reminder":
+            self._add_routine_reminder_job(
+                routine_id=str(routine["routine_id"]),
+                user_id=str(routine["user_id"]),
+                run_at=str(routine["run_at"]),
+            )
+
+    async def remove_desktop_routine(self, routine_id: str) -> None:
+        if self.scheduler is None:
+            return
+        for job_id in (self._routine_schedule_job_id(routine_id), self._routine_reminder_job_id(routine_id)):
+            job = self.scheduler.get_job(job_id)
+            if job is not None:
+                self.scheduler.remove_job(job_id)
+
     def _add_job(
         self,
         *,
@@ -189,6 +230,43 @@ class AutomationScheduler:
             replace_existing=True,
         )
 
+    def _add_routine_schedule_job(
+        self,
+        *,
+        routine_id: str,
+        user_id: str,
+        schedule: str,
+    ) -> None:
+        from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+        trigger = CronTrigger.from_crontab(schedule)
+        self.scheduler.add_job(
+            self.automation_engine.handle_desktop_routine_schedule_rule,
+            trigger=trigger,
+            id=self._routine_schedule_job_id(routine_id),
+            kwargs={"routine_id": routine_id, "user_id": user_id},
+            replace_existing=True,
+        )
+
+    def _add_routine_reminder_job(
+        self,
+        *,
+        routine_id: str,
+        user_id: str,
+        run_at: str,
+    ) -> None:
+        from apscheduler.triggers.date import DateTrigger  # type: ignore
+        from datetime import datetime
+
+        trigger = DateTrigger(run_date=datetime.fromisoformat(run_at))
+        self.scheduler.add_job(
+            self.automation_engine.handle_desktop_routine_reminder,
+            trigger=trigger,
+            id=self._routine_reminder_job_id(routine_id),
+            kwargs={"routine_id": routine_id, "user_id": user_id, "run_at": run_at},
+            replace_existing=True,
+        )
+
     def _dynamic_job_id(self, cron_id: str) -> str:
         return f"dynamic-cron-{cron_id}"
 
@@ -200,3 +278,9 @@ class AutomationScheduler:
 
     def _desktop_job_id(self, rule_id: str) -> str:
         return f"desktop-{rule_id}"
+
+    def _routine_schedule_job_id(self, routine_id: str) -> str:
+        return f"routine-schedule-{routine_id}"
+
+    def _routine_reminder_job_id(self, routine_id: str) -> str:
+        return f"routine-reminder-{routine_id}"

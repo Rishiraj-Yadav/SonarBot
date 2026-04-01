@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import httpx
+import pytest
+
 from assistant.models.gemini_provider import GeminiProvider
 
 
@@ -104,3 +107,94 @@ def test_gemini_provider_sanitizes_dynamic_object_schemas_for_gemini() -> None:
     assert "arbitrary string-keyed entries" in sanitized["properties"]["fields"]["description"]
     assert "minimum" not in sanitized["properties"]["timeout_seconds"]
     assert "default" not in sanitized["properties"]["timeout_seconds"]
+
+
+def test_gemini_provider_drops_non_string_enums_from_schema() -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-test")
+
+    sanitized = provider._sanitize_schema(
+        {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "enum": [1, 2],
+                    "default": 1,
+                },
+                "button": {
+                    "type": "string",
+                    "enum": ["left", "right"],
+                },
+            },
+        }
+    )
+
+    assert "enum" not in sanitized["properties"]["count"]
+    assert sanitized["properties"]["button"]["enum"] == ["left", "right"]
+
+
+def test_gemini_provider_groups_consecutive_tool_results_into_one_user_turn() -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-test")
+
+    payload = provider._build_payload(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tool-1", "name": "desktop_keyboard_hotkey", "arguments": {"hotkey": "ctrl+s"}},
+                    {"id": "tool-2", "name": "desktop_keyboard_type", "arguments": {"content": "R:/6_semester/test.txt"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "desktop_keyboard_hotkey",
+                "tool_call_id": "tool-1",
+                "content": '{"status": "completed", "hotkey": "ctrl+s"}',
+            },
+            {
+                "role": "tool",
+                "name": "desktop_keyboard_type",
+                "tool_call_id": "tool-2",
+                "content": '{"status": "completed", "characters_typed": 22}',
+            },
+        ],
+        system="test",
+        tools=[],
+    )
+
+    assert len(payload["contents"]) == 2
+    assert payload["contents"][0]["role"] == "model"
+    assert payload["contents"][1]["role"] == "user"
+    assert len(payload["contents"][1]["parts"]) == 2
+    assert payload["contents"][1]["parts"][0]["functionResponse"]["name"] == "desktop_keyboard_hotkey"
+    assert payload["contents"][1]["parts"][1]["functionResponse"]["name"] == "desktop_keyboard_type"
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_falls_back_on_model_400(monkeypatch) -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-2.5-pro")
+    calls: list[str] = []
+
+    async def fake_request(model_name: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(model_name)
+        if model_name == "gemini-2.5-pro":
+            request = httpx.Request(
+                "POST",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+            )
+            response = httpx.Response(400, request=request, text="model not available for this request")
+            raise httpx.HTTPStatusError("bad model", request=request, response=response)
+        return {
+            "candidates": [{"content": {"parts": [{"text": "fallback ok"}]}}],
+            "usageMetadata": {},
+        }
+
+    monkeypatch.setattr(provider, "_perform_request_for_model", fake_request)
+
+    responses = []
+    async for response in provider.complete(messages=[], system="hello", tools=[], stream=False):
+        responses.append(response)
+
+    assert calls == ["gemini-2.5-pro", "gemini-2.0-flash"]
+    assert any(item.text == "fallback ok" for item in responses)

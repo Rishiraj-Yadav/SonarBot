@@ -9,6 +9,7 @@ from assistant.automation.models import (
     AutomationRule,
     AutomationRun,
     DesktopAutomationRule,
+    DesktopRoutineRule,
     Notification,
     OneTimeReminder,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "AutomationRule",
     "AutomationRun",
     "DesktopAutomationRule",
+    "DesktopRoutineRule",
     "DesktopAutomationWatcher",
     "HeartbeatService",
     "Notification",

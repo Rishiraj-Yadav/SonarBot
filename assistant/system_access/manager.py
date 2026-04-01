@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from assistant.system_access.approvals import HostApprovalManager
 from assistant.system_access.audit import SystemAccessAuditLogger
@@ -172,6 +172,47 @@ class SystemAccessManager:
             session_id=session_id,
             tool="read_host_file",
             action_kind="read_host_file",
+            target=str(resolved),
+            category="auto_allow",
+            approval_mode="auto",
+            outcome="completed",
+            duration_ms=duration_ms,
+            details={"bytes_read": result.get("bytes_read", 0)},
+        )
+        await self.audit.append(audit_entry)
+        return {**result, "audit_id": audit_entry.audit_id}
+
+    async def read_host_binary_file(
+        self,
+        *,
+        path: str,
+        session_id: str,
+        user_id: str,
+        max_bytes: int = 4_000_000,
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        resolved = self.runtime.resolve_host_path(path)
+        category, reason = self.runtime.classify_path_action(resolved, "read")
+        if category == "deny":
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool="read_host_binary_file",
+                action_kind="read_host_binary_file",
+                target=str(resolved),
+                category=category,
+                approval_mode="blocked",
+                outcome=f"blocked:{reason}",
+                details={"stderr": f"Reading is not allowed for {resolved}", "exit_code": 1},
+            )
+        started = time.perf_counter()
+        result = await self.runtime.read_bytes(resolved, max_bytes=max_bytes)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool="read_host_binary_file",
+            action_kind="read_host_binary_file",
             target=str(resolved),
             category="auto_allow",
             approval_mode="auto",
@@ -434,6 +475,109 @@ class SystemAccessManager:
             "audit_id": audit_entry.audit_id,
             "backup_id": backup_id,
             "file_format": result.get("file_format", "text"),
+        }
+
+    async def write_host_binary_file(
+        self,
+        *,
+        path: str,
+        data: bytes,
+        session_key: str,
+        session_id: str,
+        user_id: str,
+        connection_id: str = "",
+        channel_name: str = "",
+        tool_name: str = "write_host_binary_file",
+        action_kind: str = "write_host_binary_file",
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        resolved = self.runtime.resolve_host_path(path)
+        exists = resolved.exists()
+        category, reason = self.runtime.classify_path_action(resolved, "overwrite" if exists else "write")
+        if category == "deny":
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool=tool_name,
+                action_kind=action_kind,
+                target=str(resolved),
+                category=category,
+                approval_mode="blocked",
+                outcome=f"blocked:{reason}",
+                details={"stderr": f"Writing is not allowed for {resolved}", "exit_code": 1, "bytes_written": 0},
+            )
+        approval_mode = "auto"
+        backup_id = None
+        if category in {"ask_once", "always_ask"}:
+            decision, approval_mode, approval = await self.approvals.request(
+                user_id=user_id,
+                session_id=session_id,
+                session_key=session_key,
+                connection_id=connection_id,
+                channel_name=channel_name,
+                action_kind=action_kind,
+                target_summary=str(resolved),
+                category=category,
+                payload={"path": str(resolved), "overwrite": exists, "bytes": len(data)},
+            )
+            if decision != "approved":
+                return await self._record_blocked_action(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tool=tool_name,
+                    action_kind=action_kind,
+                    target=str(resolved),
+                    category=category,
+                    approval_mode=approval_mode,
+                    outcome=decision,
+                    details={"approval_id": approval.get("approval_id"), "bytes_written": 0},
+                )
+        if exists and resolved.is_file():
+            backup_id, _ = await self.runtime.backup_file(resolved, action_kind)
+        started = time.perf_counter()
+        try:
+            result = await self.runtime.write_bytes(resolved, data)
+        except PermissionError:
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool=tool_name,
+                action_kind=action_kind,
+                target=str(resolved),
+                category=category,
+                approval_mode=approval_mode,
+                outcome="failed:file_locked",
+                details={
+                    "stderr": (
+                        f"Windows denied writing to {resolved}. The file may be open in Excel or another program. "
+                        "Close it and try again."
+                    ),
+                    "exit_code": 1,
+                    "bytes_written": 0,
+                    "backup_id": backup_id,
+                },
+            )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool=tool_name,
+            action_kind=action_kind,
+            target=str(resolved),
+            category=category,
+            approval_mode=approval_mode,
+            outcome="completed",
+            duration_ms=duration_ms,
+            backup_id=backup_id,
+            details={"bytes_written": result.get("bytes_written", 0)},
+        )
+        await self.audit.append(audit_entry)
+        return {
+            **result,
+            "approval_category": category,
+            "approval_mode": approval_mode,
+            "audit_id": audit_entry.audit_id,
+            "backup_id": backup_id,
         }
 
     async def _attempt_locked_file_fallback(
@@ -753,6 +897,101 @@ class SystemAccessManager:
     async def decide_approval(self, approval_id: str, decision: str) -> dict[str, Any]:
         return await self.approvals.decide(approval_id, decision)
 
+    async def execute_desktop_input_action(
+        self,
+        *,
+        tool: str,
+        action_kind: str,
+        target_summary: str,
+        approval_category: str,
+        session_key: str,
+        session_id: str,
+        user_id: str,
+        connection_id: str = "",
+        channel_name: str = "",
+        approval_payload: dict[str, Any] | None = None,
+        audit_details: dict[str, Any] | None = None,
+        executor: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        self._ensure_enabled()
+        category = approval_category
+        approval_mode = "auto"
+        if category == "deny":
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool=tool,
+                action_kind=action_kind,
+                target=target_summary,
+                category=category,
+                approval_mode="blocked",
+                outcome="blocked:policy",
+                details={"stderr": f"{action_kind} is blocked by policy.", "exit_code": 1, "host": True},
+            )
+        if category in {"ask_once", "always_ask"}:
+            decision, approval_mode, approval = await self.approvals.request(
+                user_id=user_id,
+                session_id=session_id,
+                session_key=session_key,
+                connection_id=connection_id,
+                channel_name=channel_name,
+                action_kind=action_kind,
+                target_summary=target_summary,
+                category=category,
+                payload=approval_payload or {},
+            )
+            if decision != "approved":
+                return await self._record_blocked_action(
+                    user_id=user_id,
+                    session_id=session_id,
+                    tool=tool,
+                    action_kind=action_kind,
+                    target=target_summary,
+                    category=category,
+                    approval_mode=approval_mode,
+                    outcome=decision,
+                    details={"approval_id": approval.get("approval_id"), "host": True},
+                )
+
+        started = time.perf_counter()
+        try:
+            result = await executor()
+        except Exception as exc:
+            return await self._record_blocked_action(
+                user_id=user_id,
+                session_id=session_id,
+                tool=tool,
+                action_kind=action_kind,
+                target=target_summary,
+                category=category,
+                approval_mode=approval_mode,
+                outcome="failed",
+                details={"stderr": str(exc), "exit_code": 1, "host": True},
+            )
+
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        audit_entry = HostAuditEntry(
+            user_id=user_id,
+            session_id=session_id,
+            tool=tool,
+            action_kind=action_kind,
+            target=target_summary,
+            category=category,
+            approval_mode=approval_mode,
+            outcome="completed",
+            duration_ms=duration_ms,
+            details=audit_details or {},
+        )
+        await self.audit.append(audit_entry)
+        return {
+            **result,
+            "status": "completed",
+            "approval_category": category,
+            "approval_mode": approval_mode,
+            "audit_id": audit_entry.audit_id,
+            "host": True,
+        }
+
     async def list_audit(self, *, session_id: str | None = None, today_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
         return await self.audit.list_entries(session_id=session_id, today_only=today_only, limit=limit)
 
@@ -808,6 +1047,49 @@ class SystemAccessManager:
         if tool_name == "search_host_files":
             matches = result.get("matches", [])
             return {"root": result.get("root"), "match_count": len(matches), "audit_id": result.get("audit_id")}
+        if tool_name == "desktop_mouse_click":
+            return {
+                "status": result.get("status"),
+                "button": result.get("button"),
+                "count": result.get("count"),
+                "coordinate_space": result.get("coordinate_space"),
+                "x": result.get("x"),
+                "y": result.get("y"),
+                "approval_mode": result.get("approval_mode"),
+                "approval_category": result.get("approval_category"),
+                "audit_id": result.get("audit_id"),
+            }
+        if tool_name == "desktop_keyboard_type":
+            return {
+                "status": result.get("status"),
+                "characters_typed": result.get("characters_typed"),
+                "approval_mode": result.get("approval_mode"),
+                "approval_category": result.get("approval_category"),
+                "audit_id": result.get("audit_id"),
+            }
+        if tool_name == "desktop_keyboard_hotkey":
+            return {
+                "status": result.get("status"),
+                "hotkey": result.get("hotkey"),
+                "approval_mode": result.get("approval_mode"),
+                "approval_category": result.get("approval_category"),
+                "audit_id": result.get("audit_id"),
+            }
+        if tool_name == "desktop_clipboard_read":
+            return {
+                "status": result.get("status"),
+                "char_count": result.get("char_count"),
+                "line_count": result.get("line_count"),
+                "audit_id": result.get("audit_id"),
+            }
+        if tool_name == "desktop_clipboard_write":
+            return {
+                "status": result.get("status"),
+                "char_count": result.get("char_count"),
+                "approval_mode": result.get("approval_mode"),
+                "approval_category": result.get("approval_category"),
+                "audit_id": result.get("audit_id"),
+            }
         return result
 
     def _ensure_enabled(self) -> None:

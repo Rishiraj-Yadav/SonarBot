@@ -29,9 +29,14 @@ type AutomationRule = {
   trigger_type?: string;
   watch_path?: string;
   schedule?: string;
+  run_at?: string;
   action_type?: string;
   file_extensions?: string[];
   last_event_at?: string;
+  summary?: string;
+  step_count?: number;
+  risky_step_count?: number;
+  routine?: boolean;
 };
 
 type NotificationsResponse = {
@@ -72,10 +77,22 @@ function bodyPreview(title: string, body: string) {
 function ruleSummary(rule: AutomationRule) {
   if (rule.trigger === "desktop") {
     if (rule.trigger_type === "schedule") {
-      return `scheduled ${rule.schedule ?? ""} · action ${rule.action_type ?? "notify"}`.trim();
+      return `scheduled ${rule.schedule ?? ""} | action ${rule.action_type ?? "notify"}`.trim();
     }
-    const extension = rule.file_extensions && rule.file_extensions.length > 0 ? ` · .${rule.file_extensions.join(", .")}` : "";
-    return `${rule.watch_path ?? "watched folder"}${extension} · action ${rule.action_type ?? "notify"}`.trim();
+    const extension = rule.file_extensions && rule.file_extensions.length > 0 ? ` | .${rule.file_extensions.join(", .")}` : "";
+    return `${rule.watch_path ?? "watched folder"}${extension} | action ${rule.action_type ?? "notify"}`.trim();
+  }
+  if (rule.trigger === "desktop_routine") {
+    if (rule.trigger_type === "schedule") {
+      return `scheduled ${rule.schedule ?? ""} | ${rule.summary ?? "desktop routine"}`.trim();
+    }
+    if (rule.trigger_type === "reminder") {
+      return `reminder ${rule.run_at ?? ""} | ${rule.summary ?? "desktop routine"}`.trim();
+    }
+    if (rule.trigger_type === "file_watch") {
+      return `${rule.watch_path ?? "watched folder"} | ${rule.summary ?? "desktop routine"}`.trim();
+    }
+    return `manual | ${rule.summary ?? "desktop routine"}`.trim();
   }
   return rule.trigger;
 }
@@ -138,10 +155,30 @@ export function AutomationPanel() {
   }, []);
 
   async function toggleRule(rule: AutomationRule) {
-    const path = rule.paused ? `/api/automation/rules/${rule.name}/resume` : `/api/automation/rules/${rule.name}/pause`;
+    const encodedName = encodeURIComponent(rule.name);
+    const path = rule.paused ? `/api/automation/rules/${encodedName}/resume` : `/api/automation/rules/${encodedName}/pause`;
     try {
       await fetch(`http://localhost:8765${path}`, { method: "POST" });
       setRules((current) => current.map((item) => (item.name === rule.name ? { ...item, paused: !item.paused } : item)));
+    } catch {
+      return;
+    }
+  }
+
+  async function runRule(rule: AutomationRule) {
+    const encodedName = encodeURIComponent(rule.name);
+    try {
+      await fetch(`http://localhost:8765/api/automation/rules/${encodedName}/run`, { method: "POST" });
+    } catch {
+      return;
+    }
+  }
+
+  async function deleteRule(rule: AutomationRule) {
+    const encodedName = encodeURIComponent(rule.name);
+    try {
+      await fetch(`http://localhost:8765/api/automation/rules/${encodedName}`, { method: "DELETE" });
+      setRules((current) => current.filter((item) => item.name !== rule.name));
     } catch {
       return;
     }
@@ -154,7 +191,7 @@ export function AutomationPanel() {
           <p className="text-xs uppercase tracking-[0.24em] text-accent">Automation Inbox</p>
           <h2 className="mt-2 font-display text-3xl text-ink">Recent notifications</h2>
           <p className="mt-2 text-sm leading-6 text-slate-600">
-            Background cron, heartbeat, and webhook runs land here even when they are primarily delivered elsewhere.
+            Background cron, heartbeat, webhook, desktop automation, and routine runs land here even when they are primarily delivered elsewhere.
           </p>
         </div>
         <div className="mt-4 space-y-3 max-h-[42rem] overflow-y-auto pr-1">
@@ -233,17 +270,43 @@ export function AutomationPanel() {
                 <div>
                   <div className="text-sm font-medium text-ink">{rule.display_name ?? rule.name}</div>
                   <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{ruleSummary(rule)}</div>
+                  {rule.trigger === "desktop_routine" ? (
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      {rule.step_count ?? 0} step(s)
+                      {rule.risky_step_count ? ` | risky: ${rule.risky_step_count}` : ""}
+                    </div>
+                  ) : null}
                   {rule.last_event_at ? <div className="mt-1 text-[11px] text-slate-500">Last event: {shortTime(rule.last_event_at)}</div> : null}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void toggleRule(rule)}
-                  className={`rounded-full px-3 py-2 text-xs font-medium ${
-                    rule.paused ? "bg-emerald-100 text-emerald-700" : "bg-sand text-slate-700"
-                  }`}
-                >
-                  {rule.paused ? "Resume" : "Pause"}
-                </button>
+                <div className="flex items-center gap-2">
+                  {rule.trigger === "desktop_routine" ? (
+                    <button
+                      type="button"
+                      onClick={() => void runRule(rule)}
+                      className="rounded-full bg-blue-100 px-3 py-2 text-xs font-medium text-blue-700"
+                    >
+                      Run
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void toggleRule(rule)}
+                    className={`rounded-full px-3 py-2 text-xs font-medium ${
+                      rule.paused ? "bg-emerald-100 text-emerald-700" : "bg-sand text-slate-700"
+                    }`}
+                  >
+                    {rule.paused ? "Resume" : "Pause"}
+                  </button>
+                  {(rule.trigger === "desktop" || rule.trigger === "desktop_routine") ? (
+                    <button
+                      type="button"
+                      onClick={() => void deleteRule(rule)}
+                      className="rounded-full bg-rose-100 px-3 py-2 text-xs font-medium text-rose-700"
+                    >
+                      Delete
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>

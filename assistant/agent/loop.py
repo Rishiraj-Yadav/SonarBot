@@ -192,7 +192,16 @@ class AgentLoop:
                         "assistant",
                         persisted_assistant_text,
                         tool_calls=[
-                            {"id": item.id, "name": item.name, "arguments": item.arguments} for item in tool_calls
+                            {
+                                "id": item.id,
+                                "name": item.name,
+                                "arguments": (
+                                    self.tool_registry.redact_input(item.name, item.arguments)
+                                    if self.tool_registry.has(item.name)
+                                    else item.arguments
+                                ),
+                            }
+                            for item in tool_calls
                         ],
                         usage=(
                             {

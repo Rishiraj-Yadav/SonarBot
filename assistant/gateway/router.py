@@ -35,6 +35,7 @@ class GatewayRouter:
     user_profiles: Any
     started_at: datetime
     system_access_manager: Any = None
+    coworker_service: Any = None
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
         if request.method == "health":
@@ -72,6 +73,7 @@ class GatewayRouter:
         metadata = dict(metadata or {})
         metadata.setdefault("trace_id", uuid4().hex)
         metadata.setdefault("user_id", self.config.users.default_user_id)
+        metadata.setdefault("connection_id", connection_id)
         stripped = message.strip()
         system_suffix = self._augment_system_suffix_for_intent(stripped, system_suffix)
         if stripped.startswith("/"):
@@ -451,6 +453,99 @@ class GatewayRouter:
                 )
             return ResponseFrame(id=request_id, ok=False, error="Unknown /desktop subcommand. Use /desktop help.")
 
+        if command_name == "routine":
+            if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop routines are not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._routine_help_text(),
+                    },
+                )
+            rules = await self.automation_engine.list_rules(user_id)
+            desktop_routines = self._filter_desktop_routines(rules)
+            if subcommand in {"list", "ls"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._format_desktop_routines_response(desktop_routines),
+                        "rules": desktop_routines,
+                    },
+                )
+            if subcommand == "show":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /routine show <routine_name>.")
+                matched_rule, error_text = self._match_desktop_routine_reference(desktop_routines, subargs)
+                if error_text:
+                    return ResponseFrame(id=request_id, ok=False, error=error_text)
+                assert matched_rule is not None
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._format_desktop_routine_show_response(matched_rule),
+                        "rule": matched_rule,
+                    },
+                )
+            if subcommand == "run":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /routine run <routine_name>.")
+                matched_rule, error_text = self._match_desktop_routine_reference(desktop_routines, subargs)
+                if error_text:
+                    return ResponseFrame(id=request_id, ok=False, error=error_text)
+                assert matched_rule is not None
+                result = await self.automation_engine.run_desktop_routine_now(
+                    user_id,
+                    str(matched_rule.get("name", "")).removeprefix("routine:"),
+                    notify=False,
+                )
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": str(result.get("message", "Routine completed.")),
+                        "result": result,
+                    },
+                )
+            if subcommand in {"pause", "resume", "delete", "remove", "rm"}:
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error=f"Use /routine {subcommand} <routine_name>.")
+                matched_rule, error_text = self._match_desktop_routine_reference(desktop_routines, subargs)
+                if error_text:
+                    return ResponseFrame(id=request_id, ok=False, error=error_text)
+                assert matched_rule is not None
+                rule_name = str(matched_rule.get("name", ""))
+                display_name = str(matched_rule.get("display_name") or rule_name)
+                if subcommand == "pause":
+                    await self.automation_engine.pause_rule(user_id, rule_name)
+                    response_text = f"Paused desktop routine '{display_name}'."
+                elif subcommand == "resume":
+                    await self.automation_engine.resume_rule(user_id, rule_name)
+                    response_text = f"Resumed desktop routine '{display_name}'."
+                else:
+                    await self.automation_engine.delete_rule(user_id, rule_name)
+                    response_text = f"Deleted desktop routine '{display_name}'."
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                )
+            return ResponseFrame(id=request_id, ok=False, error="Unknown /routine subcommand. Use /routine help.")
+
         if command_name == "cron":
             user_id = await self._resolve_user_id(connection_id, session_key)
             subcommand, subargs = self._split_command_arguments(arguments)
@@ -568,6 +663,551 @@ class GatewayRouter:
                     },
                 )
             return ResponseFrame(id=request_id, ok=False, error="Unknown /cron subcommand. Use /cron help.")
+
+        if command_name == "apps":
+            if not getattr(self.config.desktop_apps, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop app control is not enabled.")
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._apps_help_text(),
+                    },
+                )
+            tool_name: str | None = None
+            tool_payload: dict[str, Any] = {}
+            if subcommand in {"list", "ls"}:
+                tool_name = "apps_list_windows"
+            elif subcommand == "open":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /apps open <alias>.")
+                tool_name = "apps_open"
+                tool_payload = {"target": subargs.strip()}
+            elif subcommand in {"focus", "switch"}:
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /apps focus <window_or_alias>.")
+                tool_name = "apps_focus"
+                tool_payload = {"target": subargs.strip()}
+            elif subcommand == "minimize":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /apps minimize <window_or_alias>.")
+                tool_name = "apps_minimize"
+                tool_payload = {"target": subargs.strip()}
+            elif subcommand == "maximize":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /apps maximize <window_or_alias>.")
+                tool_name = "apps_maximize"
+                tool_payload = {"target": subargs.strip()}
+            elif subcommand == "restore":
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error="Use /apps restore <window_or_alias>.")
+                tool_name = "apps_restore"
+                tool_payload = {"target": subargs.strip()}
+            elif subcommand in {"left", "right"}:
+                if not subargs.strip():
+                    return ResponseFrame(id=request_id, ok=False, error=f"Use /apps {subcommand} <window_or_alias>.")
+                tool_name = "apps_snap"
+                tool_payload = {"target": subargs.strip(), "position": subcommand}
+            else:
+                return ResponseFrame(id=request_id, ok=False, error="Unknown /apps subcommand. Use /apps help.")
+
+            try:
+                result = await self.tool_registry.dispatch(tool_name, tool_payload)
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_action = "focus" if subcommand == "switch" else ("snap" if subcommand in {"left", "right"} else subcommand)
+            response_text = self._format_app_control_response(response_action, result)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if command_name == "screen":
+            if not getattr(self.config.desktop_vision, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop vision is not enabled.")
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._screen_help_text(),
+                    },
+                )
+            try:
+                if subcommand == "active":
+                    result = await self.tool_registry.dispatch("desktop_active_window", {})
+                    response_text = self._format_desktop_vision_response("active", result)
+                elif subcommand in {"capture", "shot", "screenshot"}:
+                    result = await self.tool_registry.dispatch("desktop_screenshot", {})
+                    response_text = self._format_desktop_vision_response("capture", result)
+                elif subcommand == "window":
+                    result = await self.tool_registry.dispatch("desktop_window_screenshot", {})
+                    response_text = self._format_desktop_vision_response("window", result)
+                elif subcommand == "read":
+                    target = "window" if subargs.strip().lower() in {"window", "active", "active-window", "active window"} else "desktop"
+                    result = await self.tool_registry.dispatch("desktop_read_screen", {"target": target})
+                    response_text = self._format_desktop_vision_response("read", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /screen subcommand. Use /screen help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if command_name == "input":
+            if not getattr(self.config.desktop_input, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop input is not enabled.")
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._input_help_text(),
+                    },
+                )
+            try:
+                if subcommand in {"position", "pos"}:
+                    result = await self.tool_registry.dispatch("desktop_mouse_position", {})
+                    response_text = self._format_desktop_input_response("position", result)
+                elif subcommand == "move":
+                    coords = self._parse_input_coordinates(subargs)
+                    if coords is None:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /input move <x> <y>.")
+                    result = await self.tool_registry.dispatch("desktop_mouse_move", {"x": coords[0], "y": coords[1]})
+                    response_text = self._format_desktop_input_response("move", result)
+                elif subcommand in {"click", "right-click", "rightclick", "double-click", "doubleclick"}:
+                    coords = self._parse_input_coordinates(subargs)
+                    if coords is None:
+                        return ResponseFrame(id=request_id, ok=False, error=f"Use /input {subcommand} <x> <y>.")
+                    payload = {"x": coords[0], "y": coords[1]}
+                    action = "click"
+                    if subcommand in {"right-click", "rightclick"}:
+                        payload["button"] = "right"
+                        action = "right-click"
+                    elif subcommand in {"double-click", "doubleclick"}:
+                        payload["count"] = 2
+                        action = "double-click"
+                    result = await self.tool_registry.dispatch("desktop_mouse_click", payload)
+                    response_text = self._format_desktop_input_response(action, result)
+                elif subcommand == "scroll":
+                    scroll_args = self._parse_input_scroll_arguments(subargs)
+                    if scroll_args is None:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /input scroll up|down <amount>.")
+                    result = await self.tool_registry.dispatch(
+                        "desktop_mouse_scroll",
+                        {"direction": scroll_args[0], "amount": scroll_args[1]},
+                    )
+                    response_text = self._format_desktop_input_response("scroll", result)
+                elif subcommand == "type":
+                    text = subargs.strip()
+                    if not text:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /input type <text>.")
+                    result = await self.tool_registry.dispatch("desktop_keyboard_type", {"text": text})
+                    response_text = self._format_desktop_input_response("type", result)
+                elif subcommand == "hotkey":
+                    hotkey = subargs.strip()
+                    if not hotkey:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /input hotkey <keys>.")
+                    result = await self.tool_registry.dispatch("desktop_keyboard_hotkey", {"hotkey": hotkey})
+                    response_text = self._format_desktop_input_response("hotkey", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /input subcommand. Use /input help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if command_name == "clipboard":
+            if not getattr(self.config.desktop_input, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop input is not enabled.")
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._clipboard_help_text(),
+                    },
+                )
+            try:
+                if subcommand in {"get", "read"}:
+                    result = await self.tool_registry.dispatch("desktop_clipboard_read", {})
+                    response_text = self._format_desktop_input_response("clipboard-read", result)
+                elif subcommand in {"set", "write"}:
+                    text = subargs.strip()
+                    if not text:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /clipboard set <text>.")
+                    result = await self.tool_registry.dispatch("desktop_clipboard_write", {"text": text})
+                    response_text = self._format_desktop_input_response("clipboard-write", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /clipboard subcommand. Use /clipboard help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if command_name == "coworker":
+            if self.coworker_service is None or not getattr(self.config.desktop_coworker, "enabled", False):
+                return ResponseFrame(id=request_id, ok=False, error="Desktop coworker is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._coworker_help_text()},
+                )
+            try:
+                if subcommand == "plan":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /coworker plan <task>.")
+                    task = await self.coworker_service.plan_task(
+                        user_id=user_id,
+                        session_key=session_key,
+                        request_text=subargs.strip(),
+                    )
+                    response_text = self._format_coworker_task(task, planned=True)
+                elif subcommand == "run":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /coworker run <task or task_id>.")
+                    candidate = subargs.strip()
+                    if re.fullmatch(r"[0-9a-fA-F]{12}", candidate):
+                        task = await self.coworker_service.run_task(
+                            user_id=user_id,
+                            task_id=candidate,
+                            connection_id=connection_id,
+                            channel_name=str(self.connection_manager.get_connection(connection_id).channel_name)
+                            if self.connection_manager.get_connection(connection_id) is not None
+                            else "",
+                        )
+                    else:
+                        task = await self.coworker_service.run_task_request(
+                            user_id=user_id,
+                            session_key=session_key,
+                            request_text=candidate,
+                            connection_id=connection_id,
+                            channel_name=str(self.connection_manager.get_connection(connection_id).channel_name)
+                            if self.connection_manager.get_connection(connection_id) is not None
+                            else "",
+                        )
+                    response_text = self._format_coworker_task(task)
+                elif subcommand == "step":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /coworker step <task_id>.")
+                    task = await self.coworker_service.step_task(
+                        user_id=user_id,
+                        task_id=subargs.strip(),
+                        connection_id=connection_id,
+                        channel_name=str(self.connection_manager.get_connection(connection_id).channel_name)
+                        if self.connection_manager.get_connection(connection_id) is not None
+                        else "",
+                    )
+                    response_text = self._format_coworker_task(task)
+                elif subcommand in {"status", "show"}:
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /coworker status <task_id>.")
+                    task = await self.coworker_service.get_task(user_id=user_id, task_id=subargs.strip())
+                    response_text = self._format_coworker_task(task, planned=str(task.get("status")) == "planned")
+                elif subcommand == "stop":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /coworker stop <task_id>.")
+                    task = await self.coworker_service.stop_task(user_id=user_id, task_id=subargs.strip())
+                    response_text = self._format_coworker_task(task)
+                elif subcommand == "history":
+                    tasks = await self.coworker_service.list_tasks(user_id=user_id, limit=12)
+                    response_text = self._format_coworker_history(tasks)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /coworker subcommand. Use /coworker help.")
+            except (ValueError, KeyError, RuntimeError) as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if command_name == "vscode":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "vscode_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="VS Code skill pack is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            context = self._app_skill_context(session_key, user_id, connection_id=connection_id)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._vscode_help_text()},
+                )
+            try:
+                if subcommand in {"open", "project"}:
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /vscode open <path_or_name>.")
+                    result = await self.tool_registry.dispatch(
+                        "vscode_open_target",
+                        {"target": subargs.strip(), "prefer": "directory", **context},
+                    )
+                    response_text = self._format_vscode_response("open", result)
+                elif subcommand == "file":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /vscode file <path_or_name>.")
+                    result = await self.tool_registry.dispatch(
+                        "vscode_open_target",
+                        {"target": subargs.strip(), "prefer": "file", **context},
+                    )
+                    response_text = self._format_vscode_response("open", result)
+                elif subcommand == "search":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /vscode search <query>.")
+                    result = await self.tool_registry.dispatch(
+                        "vscode_search",
+                        {"query": subargs.strip(), "prefer": "either", **context},
+                    )
+                    response_text = self._format_vscode_response("search", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /vscode subcommand. Use /vscode help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "doc":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "documents_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Document skill pack is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            context = self._app_skill_context(session_key, user_id, connection_id=connection_id)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._document_help_text()},
+                )
+            try:
+                if subcommand == "read":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /doc read <path_or_name>.")
+                    result = await self.tool_registry.dispatch("document_read", {"path": subargs.strip(), **context})
+                    response_text = self._format_document_response("read", result)
+                elif subcommand == "create":
+                    path_text, content_text = self._split_delimited_arguments(subargs, expected_parts=2)
+                    if not path_text:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /doc create <path> :: <content>.")
+                    result = await self.tool_registry.dispatch(
+                        "document_create",
+                        {"path": path_text, "content": content_text or "", **context},
+                    )
+                    response_text = self._format_document_response("create", result)
+                elif subcommand == "replace":
+                    path_text, find_text, replace_text = self._split_delimited_arguments(subargs, expected_parts=3)
+                    if not path_text or find_text is None or replace_text is None:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /doc replace <path> :: <find> :: <replace>.")
+                    result = await self.tool_registry.dispatch(
+                        "document_replace_text",
+                        {"path": path_text, "find_text": find_text, "replace_text": replace_text, **context},
+                    )
+                    response_text = self._format_document_response("replace", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /doc subcommand. Use /doc help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "excel":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "excel_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Excel skill pack is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            context = self._app_skill_context(session_key, user_id, connection_id=connection_id)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._excel_help_text()},
+                )
+            try:
+                if subcommand == "create":
+                    path_text, headers_text = self._split_delimited_arguments(subargs, expected_parts=2)
+                    if not path_text:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /excel create <path> :: <header1,header2,...>.")
+                    headers = self._parse_csv_values(headers_text or "")
+                    result = await self.tool_registry.dispatch(
+                        "excel_create_workbook",
+                        {"path": path_text, "headers": headers, **context},
+                    )
+                    response_text = self._format_excel_response("create", result)
+                elif subcommand in {"append-row", "append"}:
+                    path_text, values_text = self._split_delimited_arguments(subargs, expected_parts=2)
+                    if not path_text or values_text is None:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /excel append-row <path> :: <value1,value2,...>.")
+                    result = await self.tool_registry.dispatch(
+                        "excel_append_row",
+                        {"path": path_text, "values": self._parse_csv_values(values_text), **context},
+                    )
+                    response_text = self._format_excel_response("append", result)
+                elif subcommand in {"preview", "read"}:
+                    path_text, limit_text = self._split_delimited_arguments(subargs, expected_parts=2)
+                    target = path_text or subargs.strip()
+                    if not target:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /excel preview <path> [:: limit].")
+                    limit = self._parse_browser_limit(limit_text or "", default=8)
+                    result = await self.tool_registry.dispatch("excel_preview", {"path": target, "limit": limit, **context})
+                    response_text = self._format_excel_response("preview", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /excel subcommand. Use /excel help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "system":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "system_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="System control pack is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            context = self._app_skill_context(session_key, user_id, connection_id=connection_id)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._system_help_text()},
+                )
+            try:
+                if subcommand in {"settings", "open"}:
+                    page = subargs.strip() or "settings"
+                    result = await self.tool_registry.dispatch("system_open_settings", {"page": page, **context})
+                    response_text = self._format_system_response("settings", result)
+                elif subcommand == "status":
+                    result = await self.tool_registry.dispatch("system_snapshot", {})
+                    response_text = self._format_system_response("status", result)
+                elif subcommand == "volume":
+                    set_match = re.match(r"^set\s+(\d+)\s*$", subargs.strip(), flags=re.IGNORECASE)
+                    if set_match is not None:
+                        result = await self.tool_registry.dispatch("system_volume_set", {"percent": int(set_match.group(1)), **context})
+                        response_text = self._format_system_response("volume-set", result)
+                    else:
+                        result = await self.tool_registry.dispatch("system_volume_status", {})
+                        response_text = self._format_system_response("volume", result)
+                elif subcommand == "brightness":
+                    set_match = re.match(r"^set\s+(\d+)\s*$", subargs.strip(), flags=re.IGNORECASE)
+                    if set_match is not None:
+                        result = await self.tool_registry.dispatch("system_brightness_set", {"percent": int(set_match.group(1)), **context})
+                        response_text = self._format_system_response("brightness-set", result)
+                    else:
+                        result = await self.tool_registry.dispatch("system_brightness_status", {})
+                        response_text = self._format_system_response("brightness", result)
+                elif subcommand == "bluetooth":
+                    result = await self.tool_registry.dispatch("system_bluetooth_status", {})
+                    response_text = self._format_system_response("bluetooth", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /system subcommand. Use /system help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "task":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "task_manager_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Task Manager skill pack is not enabled.")
+            subcommand, _subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._task_help_text()},
+                )
+            try:
+                if subcommand == "open":
+                    result = await self.tool_registry.dispatch("task_manager_open", {})
+                    response_text = self._format_task_response("open", result)
+                elif subcommand == "summary":
+                    result = await self.tool_registry.dispatch("task_manager_summary", {})
+                    response_text = self._format_task_response("summary", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /task subcommand. Use /task help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "preset":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "presets_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Preset skills are not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._preset_help_text()},
+                )
+            try:
+                if subcommand == "list":
+                    result = await self.tool_registry.dispatch("preset_list", {})
+                    response_text = self._format_preset_response("list", result)
+                elif subcommand == "run":
+                    if not subargs.strip():
+                        return ResponseFrame(id=request_id, ok=False, error="Use /preset run <study-mode|work-mode|meeting-mode>.")
+                    result = await self.tool_registry.dispatch("preset_run", {"name": subargs.strip(), "user_id": user_id})
+                    response_text = self._format_preset_response("run", result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /preset subcommand. Use /preset help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
+
+        if command_name == "browser-skill":
+            if not getattr(self.config.app_skills, "enabled", False) or not getattr(self.config.app_skills, "browser_enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Browser skill pack is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={"queued": False, "session_key": session_key, "command_response": self._browser_skill_help_text()},
+                )
+            try:
+                if subcommand == "open":
+                    workspace = subargs.strip()
+                    if not workspace:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /browser-skill open <study|work|meeting>.")
+                    result = await self.tool_registry.dispatch("browser_workspace_open", {"workspace": workspace, "user_id": user_id})
+                    response_text = self._format_browser_skill_response(result)
+                else:
+                    return ResponseFrame(id=request_id, ok=False, error="Unknown /browser-skill subcommand. Use /browser-skill help.")
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            return ResponseFrame(id=request_id, ok=True, payload={"queued": False, "session_key": session_key, "command_response": response_text})
 
         if command_name == "browser":
             if not self.tool_registry.has("browser_sessions_list"):
@@ -1007,6 +1647,16 @@ class GatewayRouter:
         if cron_shortcut is not None:
             return cron_shortcut
 
+        desktop_routine_shortcut = await self._handle_desktop_routine_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if desktop_routine_shortcut is not None:
+            return desktop_routine_shortcut
+
         one_time_shortcut = await self._handle_natural_language_one_time_reminder_shortcut(
             request_id,
             session_key,
@@ -1016,6 +1666,56 @@ class GatewayRouter:
         )
         if one_time_shortcut is not None:
             return one_time_shortcut
+
+        desktop_vision_shortcut = await self._handle_desktop_vision_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if desktop_vision_shortcut is not None:
+            return desktop_vision_shortcut
+
+        desktop_input_shortcut = await self._handle_desktop_input_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if desktop_input_shortcut is not None:
+            return desktop_input_shortcut
+
+        desktop_coworker_shortcut = await self._handle_desktop_coworker_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if desktop_coworker_shortcut is not None:
+            return desktop_coworker_shortcut
+
+        app_skill_shortcut = await self._handle_app_skill_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if app_skill_shortcut is not None:
+            return app_skill_shortcut
+
+        app_control_shortcut = await self._handle_app_control_shortcut(
+            request_id,
+            session_key,
+            message,
+            lowered,
+            metadata,
+        )
+        if app_control_shortcut is not None:
+            return app_control_shortcut
 
         desktop_automation_shortcut = await self._handle_desktop_automation_shortcut(
             request_id,
@@ -1156,6 +1856,264 @@ class GatewayRouter:
             },
         )
 
+    async def _handle_desktop_vision_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_desktop_vision_request(lowered)
+        if parsed is None:
+            return None
+        if not getattr(self.config.desktop_vision, "enabled", False):
+            response_text = "Desktop vision is not enabled."
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        tool_name = {
+            "active": "desktop_active_window",
+            "capture": "desktop_screenshot",
+            "window": "desktop_window_screenshot",
+            "read": "desktop_read_screen",
+        }[parsed["action"]]
+        tool_payload = {"target": parsed["target"]} if parsed["action"] == "read" else {}
+        try:
+            result = await self.tool_registry.dispatch(tool_name, tool_payload)
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_desktop_vision_response(parsed["action"], result)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_desktop_input_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_desktop_input_request(lowered)
+        if parsed is None:
+            return None
+        if not getattr(self.config.desktop_input, "enabled", False):
+            response_text = "Desktop input is not enabled."
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        try:
+            if parsed["action"] == "copy-selected":
+                hotkey_result = await self.tool_registry.dispatch("desktop_keyboard_hotkey", {"hotkey": "ctrl+c"})
+                hotkey_status = str(hotkey_result.get("status", "completed"))
+                if hotkey_status.startswith("blocked") or hotkey_status in {"rejected", "expired", "failed"}:
+                    response_text = self._format_desktop_input_response("hotkey", hotkey_result)
+                else:
+                    read_result = await self.tool_registry.dispatch("desktop_clipboard_read", {})
+                    response_text = self._format_desktop_input_response("clipboard-read", read_result)
+            elif parsed["action"] == "clipboard-read":
+                result = await self.tool_registry.dispatch("desktop_clipboard_read", {})
+                response_text = self._format_desktop_input_response("clipboard-read", result)
+            elif parsed["action"] == "clipboard-write":
+                result = await self.tool_registry.dispatch("desktop_clipboard_write", {"text": str(parsed["text"])})
+                response_text = self._format_desktop_input_response("clipboard-write", result)
+            elif parsed["action"] == "move":
+                result = await self.tool_registry.dispatch("desktop_mouse_move", {"x": parsed["x"], "y": parsed["y"]})
+                response_text = self._format_desktop_input_response("move", result)
+            elif parsed["action"] in {"click", "right-click", "double-click"}:
+                payload = {"x": parsed["x"], "y": parsed["y"]}
+                if parsed["action"] == "right-click":
+                    payload["button"] = "right"
+                elif parsed["action"] == "double-click":
+                    payload["count"] = 2
+                result = await self.tool_registry.dispatch("desktop_mouse_click", payload)
+                response_text = self._format_desktop_input_response(parsed["action"], result)
+            elif parsed["action"] == "scroll":
+                result = await self.tool_registry.dispatch(
+                    "desktop_mouse_scroll",
+                    {"direction": parsed["direction"], "amount": parsed["amount"]},
+                )
+                response_text = self._format_desktop_input_response("scroll", result)
+            elif parsed["action"] == "type":
+                result = await self.tool_registry.dispatch("desktop_keyboard_type", {"text": str(parsed["text"])})
+                response_text = self._format_desktop_input_response("type", result)
+            else:
+                result = await self.tool_registry.dispatch("desktop_keyboard_hotkey", {"hotkey": str(parsed["hotkey"])})
+                response_text = self._format_desktop_input_response("hotkey", result)
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_desktop_coworker_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if self.coworker_service is None or not getattr(self.config.desktop_coworker, "enabled", False):
+            return None
+        parsed = self._parse_desktop_coworker_request(original_message, lowered)
+        if parsed is None:
+            return None
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        try:
+            task = await self.coworker_service.run_task_request(
+                user_id=user_id,
+                session_key=session_key,
+                request_text=str(parsed["request"]),
+                connection_id=str(metadata.get("connection_id", "")),
+                channel_name=str(metadata.get("channel", "")),
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_coworker_task(task)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_app_skill_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_app_skill_request(original_message, lowered)
+        if parsed is None:
+            return None
+        if not getattr(self.config.app_skills, "enabled", False):
+            response_text = "App skills are not enabled."
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        context = self._app_skill_context(
+            session_key,
+            user_id,
+            connection_id=str(metadata.get("connection_id", "")),
+            channel_name=str(metadata.get("channel", "")),
+        )
+        try:
+            action = str(parsed["action"])
+            if action == "task-open":
+                result = await self.tool_registry.dispatch("task_manager_open", {})
+                response_text = self._format_task_response("open", result)
+            elif action == "task-summary":
+                result = await self.tool_registry.dispatch("task_manager_summary", {})
+                response_text = self._format_task_response("summary", result)
+            elif action == "settings":
+                result = await self.tool_registry.dispatch("system_open_settings", {"page": str(parsed["page"]), **context})
+                response_text = self._format_system_response("settings", result)
+            elif action == "volume":
+                result = await self.tool_registry.dispatch("system_volume_status", {})
+                response_text = self._format_system_response("volume", result)
+            elif action == "volume-set":
+                result = await self.tool_registry.dispatch("system_volume_set", {"percent": int(parsed["percent"]), **context})
+                response_text = self._format_system_response("volume-set", result)
+            elif action == "brightness":
+                result = await self.tool_registry.dispatch("system_brightness_status", {})
+                response_text = self._format_system_response("brightness", result)
+            elif action == "brightness-set":
+                result = await self.tool_registry.dispatch("system_brightness_set", {"percent": int(parsed["percent"]), **context})
+                response_text = self._format_system_response("brightness-set", result)
+            elif action == "bluetooth":
+                result = await self.tool_registry.dispatch("system_bluetooth_status", {})
+                response_text = self._format_system_response("bluetooth", result)
+            elif action == "preset-run":
+                result = await self.tool_registry.dispatch("preset_run", {"name": str(parsed["name"]), "user_id": user_id})
+                response_text = self._format_preset_response("run", result)
+            elif action == "vscode-open":
+                result = await self.tool_registry.dispatch(
+                    "vscode_open_target",
+                    {"target": str(parsed["target"]), "prefer": str(parsed.get("prefer", "either")), **context},
+                )
+                response_text = self._format_vscode_response("open", result)
+            elif action == "browser-workspace":
+                result = await self.tool_registry.dispatch(
+                    "browser_workspace_open",
+                    {"workspace": str(parsed["workspace"]), "user_id": user_id},
+                )
+                response_text = self._format_browser_skill_response(result)
+            else:
+                return None
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_app_control_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_app_control_request(lowered)
+        if parsed is None:
+            return None
+        if not getattr(self.config.desktop_apps, "enabled", False):
+            if parsed["action"] == "open" and parsed["target"] in {"notepad", "calculator", "paint", "explorer"}:
+                return None
+            response_text = "Desktop app control is not enabled."
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+        tool_name = {
+            "open": "apps_open",
+            "focus": "apps_focus",
+            "minimize": "apps_minimize",
+            "maximize": "apps_maximize",
+            "restore": "apps_restore",
+            "snap": "apps_snap",
+        }[parsed["action"]]
+        tool_payload = {"target": parsed["target"]}
+        if parsed["action"] == "snap":
+            tool_payload["position"] = parsed["position"]
+        try:
+            result = await self.tool_registry.dispatch(tool_name, tool_payload)
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_app_control_response(parsed["action"], result)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
     async def _handle_desktop_automation_shortcut(
         self,
         request_id: str,
@@ -1239,6 +2197,106 @@ class GatewayRouter:
             return f"Resumed desktop automation '{display_name}'."
         await self.automation_engine.delete_rule(user_id, rule_name)
         return f"Deleted desktop automation '{display_name}'."
+
+    async def _handle_desktop_routine_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+            return None
+        management_response = await self._handle_desktop_routine_management_shortcut(
+            session_key,
+            original_message,
+            lowered,
+            metadata,
+        )
+        if management_response is not None:
+            await self._persist_inline_exchange(session_key, original_message, management_response, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": management_response},
+            )
+        parsed = await self._parse_desktop_routine_request(session_key, original_message, lowered, metadata)
+        if parsed is None:
+            return None
+        if parsed.get("response_text"):
+            response_text = str(parsed["response_text"])
+        else:
+            user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+            routine = await self.automation_engine.create_desktop_routine_rule(user_id, **parsed)
+            response_text = self._format_desktop_routine_creation_response(routine)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
+    async def _handle_desktop_routine_management_shortcut(
+        self,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if self.automation_engine is None or not getattr(self.config.automation.desktop, "enabled", False):
+            return None
+        if "desktop automation" in normalized:
+            return None
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        if normalized in {
+            "list my routines",
+            "show my routines",
+            "list routines",
+            "show routines",
+            "what routines do i have",
+            "what desktop routines do i have",
+        }:
+            rules = await self.automation_engine.list_rules(user_id)
+            return self._format_desktop_routines_response(self._filter_desktop_routines(rules))
+        action_match = re.match(
+            r"^(?P<action>run|start|launch|pause|resume|delete|remove|show)\s+(?:(?:my\s+)?(?:desktop\s+)?routine\s+)?(?P<name>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if action_match is None:
+            return None
+        action = str(action_match.group("action")).lower()
+        raw_name = str(action_match.group("name")).strip()
+        rules = await self.automation_engine.list_rules(user_id)
+        desktop_routines = self._filter_desktop_routines(rules)
+        matched_rule, error_text = self._match_desktop_routine_reference(desktop_routines, raw_name)
+        if error_text:
+            explicit_reference = "routine" in normalized or raw_name.lower().endswith(" mode")
+            if action in {"run", "start", "launch"} and not explicit_reference:
+                return None
+            return error_text
+        assert matched_rule is not None
+        rule_name = str(matched_rule.get("name", ""))
+        display_name = str(matched_rule.get("display_name") or rule_name)
+        if action in {"run", "start", "launch"}:
+            result = await self.automation_engine.run_desktop_routine_now(
+                user_id=user_id,
+                routine_id=rule_name.removeprefix("routine:"),
+                notify=False,
+            )
+            return str(result.get("message", f"Ran desktop routine '{display_name}'.")) or f"Ran desktop routine '{display_name}'."
+        if action == "show":
+            return self._format_desktop_routine_show_response(matched_rule)
+        if action == "pause":
+            await self.automation_engine.pause_rule(user_id, rule_name)
+            return f"Paused desktop routine '{display_name}'."
+        if action == "resume":
+            await self.automation_engine.resume_rule(user_id, rule_name)
+            return f"Resumed desktop routine '{display_name}'."
+        await self.automation_engine.delete_rule(user_id, rule_name)
+        return f"Deleted desktop routine '{display_name}'."
 
     async def _handle_host_shortcut(
         self,
@@ -1666,6 +2724,49 @@ class GatewayRouter:
             "/cron delete <cron_id>"
         )
 
+    def _apps_help_text(self) -> str:
+        return (
+            "App control commands:\n"
+            "/apps list\n"
+            "/apps open <alias>\n"
+            "/apps focus <window_or_alias>\n"
+            "/apps minimize <window_or_alias>\n"
+            "/apps maximize <window_or_alias>\n"
+            "/apps restore <window_or_alias>\n"
+            "/apps left <window_or_alias>\n"
+            "/apps right <window_or_alias>"
+        )
+
+    def _screen_help_text(self) -> str:
+        return (
+            "Desktop vision commands:\n"
+            "/screen active\n"
+            "/screen capture\n"
+            "/screen window\n"
+            "/screen read\n"
+            "/screen read window"
+        )
+
+    def _input_help_text(self) -> str:
+        return (
+            "Desktop input commands:\n"
+            "/input position\n"
+            "/input move <x> <y>\n"
+            "/input click <x> <y>\n"
+            "/input right-click <x> <y>\n"
+            "/input double-click <x> <y>\n"
+            "/input scroll up|down <amount>\n"
+            "/input type <text>\n"
+            "/input hotkey <keys>"
+        )
+
+    def _clipboard_help_text(self) -> str:
+        return (
+            "Clipboard commands:\n"
+            "/clipboard get\n"
+            "/clipboard set <text>"
+        )
+
     def _desktop_help_text(self) -> str:
         return (
             "Desktop automation commands:\n"
@@ -1673,6 +2774,17 @@ class GatewayRouter:
             "/desktop pause <rule_name>\n"
             "/desktop resume <rule_name>\n"
             "/desktop delete <rule_name>"
+        )
+
+    def _routine_help_text(self) -> str:
+        return (
+            "Desktop routine commands:\n"
+            "/routine list\n"
+            "/routine show <routine_name>\n"
+            "/routine run <routine_name>\n"
+            "/routine pause <routine_name>\n"
+            "/routine resume <routine_name>\n"
+            "/routine delete <routine_name>"
         )
 
     def _browser_help_text(self) -> str:
@@ -1689,6 +2801,557 @@ class GatewayRouter:
             "/browser screenshot\n"
             "/browser login <site_name> [profile_name]"
         )
+
+    def _vscode_help_text(self) -> str:
+        return (
+            "VS Code commands:\n"
+            "/vscode open <project_or_folder>\n"
+            "/vscode file <file_path_or_name>\n"
+            "/vscode search <query>"
+        )
+
+    def _document_help_text(self) -> str:
+        return (
+            "Document commands:\n"
+            "/doc read <path_or_name>\n"
+            "/doc create <path> :: <content>\n"
+            "/doc replace <path> :: <find> :: <replace>"
+        )
+
+    def _excel_help_text(self) -> str:
+        return (
+            "Excel commands:\n"
+            "/excel create <path> :: <header1,header2,...>\n"
+            "/excel append-row <path> :: <value1,value2,...>\n"
+            "/excel preview <path> [:: limit]"
+        )
+
+    def _system_help_text(self) -> str:
+        return (
+            "System commands:\n"
+            "/system status\n"
+            "/system settings <sound|display|bluetooth|wifi|network|notifications>\n"
+            "/system volume\n"
+            "/system volume set <0-100>\n"
+            "/system brightness\n"
+            "/system brightness set <0-100>\n"
+            "/system bluetooth"
+        )
+
+    def _task_help_text(self) -> str:
+        return "Task commands:\n/task open\n/task summary"
+
+    def _preset_help_text(self) -> str:
+        return "Preset commands:\n/preset list\n/preset run <study-mode|work-mode|meeting-mode>"
+
+    def _browser_skill_help_text(self) -> str:
+        return "Browser skill commands:\n/browser-skill open <study|work|meeting>"
+
+    def _app_skill_context(self, session_key: str, user_id: str, *, connection_id: str = "", channel_name: str = "") -> dict[str, Any]:
+        return {
+            "session_key": session_key,
+            "session_id": f"app-skills:{session_key}",
+            "user_id": user_id,
+            "connection_id": connection_id,
+            "channel_name": channel_name,
+        }
+
+    def _split_delimited_arguments(self, value: str, *, expected_parts: int) -> tuple[Any, ...]:
+        parts = [part.strip() for part in re.split(r"\s+::\s+", value.strip())]
+        if len(parts) < expected_parts:
+            return tuple([None] * expected_parts)
+        normalized = parts[:expected_parts]
+        while len(normalized) < expected_parts:
+            normalized.append(None)
+        return tuple(normalized)
+
+    def _parse_csv_values(self, value: str) -> list[str]:
+        if not value.strip():
+            return []
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    def _parse_app_skill_request(self, message: str, lowered: str) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if normalized in {"study mode", "start study mode", "run study mode"}:
+            return {"action": "preset-run", "name": "study-mode"}
+        if normalized in {"work mode", "start work mode", "run work mode"}:
+            return {"action": "preset-run", "name": "work-mode"}
+        if normalized in {"meeting mode", "start meeting mode", "run meeting mode"}:
+            return {"action": "preset-run", "name": "meeting-mode"}
+        if normalized in {"open task manager", "start task manager", "launch task manager"}:
+            return {"action": "task-open"}
+        if normalized in {"task manager summary", "show task manager summary", "summarize task manager"}:
+            return {"action": "task-summary"}
+        if normalized in {"what is the volume", "what's the volume", "current volume", "show volume"}:
+            return {"action": "volume"}
+        volume_match = re.match(r"^(?:set|change)\s+volume\s+to\s+(\d{1,3})$", normalized)
+        if volume_match is not None:
+            return {"action": "volume-set", "percent": int(volume_match.group(1))}
+        if normalized in {"what is the brightness", "what's the brightness", "current brightness", "show brightness"}:
+            return {"action": "brightness"}
+        brightness_match = re.match(r"^(?:set|change)\s+brightness\s+to\s+(\d{1,3})$", normalized)
+        if brightness_match is not None:
+            return {"action": "brightness-set", "percent": int(brightness_match.group(1))}
+        if normalized in {"bluetooth status", "show bluetooth status", "what is the bluetooth status"}:
+            return {"action": "bluetooth"}
+        settings_match = re.match(r"^(?:open|show)\s+(sound|display|brightness|bluetooth|wifi|network|notifications)\s+settings$", normalized)
+        if settings_match is not None:
+            return {"action": "settings", "page": settings_match.group(1)}
+        workspace_match = re.match(r"^(?:open|start)\s+(study|work|meeting)\s+browser\s+workspace$", normalized)
+        if workspace_match is not None:
+            return {"action": "browser-workspace", "workspace": workspace_match.group(1)}
+        vscode_match = re.match(r"^(?:open|launch|start)\s+(.+?)\s+in\s+vscode$", message.strip(), flags=re.IGNORECASE)
+        if vscode_match is not None:
+            target = str(vscode_match.group(1)).strip().strip("\"'")
+            prefer = "file" if re.search(r"\.[A-Za-z0-9]{1,6}$", target) else "either"
+            if any(keyword in normalized for keyword in {" project in vscode", " folder in vscode", " workspace in vscode"}):
+                prefer = "directory"
+            return {"action": "vscode-open", "target": target, "prefer": prefer}
+        return None
+
+    def _known_app_aliases(self) -> set[str]:
+        configured = getattr(self.config.desktop_apps, "known_apps", {})
+        return {str(alias).strip().lower() for alias in configured.keys() if str(alias).strip()}
+
+    def _parse_desktop_vision_request(self, lowered: str) -> dict[str, str] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if normalized in {"what app is active", "which app is active", "what window is active"}:
+            return {"action": "active"}
+        if normalized in {
+            "take a screenshot of my desktop",
+            "take a screenshot of the desktop",
+            "take a screenshot of my screen",
+            "capture my desktop",
+            "capture the desktop",
+        }:
+            return {"action": "capture"}
+        if normalized in {
+            "capture the active window",
+            "take a screenshot of the active window",
+            "screenshot the active window",
+        }:
+            return {"action": "window"}
+        if normalized in {
+            "read the text on my screen",
+            "read my screen",
+            "read the screen",
+        }:
+            return {"action": "read", "target": "desktop"}
+        if normalized in {
+            "read the active window",
+            "read text from the active window",
+            "read the text in the active window",
+        }:
+            return {"action": "read", "target": "window"}
+        return None
+
+    def _parse_desktop_input_request(self, lowered: str) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if normalized == "copy selected text":
+            return {"action": "copy-selected"}
+        if normalized in {"what is on my clipboard", "what's on my clipboard", "read my clipboard", "get clipboard"}:
+            return {"action": "clipboard-read"}
+        clipboard_match = re.match(r"^(?:set|write)\s+clipboard\s+to\s+(.+)$", normalized)
+        if clipboard_match is not None:
+            return {"action": "clipboard-write", "text": clipboard_match.group(1).strip()}
+        move_match = re.match(r"^(?:move|move mouse|move the mouse)\s+to\s+(-?\d+)[,\s]+(-?\d+)$", normalized)
+        if move_match is not None:
+            return {"action": "move", "x": int(move_match.group(1)), "y": int(move_match.group(2))}
+        click_match = re.match(r"^click\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        if click_match is not None:
+            return {"action": "click", "x": int(click_match.group(1)), "y": int(click_match.group(2))}
+        double_click_match = re.match(r"^(?:double click|double-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        if double_click_match is not None:
+            return {"action": "double-click", "x": int(double_click_match.group(1)), "y": int(double_click_match.group(2))}
+        right_click_match = re.match(r"^(?:right click|right-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        if right_click_match is not None:
+            return {"action": "right-click", "x": int(right_click_match.group(1)), "y": int(right_click_match.group(2))}
+        scroll_match = re.match(r"^scroll\s+(up|down)(?:\s+(\d+))?$", normalized)
+        if scroll_match is not None:
+            return {"action": "scroll", "direction": scroll_match.group(1), "amount": int(scroll_match.group(2) or "1")}
+        type_match = re.match(r"^type\s+(.+)$", normalized)
+        if type_match is not None:
+            return {"action": "type", "text": type_match.group(1)}
+        press_match = re.match(r"^(?:press|hit)\s+(.+)$", normalized)
+        if press_match is not None:
+            return {"action": "hotkey", "hotkey": press_match.group(1)}
+        return None
+
+    def _parse_desktop_coworker_request(self, original_message: str, lowered: str) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        if normalized.startswith("help me "):
+            return {"request": original_message.strip()}
+        multi_step_markers = [
+            " and verify",
+            " and confirm",
+            " and summarize",
+            " and tell me whether",
+        ]
+        if any(marker in normalized for marker in multi_step_markers) and self.coworker_service.can_handle_request(original_message):
+            return {"request": original_message.strip()}
+        return None
+
+    def _parse_input_coordinates(self, value: str) -> tuple[int, int] | None:
+        match = re.match(r"^\s*(-?\d+)[,\s]+(-?\d+)\s*$", value)
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    def _parse_input_scroll_arguments(self, value: str) -> tuple[str, int] | None:
+        match = re.match(r"^\s*(up|down)(?:\s+(\d+))?\s*$", value.strip().lower())
+        if match is None:
+            return None
+        return str(match.group(1)), int(match.group(2) or "1")
+
+    def _parse_app_control_request(self, lowered: str) -> dict[str, str] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        aliases = self._known_app_aliases()
+        if not aliases:
+            return None
+
+        def _clean_target(value: str) -> str:
+            target = value.strip().strip("\"'")
+            target = re.sub(r"^(?:the|my)\s+", "", target)
+            target = re.sub(r"\s+app$", "", target)
+            target = re.sub(r"\s+window$", "", target)
+            return target.strip()
+
+        open_match = re.match(r"^(?:can you\s+|please\s+)?(?:open|launch|start)\s+(?P<target>.+)$", normalized)
+        if open_match is not None:
+            target = _clean_target(str(open_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "open", "target": target.lower()}
+
+        focus_match = re.match(r"^(?:switch to|focus(?: on)?)\s+(?P<target>.+)$", normalized)
+        if focus_match is not None:
+            target = _clean_target(str(focus_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "focus", "target": target.lower()}
+
+        minimize_match = re.match(r"^minimize\s+(?P<target>.+)$", normalized)
+        if minimize_match is not None:
+            target = _clean_target(str(minimize_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "minimize", "target": target.lower()}
+
+        maximize_match = re.match(r"^maximize\s+(?P<target>.+)$", normalized)
+        if maximize_match is not None:
+            target = _clean_target(str(maximize_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "maximize", "target": target.lower()}
+
+        restore_match = re.match(r"^restore\s+(?P<target>.+)$", normalized)
+        if restore_match is not None:
+            target = _clean_target(str(restore_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "restore", "target": target.lower()}
+
+        snap_match = re.match(
+            r"^(?:put|move|snap)\s+(?P<target>.+?)\s+(?:on|to)\s+(?:the\s+)?(?P<position>left|right)$",
+            normalized,
+        )
+        if snap_match is not None:
+            target = _clean_target(str(snap_match.group("target")))
+            if target.lower() in aliases:
+                return {"action": "snap", "target": target.lower(), "position": str(snap_match.group("position")).lower()}
+        return None
+
+    def _format_app_control_response(self, action: str, result: dict[str, Any]) -> str:
+        if action in {"list", "ls"}:
+            windows = result.get("windows", [])
+            if not windows:
+                return "No visible app windows are open right now."
+            lines = ["Visible app windows:"]
+            for item in windows[:12]:
+                flags = []
+                if item.get("is_foreground"):
+                    flags.append("active")
+                if item.get("is_minimized"):
+                    flags.append("minimized")
+                flag_text = f" [{' / '.join(flags)}]" if flags else ""
+                lines.append(
+                    f"- {item.get('window_id', '?')}: {item.get('title', '(untitled)')} | {item.get('process_name', 'unknown')}{flag_text}"
+                )
+            return "\n".join(lines)
+        if action == "open":
+            return f"Launched {result.get('alias', 'app')} from {result.get('path', 'unknown')}."
+        window = result.get("window", {})
+        title = str(window.get("title") or result.get("target", "window"))
+        if action == "focus":
+            return f"Focused '{title}'."
+        if action == "minimize":
+            return f"Minimized '{title}'."
+        if action == "maximize":
+            return f"Maximized '{title}'."
+        if action == "restore":
+            return f"Restored '{title}'."
+        if action == "snap":
+            return f"Snapped '{title}' to the {result.get('position', 'left')} side."
+        return "Completed the requested app action."
+
+    def _format_desktop_vision_response(self, action: str, result: dict[str, Any]) -> str:
+        if action == "active":
+            window = result.get("active_window", {})
+            title = str(window.get("title") or "(untitled)")
+            process_name = str(window.get("process_name") or "unknown")
+            return (
+                f"Active window: {title}\n"
+                f"Process: {process_name}\n"
+                f"Window id: {window.get('window_id', 'unknown')}"
+            )
+        if action in {"capture", "window"}:
+            article = "an" if action == "window" else "a"
+            scope = "active window" if action == "window" else "desktop"
+            window = result.get("active_window", {})
+            return (
+                f"Captured {article} {scope} screenshot.\n"
+                f"Saved at: {result.get('path', 'unknown')}\n"
+                f"Active window: {window.get('title', '(untitled)')} ({window.get('process_name', 'unknown')})"
+            )
+        if action == "read":
+            target = str(result.get("target", "desktop"))
+            content = str(result.get("content", "")).strip()
+            if not content:
+                return (
+                    f"Captured the {target} but could not find readable text.\n"
+                    f"Saved at: {result.get('path', 'unknown')}"
+                )
+            return (
+                f"Read the {target}.\n"
+                f"Saved at: {result.get('path', 'unknown')}\n\n"
+                f"{content}"
+            )
+        return "Completed the desktop vision action."
+
+    def _format_desktop_input_response(self, action: str, result: dict[str, Any]) -> str:
+        status = str(result.get("status", "completed"))
+        if status.startswith("blocked") or status in {"rejected", "expired"}:
+            return (
+                f"I didn't complete the {action} input action because it was {status}. "
+                "Check /host-approvals if you want to review pending requests."
+            )
+        if status == "failed":
+            return f"The {action} input action failed: {result.get('stderr', 'unknown error')}"
+        if action == "position":
+            return (
+                f"Cursor position: ({result.get('x', '?')}, {result.get('y', '?')})\n"
+                f"Active window: {result.get('active_window', {}).get('title', '(untitled)')}"
+            )
+        if action == "move":
+            return f"Moved the mouse to ({result.get('x', '?')}, {result.get('y', '?')})."
+        if action == "click":
+            return f"Clicked at ({result.get('x', '?')}, {result.get('y', '?')})."
+        if action == "right-click":
+            return f"Right-clicked at ({result.get('x', '?')}, {result.get('y', '?')})."
+        if action == "double-click":
+            return f"Double-clicked at ({result.get('x', '?')}, {result.get('y', '?')})."
+        if action == "scroll":
+            return f"Scrolled {result.get('direction', 'down')} {result.get('amount', 1)} step(s)."
+        if action == "type":
+            return f"Typed {result.get('characters_typed', 0)} character(s) into the active window."
+        if action == "hotkey":
+            return f"Pressed {result.get('hotkey', 'the requested hotkey')}."
+        if action == "clipboard-read":
+            content = str(result.get("content", ""))
+            if not content:
+                return "Clipboard is empty."
+            preview = content if len(content) <= 2000 else f"{content[:2000].rstrip()}\n..."
+            return f"Clipboard text:\n\n{preview}"
+        if action == "clipboard-write":
+            return f"Updated the clipboard text ({result.get('char_count', 0)} character(s))."
+        return "Completed the desktop input action."
+
+    def _coworker_help_text(self) -> str:
+        return (
+            "Coworker commands:\n"
+            "- /coworker plan <task>\n"
+            "- /coworker run <task or task_id>\n"
+            "- /coworker step <task_id>\n"
+            "- /coworker status <task_id>\n"
+            "- /coworker stop <task_id>\n"
+            "- /coworker history\n\n"
+            "Examples:\n"
+            "- /coworker run open task manager and summarize system usage\n"
+            "- /coworker run open bluetooth settings and tell me whether bluetooth is available\n"
+            "- /coworker run open R:/6_semester/mini_project in vscode and confirm the window is focused"
+        )
+
+    def _format_coworker_task(self, task: dict[str, Any], *, planned: bool = False) -> str:
+        total_steps = int(task.get("total_steps", len(task.get("steps", []))))
+        current_step = int(task.get("current_step_index", 0))
+        lines = [
+            f"Coworker task {task.get('task_id', 'unknown')}",
+            f"Status: {task.get('status', 'unknown')}",
+            f"Goal: {task.get('summary', task.get('request_text', 'desktop task'))}",
+            f"Progress: {min(current_step, total_steps)} / {total_steps} step(s)",
+        ]
+        if planned and task.get("steps"):
+            lines.append("Planned steps:")
+            for index, step in enumerate(task.get("steps", []), start=1):
+                verification = self._format_coworker_verification(dict(step))
+                lines.append(f"{index}. {step.get('title', step.get('type', 'step'))}{verification}")
+        transcript = list(task.get("transcript", []))
+        if transcript:
+            lines.append("Transcript:")
+            for entry in transcript[-5:]:
+                step_number = int(entry.get("step_index", 0)) + 1
+                lines.append(
+                    f"- Step {step_number} ({entry.get('step_type', 'step')}): {entry.get('summary', entry.get('status', 'completed'))}"
+                )
+        active_window = task.get("latest_state", {}).get("active_window", {}) if isinstance(task.get("latest_state"), dict) else {}
+        if isinstance(active_window, dict) and (active_window.get("title") or active_window.get("process_name")):
+            lines.append(
+                f"Latest window: {active_window.get('title', '(untitled)')} ({active_window.get('process_name', 'unknown')})"
+            )
+        capture_path = task.get("latest_state", {}).get("capture_path", "") if isinstance(task.get("latest_state"), dict) else ""
+        if capture_path:
+            lines.append(f"Latest capture: {capture_path}")
+        if task.get("error"):
+            lines.append(f"Error: {task['error']}")
+        return "\n".join(lines)
+
+    def _format_coworker_history(self, tasks: list[dict[str, Any]]) -> str:
+        if not tasks:
+            return "No coworker tasks have been created yet."
+        lines = ["Recent coworker tasks:"]
+        for task in tasks[:12]:
+            lines.append(
+                f"- {task.get('task_id', 'unknown')}: {task.get('summary', task.get('request_text', 'desktop task'))} "
+                f"[{task.get('status', 'unknown')}, {task.get('current_step_index', 0)}/{task.get('total_steps', 0)}]"
+            )
+        return "\n".join(lines)
+
+    def _format_coworker_verification(self, step: dict[str, Any]) -> str:
+        verification = dict(step.get("verification", {}))
+        kind = str(verification.get("kind", "tool_status"))
+        if kind == "active_window_contains":
+            return f" [verify window matches {', '.join(str(item) for item in verification.get('matches', []))}]"
+        if kind == "document_contains":
+            return " [verify updated document content]"
+        if kind == "clipboard_nonempty":
+            return " [verify clipboard has text]"
+        if kind == "summary_has_keys":
+            return " [verify summary data is present]"
+        return ""
+
+    def _format_vscode_response(self, action: str, result: dict[str, Any]) -> str:
+        if action == "search":
+            matches = list(result.get("matches", []))
+            if not matches:
+                return "I couldn't find a matching file or folder for that VS Code search."
+            lines = ["VS Code search matches:"]
+            for item in matches[:10]:
+                suffix = "/" if item.get("is_dir") else ""
+                lines.append(f"- {item.get('name', '(unknown)')}{suffix} -> {item.get('path', '')}")
+            return "\n".join(lines)
+        return f"Opened {result.get('path', 'the requested target')} in VS Code."
+
+    def _format_document_response(self, action: str, result: dict[str, Any]) -> str:
+        if action == "read":
+            content = str(result.get("content", "")).strip()
+            if not content:
+                return f"The document at {result.get('path', 'that path')} is empty."
+            preview = content if len(content) <= 3000 else f"{content[:3000].rstrip()}\n..."
+            return f"Document content from {result.get('path', 'that path')}:\n\n{preview}"
+        if action == "create":
+            return f"Created or updated {result.get('path', 'the document')}."
+        if action == "replace":
+            status = str(result.get("status", "completed"))
+            if status == "no_change":
+                return f"No matching text was found in {result.get('path', 'the document')}."
+            return f"Updated {result.get('path', 'the document')} with {result.get('replacements', 0)} replacement(s)."
+        return "Completed the document action."
+
+    def _format_excel_response(self, action: str, result: dict[str, Any]) -> str:
+        if action in {"create", "append"}:
+            preview = result.get("preview", {}) if isinstance(result.get("preview"), dict) else {}
+            return (
+                f"{'Created' if action == 'create' else 'Updated'} workbook {result.get('path', '')}.\n"
+                f"Sheet: {preview.get('sheet_name', result.get('sheet_name', 'Sheet1'))}\n"
+                f"Rows: {preview.get('row_count', 0)}"
+            )
+        if action == "preview":
+            rows = result.get("rows", [])
+            if not rows:
+                return f"The workbook {result.get('path', '')} is empty."
+            lines = [f"Workbook preview for {result.get('path', '')} ({result.get('sheet_name', 'Sheet1')}):"]
+            for row in rows[:8]:
+                lines.append(f"- {', '.join(str(item) for item in row)}")
+            if int(result.get("row_count", len(rows))) > len(rows):
+                lines.append(f"...and {int(result.get('row_count', len(rows))) - len(rows)} more row(s).")
+            return "\n".join(lines)
+        return "Completed the Excel action."
+
+    def _format_system_response(self, action: str, result: dict[str, Any]) -> str:
+        if action == "settings":
+            return f"Opened {result.get('page', 'settings')} settings."
+        if action in {"volume", "volume-set"}:
+            return f"System volume is {result.get('volume_percent', 0)}%."
+        if action in {"brightness", "brightness-set"}:
+            if not result.get("supported", True):
+                return str(result.get("message", "Direct brightness control is unavailable on this device."))
+            return f"Brightness is {result.get('brightness_percent', 0)}%."
+        if action == "bluetooth":
+            availability = "available" if result.get("available") else "not available"
+            return (
+                f"Bluetooth is {availability}.\n"
+                f"Service: {result.get('service_status', 'Unknown')}\n"
+                f"Connected/ready devices: {result.get('device_count', 0)}"
+            )
+        if action == "status":
+            memory = result.get("memory", {}) if isinstance(result.get("memory"), dict) else {}
+            disk = result.get("disk", {}) if isinstance(result.get("disk"), dict) else {}
+            return (
+                f"CPU: {result.get('cpu_percent', 0)}%\n"
+                f"Memory: {memory.get('used_percent', 0)}% ({memory.get('used_gb', 0)} / {memory.get('total_gb', 0)} GB)\n"
+                f"Disk: {disk.get('used_percent', 0)}% used on {disk.get('drive', 'system drive')}\n"
+                f"Volume: {result.get('volume', {}).get('volume_percent', 0) if isinstance(result.get('volume'), dict) else 0}%"
+            )
+        return "Completed the system action."
+
+    def _format_task_response(self, action: str, result: dict[str, Any]) -> str:
+        summary = result.get("summary", result) if isinstance(result, dict) else {}
+        memory = summary.get("memory", {}) if isinstance(summary.get("memory"), dict) else {}
+        disk = summary.get("disk", {}) if isinstance(summary.get("disk"), dict) else {}
+        lines = []
+        if action == "open":
+            lines.append("Opened Task Manager.")
+        lines.extend(
+            [
+                f"CPU: {summary.get('cpu_percent', 0)}%",
+                f"Memory: {memory.get('used_percent', 0)}% ({memory.get('used_gb', 0)} / {memory.get('total_gb', 0)} GB)",
+                f"Disk: {disk.get('used_percent', 0)}% used on {disk.get('drive', 'system drive')}",
+            ]
+        )
+        top_processes = list(summary.get("top_processes", []))
+        if top_processes:
+            lines.append("Top processes:")
+            for item in top_processes[:5]:
+                lines.append(
+                    f"- {item.get('name', 'unknown')}: CPU {item.get('cpu_seconds', 0)}s, RAM {item.get('memory_mb', 0)} MB"
+                )
+        return "\n".join(lines)
+
+    def _format_preset_response(self, action: str, result: dict[str, Any]) -> str:
+        if action == "list":
+            presets = list(result.get("presets", []))
+            lines = ["Available presets:"]
+            for item in presets:
+                lines.append(f"- {item.get('name', 'preset')}: {item.get('description', '')}")
+            return "\n".join(lines)
+        actions = list(result.get("actions", []))
+        if not actions:
+            return f"Ran {result.get('preset', 'the preset')}."
+        return f"Ran {result.get('preset', 'the preset')}:\n" + "\n".join(f"- {item}" for item in actions)
+
+    def _format_browser_skill_response(self, result: dict[str, Any]) -> str:
+        opened = list(result.get("opened", []))
+        if not opened:
+            return f"No browser tabs were opened for the {result.get('workspace', 'requested')} workspace."
+        lines = [f"Opened {len(opened)} browser tab(s) for the {result.get('workspace', 'requested')} workspace:"]
+        for item in opened[:8]:
+            lines.append(f"- {item.get('title') or item.get('url', '')} -> {item.get('url', '')}")
+        return "\n".join(lines)
 
     def _parse_browser_limit(self, value: str, *, default: int = 8) -> int:
         stripped = value.strip()
@@ -2109,6 +3772,457 @@ class GatewayRouter:
             return None, f"I found multiple desktop automations matching that name: {names}."
         return None, f"I couldn't find a desktop automation named '{reference}'."
 
+    async def _parse_desktop_routine_request(
+        self,
+        session_key: str,
+        message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        watch_match = re.match(
+            r"^when\s+(?:a|an)\s+(?:(?P<ext>[a-z0-9]+)\s+)?file\s+appears\s+in\s+(?P<source>.+?)\s*,?\s*(?P<action>move|copy)\s+it\s+to\s+(?P<dest>.+?)\s+and\s+notify\s+me$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if watch_match is not None:
+            source_value = str(watch_match.group("source"))
+            source_path = await self._resolve_desktop_automation_path(session_key, source_value, metadata)
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the watched folder '{source_value}' inside your allowed host locations."}
+            dest_value = str(watch_match.group("dest")).strip()
+            destination_path = await self._resolve_desktop_automation_path(session_key, dest_value, metadata)
+            if destination_path is None:
+                return {"response_text": f"I couldn't resolve the destination '{dest_value}' inside your allowed host locations."}
+            action = str(watch_match.group("action")).lower()
+            step_type = "move_host_file" if action == "move" else "copy_host_file"
+            extension = (watch_match.group("ext") or "").strip().lower()
+            steps: list[dict[str, Any]] = [
+                {
+                    "type": step_type,
+                    "source": "{event_path}",
+                    "destination": f"{destination_path.rstrip('/\\')}/{{event_name}}",
+                }
+            ]
+            if "notify me" in normalized:
+                past_tense = "Moved" if action == "move" else "Copied"
+                steps.append({"type": "notify", "text": f"{past_tense} {{event_name}} to {destination_path}."})
+            return {
+                "name": f"Process {Path(source_path).name}",
+                "trigger_type": "file_watch",
+                "steps": steps,
+                "summary": "",
+                "watch_path": source_path,
+                "event_types": ["file_created"],
+                "file_extensions": [extension] if extension else [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 10,
+                "dedupe_window_seconds": 10,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+
+        reminder_patterns = (
+            r"^remind me(?:\s+(?P<day>today|tomorrow))?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+?)\s+and\s+open\s+(?P<targets>.+)$",
+            r"^remind me at\s+(?P<time>.+?)\s+(?P<day>today|tomorrow)\s+to\s+(?P<message>.+?)\s+and\s+open\s+(?P<targets>.+)$",
+        )
+        for pattern in reminder_patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if match is None:
+                continue
+            targets = str(match.group("targets"))
+            steps, error_text = await self._parse_desktop_routine_targets(session_key, targets, metadata)
+            if error_text:
+                return {"response_text": error_text}
+            assert steps is not None
+            reminder_text = self._normalize_reminder_message(match.group("message"))
+            if reminder_text is None:
+                return {"response_text": "I need a reminder message before I can create that desktop routine."}
+            run_at = (
+                self._build_one_time_reminder_datetime(str(match.group("day")), str(match.group("time")))
+                if match.groupdict().get("day")
+                else self._build_next_desktop_routine_run_at(str(match.group("time")))
+            )
+            if run_at is None:
+                return {"response_text": "I couldn't understand that reminder time. Try something like 'remind me tomorrow at 8 pm to study and open 6_semester folder'."}
+            return {
+                "name": reminder_text.removeprefix("Reminder: ").strip() or "Desktop routine reminder",
+                "trigger_type": "reminder",
+                "steps": [{"type": "notify", "text": reminder_text}, *steps],
+                "summary": "",
+                "run_at": run_at.isoformat(),
+                "event_types": ["reminder"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+
+        named_schedule_match = re.match(
+            r"^every\s+(?P<time>morning|afternoon|evening|night|noon|midnight)\s+open\s+(?P<targets>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if named_schedule_match is not None:
+            steps, error_text = await self._parse_desktop_routine_targets(
+                session_key,
+                str(named_schedule_match.group("targets")),
+                metadata,
+            )
+            if error_text:
+                return {"response_text": error_text}
+            assert steps is not None
+            schedule = self._build_schedule_from_frequency_and_time("day", str(named_schedule_match.group("time")))
+            if schedule is None:
+                return {"response_text": "I couldn't understand that schedule. Try something like 'every evening open chrome and vscode'."}
+            return {
+                "name": "Daily desktop routine",
+                "trigger_type": "schedule",
+                "steps": steps,
+                "summary": "",
+                "schedule": schedule,
+                "event_types": ["scheduled"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+
+        schedule_match = re.match(
+            r"^every\s+(?P<frequency>weekday|day|daily|monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+at\s+(?P<time>.+?)\s+open\s+(?P<targets>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if schedule_match is not None:
+            steps, error_text = await self._parse_desktop_routine_targets(
+                session_key,
+                str(schedule_match.group("targets")),
+                metadata,
+            )
+            if error_text:
+                return {"response_text": error_text}
+            assert steps is not None
+            schedule = self._build_schedule_from_frequency_and_time(
+                str(schedule_match.group("frequency")),
+                str(schedule_match.group("time")),
+            )
+            if schedule is None:
+                return {"response_text": "I couldn't understand that schedule. Try something like 'every weekday at 9 am open chrome and vscode'."}
+            return {
+                "name": "Scheduled desktop routine",
+                "trigger_type": "schedule",
+                "steps": steps,
+                "summary": "",
+                "schedule": schedule,
+                "event_types": ["scheduled"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+
+        mode_match = re.match(
+            r"^(?:create|make)\s+(?:a\s+)?(?P<name>.+?)\s+that\s+opens\s+(?P<targets>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if mode_match is not None:
+            steps, error_text = await self._parse_desktop_routine_targets(
+                session_key,
+                str(mode_match.group("targets")),
+                metadata,
+            )
+            if error_text:
+                return {"response_text": error_text}
+            assert steps is not None
+            raw_name = str(mode_match.group("name")).strip().strip("\"'")
+            cleaned_name = re.sub(r"^(?:my|the)\s+", "", raw_name, flags=re.IGNORECASE).strip()
+            return {
+                "name": cleaned_name or "Desktop routine",
+                "trigger_type": "manual",
+                "steps": steps,
+                "summary": "",
+                "event_types": ["manual"],
+                "file_extensions": [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+        return None
+
+    async def _parse_desktop_routine_targets(
+        self,
+        session_key: str,
+        targets_text: str,
+        metadata: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        aliases = self._known_app_aliases()
+        tokens = [
+            item.strip()
+            for item in re.split(r"\s*,\s*|\s+and\s+", targets_text)
+            if item.strip()
+        ]
+        if not tokens:
+            return None, "I need at least one app or allowed host path to build that routine."
+        steps: list[dict[str, Any]] = []
+        unresolved: list[str] = []
+        for token in tokens:
+            cleaned = token.strip().strip("\"'").strip().rstrip(".")
+            cleaned = re.sub(r"^(?:my|the)\s+", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s+(?:folder|directory|file|app|window)$", "", cleaned, flags=re.IGNORECASE)
+            if not cleaned:
+                continue
+            if cleaned.lower() in aliases:
+                steps.append({"type": "open_app", "target": cleaned.lower()})
+                continue
+            resolved_path, error_text = await self._resolve_desktop_routine_target(session_key, cleaned, metadata)
+            if error_text:
+                return None, error_text
+            if resolved_path is None:
+                unresolved.append(token.strip())
+                continue
+            steps.append({"type": "open_host_path", "path": resolved_path})
+        if not steps:
+            return None, "I couldn't resolve any apps or allowed host paths for that routine."
+        if unresolved:
+            joined = ", ".join(unresolved)
+            return None, (
+                f"I couldn't resolve these routine targets: {joined}. "
+                "Use a configured app alias like chrome/vscode or an allowed host folder or file."
+            )
+        return steps, None
+
+    async def _resolve_desktop_routine_target(
+        self,
+        session_key: str,
+        raw_target: str,
+        metadata: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        explicit_path = self._extract_explicit_host_path(raw_target)
+        if explicit_path is not None:
+            return explicit_path, None
+        resolved_path = await self._resolve_desktop_automation_path(session_key, raw_target, metadata)
+        if resolved_path is not None:
+            return resolved_path, None
+        try:
+            result = await self.tool_registry.dispatch(
+                "search_host_files",
+                {
+                    "root": "@allowed",
+                    "pattern": "*",
+                    "name_query": raw_target,
+                    "limit": 20,
+                    "session_key": session_key,
+                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                },
+            )
+        except Exception:
+            return None, None
+        ambiguous_folder_response = self._format_host_disambiguation_response(raw_target, result)
+        if ambiguous_folder_response is not None:
+            return None, ambiguous_folder_response
+        preferred_file = self._pick_file_match(raw_target, result)
+        preferred_folder = self._pick_folder_match_for_contents(raw_target, result)
+        if Path(raw_target).suffix:
+            if preferred_file is not None:
+                return str(preferred_file.get("path", "")) or None, None
+        else:
+            if preferred_folder is not None:
+                return str(preferred_folder.get("path", "")) or None, None
+        if preferred_folder is not None and preferred_file is None:
+            return str(preferred_folder.get("path", "")) or None, None
+        if preferred_file is not None and preferred_folder is None:
+            return str(preferred_file.get("path", "")) or None, None
+        matches = list(result.get("matches", []))
+        if len(matches) == 1:
+            return str(matches[0].get("path", "")) or None, None
+        files = [match for match in matches if not match.get("is_dir")]
+        if len(files) > 1:
+            return None, self._format_host_file_disambiguation_response(raw_target, result)
+        return None, None
+
+    def _build_next_desktop_routine_run_at(self, time_text: str) -> datetime | None:
+        parsed_time = self._parse_reminder_time(time_text)
+        if parsed_time is None:
+            return None
+        hour, minute = parsed_time
+        now = datetime.now().astimezone()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target = target + timedelta(days=1)
+        return target
+
+    def _format_desktop_routine_creation_response(self, rule: dict[str, Any]) -> str:
+        display_name = str(rule.get("name") or rule.get("display_name") or rule.get("routine_id", "desktop routine"))
+        trigger_type = str(rule.get("trigger_type", "manual"))
+        summary = str(rule.get("summary", "")).strip() or "desktop routine"
+        lines = [f"Created desktop routine '{display_name}'."]
+        if trigger_type == "schedule":
+            lines.append(f"Trigger: schedule {rule.get('schedule', '')}")
+        elif trigger_type == "reminder":
+            lines.append(f"Trigger: reminder at {rule.get('run_at', '')}")
+        elif trigger_type == "file_watch":
+            watch_path = str(rule.get("watch_path", "")).strip()
+            lines.append(f"Trigger: watch {watch_path}")
+        else:
+            lines.append("Trigger: manual")
+        lines.append(f"Summary: {summary}")
+        step_count = len(rule.get("steps", [])) if isinstance(rule.get("steps"), list) else 0
+        if step_count:
+            lines.append(f"Steps: {step_count}")
+        risky_steps = self._count_desktop_routine_risky_steps(rule.get("steps", []))
+        if risky_steps:
+            lines.append(f"Risky steps: {risky_steps} (approvals will be requested at run time)")
+        return "\n".join(lines)
+
+    def _filter_desktop_routines(self, rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            rule
+            for rule in rules
+            if str(rule.get("trigger", "")).lower() == "desktop_routine"
+            or str(rule.get("name", "")).lower().startswith("routine:")
+            or bool(rule.get("routine"))
+        ]
+
+    def _format_desktop_routines_response(self, rules: list[dict[str, Any]]) -> str:
+        if not rules:
+            return "No desktop routines configured."
+        lines = ["Desktop routines:"]
+        for rule in rules:
+            display_name = str(rule.get("display_name") or rule.get("name", "desktop routine"))
+            state = "paused" if bool(rule.get("paused")) else "active"
+            trigger_type = str(rule.get("trigger_type", "manual"))
+            if trigger_type == "schedule":
+                trigger_summary = str(rule.get("schedule", ""))
+            elif trigger_type == "reminder":
+                trigger_summary = str(rule.get("run_at", ""))
+            elif trigger_type == "file_watch":
+                trigger_summary = str(rule.get("watch_path", ""))
+            else:
+                trigger_summary = "manual"
+            risky_text = ""
+            risky_steps = int(rule.get("risky_step_count", 0) or 0)
+            if risky_steps:
+                risky_text = f" | risky steps: {risky_steps}"
+            lines.append(
+                f"- {display_name}: {state} | {trigger_type} | {trigger_summary} | {rule.get('summary', 'desktop routine')}{risky_text}"
+            )
+        return "\n".join(lines)
+
+    def _format_desktop_routine_show_response(self, rule: dict[str, Any]) -> str:
+        display_name = str(rule.get("display_name") or rule.get("name", "desktop routine"))
+        lines = [f"Desktop routine: {display_name}"]
+        lines.append(f"Trigger: {rule.get('trigger_type', 'manual')}")
+        if rule.get("schedule"):
+            lines.append(f"Schedule: {rule.get('schedule')}")
+        if rule.get("run_at"):
+            lines.append(f"Run at: {rule.get('run_at')}")
+        if rule.get("watch_path"):
+            lines.append(f"Watch path: {rule.get('watch_path')}")
+        lines.append(f"Summary: {rule.get('summary', 'desktop routine')}")
+        steps = list(rule.get("steps", []))
+        if steps:
+            lines.append("Steps:")
+            for index, step in enumerate(steps, start=1):
+                lines.append(f"{index}. {self._describe_desktop_routine_step(step)}")
+        risky_steps = int(rule.get("risky_step_count", self._count_desktop_routine_risky_steps(steps)) or 0)
+        if risky_steps:
+            lines.append(f"Risky steps: {risky_steps}")
+        return "\n".join(lines)
+
+    def _match_desktop_routine_reference(
+        self,
+        rules: list[dict[str, Any]],
+        raw_reference: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        reference = raw_reference.strip().strip("\"'")
+        if not reference:
+            return None, "Please provide a desktop routine name."
+        compact_reference = self._compact_search_name(reference.removeprefix("desktop routine").strip())
+        exact_matches: list[dict[str, Any]] = []
+        partial_matches: list[dict[str, Any]] = []
+        for rule in rules:
+            candidates = {
+                str(rule.get("name", "")),
+                str(rule.get("display_name", "")),
+                str(rule.get("routine_id", "")),
+            }
+            compact_candidates = {self._compact_search_name(candidate) for candidate in candidates if candidate}
+            if compact_reference in compact_candidates:
+                exact_matches.append(rule)
+                continue
+            if any(compact_reference and compact_reference in candidate for candidate in compact_candidates):
+                partial_matches.append(rule)
+        if len(exact_matches) == 1:
+            return exact_matches[0], None
+        if len(exact_matches) > 1:
+            names = ", ".join(str(rule.get("display_name") or rule.get("name", "desktop routine")) for rule in exact_matches[:5])
+            return None, f"I found multiple desktop routines matching that name: {names}."
+        if len(partial_matches) == 1:
+            return partial_matches[0], None
+        if len(partial_matches) > 1:
+            names = ", ".join(str(rule.get("display_name") or rule.get("name", "desktop routine")) for rule in partial_matches[:5])
+            return None, f"I found multiple desktop routines matching that name: {names}."
+        return None, f"I couldn't find a desktop routine named '{reference}'."
+
+    def _describe_desktop_routine_step(self, step: dict[str, Any]) -> str:
+        step_type = str(step.get("type", "")).strip().lower()
+        if step_type == "open_app":
+            return f"open app {step.get('target', 'app')}"
+        if step_type == "open_host_path":
+            return f"open {step.get('path', 'path')}"
+        if step_type == "move_host_file":
+            return f"move {step.get('source', '{event_path}')} to {step.get('destination', '')}"
+        if step_type == "copy_host_file":
+            return f"copy {step.get('source', '{event_path}')} to {step.get('destination', '')}"
+        if step_type == "notify":
+            return f"notify: {step.get('text', '')}"
+        if step_type == "desktop_keyboard_hotkey":
+            return f"press {step.get('hotkey', 'hotkey')}"
+        if step_type == "desktop_keyboard_type":
+            return "type text"
+        if step_type == "desktop_mouse_click":
+            return f"click at ({step.get('x', '?')}, {step.get('y', '?')})"
+        return step_type.replace("_", " ")
+
+    def _count_desktop_routine_risky_steps(self, steps: Any) -> int:
+        if not isinstance(steps, list):
+            return 0
+        safe_hotkeys = {str(item).strip().lower() for item in getattr(self.config.desktop_input, "safe_hotkeys", [])}
+        risky = 0
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            step_type = str(step.get("type", "")).strip().lower()
+            if step_type in {
+                "desktop_mouse_click",
+                "desktop_keyboard_type",
+                "desktop_clipboard_write",
+                "write_host_file",
+                "delete_host_file",
+                "move_host_file",
+            }:
+                risky += 1
+                continue
+            if step_type == "desktop_keyboard_hotkey":
+                hotkey = "+".join(part.strip().lower() for part in str(step.get("hotkey", "")).split("+") if part.strip())
+                if hotkey not in safe_hotkeys:
+                    risky += 1
+        return risky
+
     def _skill_payload(self, skill: Any) -> dict[str, Any]:
         return {
             "name": skill.name,
@@ -2275,6 +4389,23 @@ class GatewayRouter:
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned or None
 
+    def _is_contextual_folder_reference(self, value: str) -> bool:
+        compact = self._compact_search_name(value)
+        return compact in {
+            "that",
+            "this",
+            "there",
+            "here",
+            "thatfolder",
+            "thisfolder",
+            "therefolder",
+            "herefolder",
+            "thatdirectory",
+            "thisdirectory",
+            "theredirectory",
+            "heredirectory",
+        }
+
     def _extract_host_search_root(self, lowered: str) -> str | None:
         path_match = re.search(r"\b([a-z]):[\\/]", lowered)
         if path_match:
@@ -2414,10 +4545,11 @@ class GatewayRouter:
                     explicit_root,
                     metadata,
                 )
-                if resolution.get("response_text"):
+                if resolution is not None and resolution.get("response_text"):
                     return {"response_text": str(resolution["response_text"])}
-                target_dir = resolution.get("path")
-            elif any(
+                if resolution is not None:
+                    target_dir = resolution.get("path")
+            if target_dir is None and any(
                 token in lowered
                 for token in (" there", " here", "that folder", "this folder", "inside this", "inside that")
             ):
@@ -2486,7 +4618,7 @@ class GatewayRouter:
             if not match:
                 continue
             term = self._clean_host_search_term(match.group(1))
-            if term and term not in {"that", "this", "there", "here"}:
+            if term and not self._is_contextual_folder_reference(term):
                 return term
         return None
 
@@ -2562,6 +4694,14 @@ class GatewayRouter:
         explicit_root: str | None,
         metadata: dict[str, Any],
     ) -> str | None:
+        recent_direct_path = await self._resolve_recent_host_directory_direct_path(session_key)
+        if recent_direct_path is not None:
+            if explicit_root is None:
+                return recent_direct_path
+            normalized_root = explicit_root.replace("\\", "/").rstrip("/").lower()
+            normalized_path = recent_direct_path.replace("\\", "/").lower()
+            if normalized_path.startswith(f"{normalized_root}/") or normalized_path == normalized_root:
+                return recent_direct_path
         history = await self.session_manager.session_history(session_key, limit=12)
         patterns = (
             r"inside the\s+([A-Za-z]:[\\/][^\n:]+?)\s+folder:",
@@ -2824,7 +4964,7 @@ class GatewayRouter:
             if not match:
                 continue
             term = self._clean_host_search_term(match.group(1))
-            if term and term not in {"that", "this", "there", "here"}:
+            if term and not self._is_contextual_folder_reference(term):
                 return term
         return None
 

@@ -44,9 +44,16 @@ class DesktopAutomationWatcher:
 
     async def _scan_once(self) -> None:
         rules = await self.automation_engine.list_all_desktop_rules()
+        routine_rules = await self.automation_engine.list_all_desktop_routines()
         watch_rules = [rule for rule in rules if str(rule.get("trigger_type")) == "file_watch" and not bool(rule.get("paused"))]
+        watch_routines = [
+            routine
+            for routine in routine_rules
+            if str(routine.get("trigger_type")) == "file_watch" and not bool(routine.get("paused"))
+        ]
         new_snapshot: dict[tuple[str, str], tuple[float, int]] = {}
-        for rule in watch_rules:
+        for entry in [(rule, "rule") for rule in watch_rules] + [(routine, "routine") for routine in watch_routines]:
+            rule, kind = entry
             watch_path = Path(str(rule.get("watch_path", "")))
             if not watch_path.exists() or not watch_path.is_dir():
                 continue
@@ -56,24 +63,41 @@ class DesktopAutomationWatcher:
                 if self._should_ignore(child):
                     continue
                 stat = child.stat()
-                key = (str(rule.get("rule_id")), str(child))
+                identifier = str(rule.get("rule_id" if kind == "rule" else "routine_id"))
+                key = (f"{kind}:{identifier}", str(child))
                 marker = (stat.st_mtime, stat.st_size)
                 previous = self._snapshot.get(key)
                 new_snapshot[key] = marker
                 if previous is None:
-                    await self.automation_engine.handle_desktop_watch_event(
-                        rule_id=str(rule["rule_id"]),
-                        user_id=str(rule["user_id"]),
-                        event_type="file_created",
-                        path=str(child),
-                    )
+                    if kind == "rule":
+                        await self.automation_engine.handle_desktop_watch_event(
+                            rule_id=str(rule["rule_id"]),
+                            user_id=str(rule["user_id"]),
+                            event_type="file_created",
+                            path=str(child),
+                        )
+                    else:
+                        await self.automation_engine.handle_desktop_routine_watch_event(
+                            routine_id=str(rule["routine_id"]),
+                            user_id=str(rule["user_id"]),
+                            event_type="file_created",
+                            path=str(child),
+                        )
                 elif previous != marker:
-                    await self.automation_engine.handle_desktop_watch_event(
-                        rule_id=str(rule["rule_id"]),
-                        user_id=str(rule["user_id"]),
-                        event_type="file_modified",
-                        path=str(child),
-                    )
+                    if kind == "rule":
+                        await self.automation_engine.handle_desktop_watch_event(
+                            rule_id=str(rule["rule_id"]),
+                            user_id=str(rule["user_id"]),
+                            event_type="file_modified",
+                            path=str(child),
+                        )
+                    else:
+                        await self.automation_engine.handle_desktop_routine_watch_event(
+                            routine_id=str(rule["routine_id"]),
+                            user_id=str(rule["user_id"]),
+                            event_type="file_modified",
+                            path=str(child),
+                        )
         self._snapshot = new_snapshot
 
     def _should_ignore(self, path: Path) -> bool:

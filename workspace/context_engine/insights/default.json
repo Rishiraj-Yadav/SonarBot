@@ -1,0 +1,39 @@
+{
+  "sent": [
+    {
+      "fingerprint": "google-ai-studio-disruption-warning-2026-04",
+      "title": "Action Required: Potential Google AI Studio Service Disruption",
+      "sent_at": "2026-04-01T13:21:03.268531+00:00",
+      "confidence": 1.0,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "automation-error-cron-0-bad-request",
+      "title": "Recurring Automation Failure",
+      "sent_at": "2026-04-01T13:21:03.889019+00:00",
+      "confidence": 1.0,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "automation_failure_google_ai_account_2026_04_01",
+      "title": "Automation Failures Likely Linked to Google AI Studio Account",
+      "sent_at": "2026-04-01T13:47:37.095949+00:00",
+      "confidence": 0.95,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "automation-failure-google-ai-studio-billing-2026-04-01",
+      "title": "Critical: Automations Failing Due to Google AI Studio Account",
+      "sent_at": "2026-04-01T13:52:43.408562+00:00",
+      "confidence": 0.99,
+      "urgency": 0.95
+    },
+    {
+      "fingerprint": "system_failure_google_ai_account_action_required_20260401",
+      "title": "System-Wide Failures Persist: Google AI Account Action Still Required",
+      "sent_at": "2026-04-01T14:07:04.488885+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    }
+  ]
+}

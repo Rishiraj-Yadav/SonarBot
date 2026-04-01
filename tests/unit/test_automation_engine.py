@@ -50,6 +50,8 @@ class FakeScheduler:
         self.removed: list[str] = []
         self.desktop_registered: list[dict[str, object]] = []
         self.desktop_removed: list[str] = []
+        self.routine_registered: list[dict[str, object]] = []
+        self.routine_removed: list[str] = []
 
     async def register_dynamic_job(self, job: dict[str, object]) -> None:
         self.registered.append(dict(job))
@@ -69,6 +71,12 @@ class FakeScheduler:
     async def remove_desktop_rule(self, rule_id: str) -> None:
         self.desktop_removed.append(rule_id)
 
+    async def register_desktop_routine(self, routine: dict[str, object]) -> None:
+        self.routine_registered.append(dict(routine))
+
+    async def remove_desktop_routine(self, routine_id: str) -> None:
+        self.routine_removed.append(routine_id)
+
 
 class FakeSystemAccessManager:
     def __init__(self) -> None:
@@ -86,6 +94,55 @@ class FakeSystemAccessManager:
 
     async def write_host_file(self, *, path: str, content: str, session_key: str, session_id: str, user_id: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
         return {"status": "completed", "path": path, "content": content}
+
+
+class FakeToolRegistry:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def dispatch(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append((tool_name, dict(payload)))
+        if tool_name == "apps_open":
+            return {"status": "completed", "alias": payload.get("target", "app"), "path": "C:/Program Files/app.exe"}
+        if tool_name == "desktop_keyboard_hotkey":
+            return {"status": "completed", "hotkey": payload.get("hotkey", "")}
+        if tool_name == "desktop_screenshot":
+            return {"status": "completed", "path": "workspace/desktop/desktop-1.png"}
+        if tool_name == "desktop_read_screen":
+            return {"status": "completed", "path": "workspace/desktop/desktop-1.png", "content": "Visible text"}
+        if tool_name == "move_host_file":
+            return {
+                "status": "completed",
+                "source": payload.get("source", ""),
+                "destination": payload.get("destination", ""),
+            }
+        if tool_name == "copy_host_file":
+            return {
+                "status": "completed",
+                "source": payload.get("source", ""),
+                "destination": payload.get("destination", ""),
+            }
+        if tool_name == "delete_host_file":
+            return {"status": "completed", "path": payload.get("path", "")}
+        if tool_name == "write_host_file":
+            return {"status": "completed", "path": payload.get("path", ""), "content": payload.get("content", "")}
+        if tool_name == "list_host_dir":
+            return {"status": "completed", "entries": [], "path": payload.get("path", "")}
+        if tool_name == "read_host_file":
+            return {"status": "completed", "path": payload.get("path", ""), "content": "hello"}
+        if tool_name == "exec_shell":
+            return {"status": "completed", "stdout": "", "stderr": "", "exit_code": 0}
+        if tool_name == "desktop_keyboard_type":
+            return {"status": "completed", "characters_typed": len(str(payload.get("text", "")))}
+        if tool_name == "desktop_mouse_move":
+            return {"status": "completed", "x": payload.get("x", 0), "y": payload.get("y", 0)}
+        if tool_name == "desktop_mouse_click":
+            return {"status": "completed", "x": payload.get("x", 0), "y": payload.get("y", 0)}
+        if tool_name == "desktop_clipboard_read":
+            return {"status": "completed", "content": "copied"}
+        if tool_name == "desktop_clipboard_write":
+            return {"status": "completed", "char_count": len(str(payload.get("text", "")))}
+        raise AssertionError(f"Unexpected tool call: {tool_name}")
 
 
 @pytest.mark.asyncio
@@ -310,3 +367,87 @@ async def test_automation_engine_creates_desktop_rules_and_executes_watch_event(
         ("R:/Download2/report.pdf", "R:/Documents/PDFs/report.pdf")
     ]
     assert scheduler.desktop_registered and scheduler.desktop_registered[0]["rule_id"] == scheduled["rule_id"]
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_creates_manual_desktop_routine_and_runs_it(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    tool_registry = FakeToolRegistry()
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+        tool_registry=tool_registry,
+    )
+
+    created = await engine.create_desktop_routine_rule(
+        app_config.users.default_user_id,
+        name="Study mode",
+        trigger_type="manual",
+        steps=[
+            {"type": "open_app", "target": "chrome"},
+            {"type": "notify", "text": "Study mode ready."},
+        ],
+    )
+    rules = await engine.list_rules(app_config.users.default_user_id)
+    result = await engine.run_desktop_routine_now(
+        app_config.users.default_user_id,
+        str(created["routine_id"]),
+        notify=False,
+    )
+
+    assert any(item["name"] == f"routine:{created['routine_id']}" for item in rules)
+    assert result["status"] == "completed"
+    assert tool_registry.calls[0][0] == "apps_open"
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_registers_scheduled_desktop_routine_with_scheduler(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    tool_registry = FakeToolRegistry()
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+        tool_registry=tool_registry,
+    )
+    scheduler = FakeScheduler()
+    engine.set_scheduler(scheduler)
+
+    created = await engine.create_desktop_routine_rule(
+        app_config.users.default_user_id,
+        name="Morning setup",
+        trigger_type="schedule",
+        schedule="0 9 * * 1-5",
+        steps=[{"type": "open_app", "target": "chrome"}],
+    )
+    paused = await engine.pause_desktop_routine(app_config.users.default_user_id, str(created["routine_id"]))
+    resumed = await engine.resume_desktop_routine(app_config.users.default_user_id, str(created["routine_id"]))
+
+    assert created["schedule"] == "0 9 * * 1-5"
+    assert scheduler.routine_registered and scheduler.routine_registered[0]["routine_id"] == created["routine_id"]
+    assert paused["paused"] is True
+    assert resumed["paused"] is False
+    assert scheduler.routine_removed == [str(created["routine_id"])]

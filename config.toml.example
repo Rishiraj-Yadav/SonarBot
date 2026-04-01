@@ -52,7 +52,9 @@ inbox_retention_days = 30
 default_severity = "info"
 
 [automation.desktop]
+# Enables desktop file-watch automations and Phase 4 desktop routines.
 enabled = false
+# Only required for file-watch triggers. Scheduled/manual/reminder routines work with watch_enabled = false.
 watch_enabled = false
 ignored_patterns = ["~$*", "*.tmp", "*.temp", "*.crdownload", "*.part", ".DS_Store"]
 event_debounce_ms = 1500
@@ -92,6 +94,67 @@ browser_screenshots_subdir = "browser"
 browser_downloads_subdir = "inbox/browser_downloads"
 browser_log_retention = 200
 browser_screenshot_stream_interval_seconds = 3
+
+[desktop_apps]
+enabled = false
+allow_layout_changes = true
+launch_timeout_seconds = 8
+known_apps = { chrome = "C:/Program Files/Google/Chrome/Application/chrome.exe", edge = "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", vscode = "~/AppData/Local/Programs/Microsoft VS Code/Code.exe", notepad = "C:/Windows/System32/notepad.exe", explorer = "C:/Windows/explorer.exe", word = "C:/Program Files (x86)/Microsoft Office/root/Office16/WINWORD.EXE", excel = "C:/Program Files (x86)/Microsoft Office/root/Office16/EXCEL.EXE", outlook = "C:/Program Files (x86)/Microsoft Office/root/Office16/OUTLOOK.EXE", whatsapp = "~/AppData/Local/WhatsApp/WhatsApp.exe", taskmanager = "C:/Windows/System32/taskmgr.exe", settings = "C:/Windows/ImmersiveControlPanel/SystemSettings.exe", calculator = "C:/Windows/System32/calc.exe", cmd = "C:/Windows/System32/cmd.exe", powershell = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" }
+
+[desktop_vision]
+enabled = false
+ocr_enabled = true
+screenshots_subdir = "desktop"
+capture_format = "png"
+max_ocr_characters = 12000
+
+[desktop_input]
+enabled = false
+keyboard_enabled = true
+mouse_enabled = true
+clipboard_enabled = true
+allow_absolute_coordinates = true
+max_type_chars = 500
+confirm_clicks = true
+confirm_typing = true
+confirm_clipboard_write = true
+confirm_risky_hotkeys = true
+safe_hotkeys = ["ctrl+c", "ctrl+a", "ctrl+f", "tab", "shift+tab", "up", "down", "left", "right", "pageup", "pagedown", "home", "end", "esc"]
+
+[app_skills]
+enabled = false
+vscode_enabled = true
+documents_enabled = true
+excel_enabled = true
+browser_enabled = true
+system_enabled = true
+task_manager_enabled = true
+presets_enabled = true
+browser_headed_for_workspaces = true
+
+[app_skills.presets]
+enabled = true
+study_apps = ["explorer", "chrome"]
+study_folder_hints = ["6_semester", "6 semester", "5_sem", "5 sem"]
+study_browser_urls = []
+work_apps = ["vscode", "chrome"]
+work_folder_hints = ["workspace", "documents"]
+work_browser_urls = []
+meeting_apps = ["chrome"]
+meeting_browser_urls = []
+
+[desktop_coworker]
+enabled = false
+max_steps_per_task = 6
+max_retries_per_step = 2
+verification_required_by_default = true
+ask_before_submission = true
+screenshot_after_each_step = true
+ocr_after_each_step = false
+store_transcripts = true
+allow_semantic_clicks = false
+allow_ui_text_entry = true
+stop_on_low_confidence = true
 
 [oauth.google]
 client_id = ""

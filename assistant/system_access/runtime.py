@@ -152,6 +152,18 @@ class SystemAccessRuntime:
             "file_format": file_format,
         }
 
+    async def read_bytes(self, path: Path, max_bytes: int = 4_000_000) -> dict[str, object]:
+        stat_result = await asyncio.to_thread(path.stat)
+        if stat_result.st_size > max_bytes:
+            raise ValueError(f"File is too large to read ({stat_result.st_size} bytes).")
+        data = await asyncio.to_thread(path.read_bytes)
+        return {
+            "path": str(path),
+            "content_bytes": data,
+            "bytes_read": len(data),
+            "file_format": self._infer_write_format(path),
+        }
+
     async def write_text(self, path: Path, content: str) -> dict[str, object]:
         def _write() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +210,24 @@ class SystemAccessRuntime:
                 except OSError:
                     pass
         return {"path": str(path), "bytes_written": bytes_written, "file_format": file_format}
+
+    async def write_bytes(self, path: Path, data: bytes) -> dict[str, object]:
+        def _write() -> int:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+            temp_path.write_bytes(data)
+            os.replace(temp_path, path)
+            return len(data)
+
+        try:
+            bytes_written = await asyncio.to_thread(_write)
+        finally:
+            for leftover in path.parent.glob(f".{path.name}.*.tmp"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+        return {"path": str(path), "bytes_written": bytes_written, "file_format": path.suffix.lower().lstrip(".") or "binary"}
 
     def _read_text_with_fallbacks(self, path: Path) -> str:
         encodings = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
