@@ -18,13 +18,14 @@ class GeminiConfigurationError(RuntimeError):
 
 
 class GeminiProvider(ModelProvider):
-    """Thin REST wrapper around the Gemini generateContent endpoint."""
+    """Thin REST wrapper around Gemini content generation endpoints."""
 
     def __init__(self, api_key: str, model: str) -> None:
         self.api_key = api_key
         self.model = model
         self.circuit_breaker = CircuitBreaker(failure_threshold=5, reset_timeout_seconds=60)
         self.logger = get_logger("gemini_provider", model=model)
+        self._client = httpx.AsyncClient(timeout=60.0)
 
     async def complete(
         self,
@@ -39,9 +40,29 @@ class GeminiProvider(ModelProvider):
             raise RuntimeError("LLM provider temporarily unavailable due to repeated failures. Please retry shortly.")
 
         payload = self._build_payload(messages=messages, system=system, tools=tools)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
         try:
+            if stream:
+                collected_tool_calls: list[ToolCall] = []
+                seen_tool_calls: set[tuple[str, str]] = set()
+                usage: UsageStats | None = None
+                async for chunk in self._perform_stream_request(payload):
+                    text, tool_calls, parsed_usage = self._parse_response(chunk)
+                    if parsed_usage is not None:
+                        usage = parsed_usage
+                    if text:
+                        yield ModelResponse(text=text)
+                    for call in tool_calls:
+                        signature = (call.name, json.dumps(call.arguments, sort_keys=True))
+                        if signature in seen_tool_calls:
+                            continue
+                        seen_tool_calls.add(signature)
+                        collected_tool_calls.append(call)
+                self.circuit_breaker.record_success()
+                yield ModelResponse(tool_calls=collected_tool_calls, usage=usage, done=True)
+                return
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
             data = await self._perform_request(url, payload)
             self.circuit_breaker.record_success()
         except GeminiConfigurationError as exc:
@@ -63,46 +84,131 @@ class GeminiProvider(ModelProvider):
             raise
         text, tool_calls, usage = self._parse_response(data)
         if text:
-            if stream:
-                for chunk in self._chunk_text(text):
-                    yield ModelResponse(text=chunk)
-            else:
-                yield ModelResponse(text=text)
+            yield ModelResponse(text=text)
 
         yield ModelResponse(tool_calls=tool_calls, usage=usage, done=True)
 
+    async def _perform_stream_request(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:streamGenerateContent"
+        async with self._client.stream(
+            "POST",
+            url,
+            params={"key": self.api_key, "alt": "sse"},
+            json=payload,
+        ) as response:
+            if int(response.status_code) >= 400:
+                await response.aread()
+                configuration_error = self._configuration_error_for_response(response)
+                if configuration_error is not None:
+                    raise configuration_error
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError:
+                    self.logger.error(
+                        "gemini_http_error",
+                        status_code=response.status_code,
+                        response_text=response.text[:2000],
+                    )
+                    raise
+
+            event_lines: list[str] = []
+            async for raw_line in response.aiter_lines():
+                line = raw_line.strip()
+                if not line:
+                    payload_text = "\n".join(event_lines).strip()
+                    event_lines = []
+                    if not payload_text or payload_text == "[DONE]":
+                        continue
+                    try:
+                        parsed = json.loads(payload_text)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(parsed, dict):
+                        yield parsed
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    event_lines.append(line[5:].strip())
+
+            if event_lines:
+                payload_text = "\n".join(event_lines).strip()
+                if payload_text and payload_text != "[DONE]":
+                    try:
+                        parsed = json.loads(payload_text)
+                    except json.JSONDecodeError:
+                        return
+                    if isinstance(parsed, dict):
+                        yield parsed
+
     @async_retry(max_attempts=3, base_delay=0.5, non_retry_exceptions=(GeminiConfigurationError,))
     async def _perform_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, params={"key": self.api_key}, json=payload)
-            configuration_error = self._configuration_error_for_response(response)
-            if configuration_error is not None:
-                raise configuration_error
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError:
-                self.logger.error(
-                    "gemini_http_error",
-                    status_code=response.status_code,
-                    response_text=response.text[:2000],
-                )
-                raise
+        response = await self._client.post(url, params={"key": self.api_key}, json=payload)
+        configuration_error = self._configuration_error_for_response(response)
+        if configuration_error is not None:
+            raise configuration_error
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            self.logger.error(
+                "gemini_http_error",
+                status_code=response.status_code,
+                response_text=response.text[:2000],
+            )
+            raise
         return response.json()
 
     def _configuration_error_for_response(self, response: httpx.Response) -> GeminiConfigurationError | None:
         status_code = int(response.status_code)
         text = response.text.strip()
         lowered = text.lower()
+        structured_error = self._extract_error_payload(response)
+        detail_reasons = self._extract_error_reasons(structured_error)
         if status_code == 403 and "reported as leaked" in lowered:
             return GeminiConfigurationError(
                 "Gemini rejected the configured API key because it was reported as leaked. "
-                "Replace llm.gemini_api_key in C:\\Users\\Ritesh\\.assistant\\config.toml and restart SonarBot."
+                "Replace llm.gemini_api_key (or GEMINI_API_KEY) and restart SonarBot."
             )
-        if status_code in {401, 403} and any(marker in lowered for marker in ("api key", "permission_denied", "permission denied")):
+        if status_code == 400 and (
+            "api key expired" in lowered
+            or "api_key_invalid" in lowered
+            or "api key invalid" in lowered
+            or "api_key_invalid" in detail_reasons
+        ):
             return GeminiConfigurationError(
-                "Gemini rejected the configured API key. Update llm.gemini_api_key in C:\\Users\\Ritesh\\.assistant\\config.toml and restart SonarBot."
+                "Gemini rejected the configured API key because it is expired or invalid. "
+                "Replace llm.gemini_api_key (or GEMINI_API_KEY) and restart SonarBot."
+            )
+        if status_code in {401, 403} and any(
+            marker in lowered for marker in ("api key", "permission_denied", "permission denied")
+        ):
+            return GeminiConfigurationError(
+                "Gemini rejected the configured API key. Replace llm.gemini_api_key (or GEMINI_API_KEY) and restart SonarBot."
             )
         return None
+
+    def _extract_error_payload(self, response: httpx.Response) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _extract_error_reasons(self, payload: dict[str, Any]) -> set[str]:
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return set()
+        details = error.get("details")
+        if not isinstance(details, list):
+            return set()
+        reasons: set[str] = set()
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            reason = item.get("reason")
+            if isinstance(reason, str) and reason:
+                reasons.add(reason.lower())
+        return reasons
 
     def _build_payload(
         self,

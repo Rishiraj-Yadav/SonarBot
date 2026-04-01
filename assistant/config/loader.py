@@ -33,6 +33,12 @@ ENV_MAPPING: dict[str, tuple[str, ...]] = {
     "GOOGLE_CLIENT_SECRET": ("oauth", "google", "client_secret"),
     "GITHUB_CLIENT_ID": ("oauth", "github", "client_id"),
     "GITHUB_CLIENT_SECRET": ("oauth", "github", "client_secret"),
+    "ML_ENABLED": ("ml", "enabled"),
+    "ML_TOOL_ROUTER_ENABLED": ("ml", "tool_router", "enabled"),
+    "ML_TOOL_ROUTER_SHADOW_MODE": ("ml", "tool_router", "shadow_mode"),
+    "ML_TOOL_ROUTER_MIN_CONFIDENCE": ("ml", "tool_router", "min_confidence"),
+    "ML_TOOL_ROUTER_MODEL_PATH": ("ml", "tool_router", "model_path"),
+    "ML_METRICS_LOG_PATH": ("ml", "metrics_log_path"),
 }
 
 

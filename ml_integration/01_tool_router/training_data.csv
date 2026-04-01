@@ -1,0 +1,62 @@
+message,tools
+read the README.md file,read_file|llm_task
+open and summarize docs/plan.md,read_file|llm_task
+show me what is in config.toml,read_file|llm_task
+list all files in workspace,list_files|llm_task
+show directory tree,list_files|llm_task
+create notes.txt with hello world,write_file|llm_task
+write this json to data.json,write_file|llm_task
+append this line to TODO.md,write_file|read_file|llm_task
+search web for python asyncio tutorial,search_web|llm_task
+google latest ai news,search_web|llm_task
+look up weather in delhi,search_web|llm_task
+show my latest email,gmail_latest_email|llm_task
+check newest mail from inbox,gmail_latest_email|llm_task
+how many github repos do i have,github_list_repos|llm_task
+count my repositories on github,github_list_repos|llm_task
+list pull requests for octo repo,github_list_pull_requests|llm_task
+open github.com in browser,browser_navigate|browser_tabs_list|llm_task
+go to leetcode and search two sum,browser_navigate|browser_type|browser_click|llm_task
+click the first search result,browser_click|llm_task
+type hello into input box,browser_type|llm_task
+switch to tab 2,browser_tab_switch|browser_tabs_list|llm_task
+close current browser tab,browser_tab_close|browser_tabs_list|llm_task
+show browser tabs,browser_tabs_list|llm_task
+take browser screenshot,browser_screenshot|llm_task
+show browser logs,browser_logs|llm_task
+show browser downloads,browser_downloads_list|llm_task
+login to gmail in browser,browser_login|browser_navigate|llm_task
+extract table from this page,browser_extract_table|llm_task
+fill this web form with details,browser_fill_form|llm_task
+upload file in browser,browser_upload|llm_task
+read my memory,memory_read|llm_task
+save this preference to memory,memory_write|llm_task
+search memory for coffee preference,memory_search|llm_task
+what can you do,llm_task
+hello,llm_task
+thanks,llm_task
+who are you,llm_task
+set brightness to 40 percent,set_windows_brightness|llm_task
+open notepad on my pc,exec_shell|llm_task
+list files in downloads on host,list_host_dir|llm_task
+find report.pdf on my host pc,search_host_files|llm_task
+read C:\\Users\\User\\Downloads\\report.pdf,read_host_document|llm_task
+create C:\\Users\\User\\Desktop\\quick.txt with hi,write_host_file|llm_task
+delete C:\\Users\\User\\Desktop\\old.txt,delete_host_file|llm_task
+copy file from desktop to downloads,copy_host_file|llm_task
+move file from downloads to documents,move_host_file|llm_task
+connect google oauth,oauth_connect|llm_task
+show oauth status,oauth_status|llm_task
+read and summarize pdf_extract target,pdf_extract|llm_task
+send agent task to worker,agent_send|llm_task
+open browser and search github sonarbot,browser_navigate|browser_type|browser_click|llm_task
+check latest email then summarize,gmail_latest_email|llm_task
+list repos and open first in browser,github_list_repos|browser_navigate|browser_click|llm_task
+search host files named invoice,search_host_files|llm_task
+list host directory R drive,list_host_dir|llm_task
+remember that i like concise answers,memory_write|llm_task
+find similar memory about concise answers,memory_search|llm_task
+run quick classification task,llm_task
+search brave web for openai docs,search_web|llm_task
+open calendar website in browser,browser_navigate|llm_task
+switch browser tab and take screenshot,browser_tab_switch|browser_screenshot|llm_task

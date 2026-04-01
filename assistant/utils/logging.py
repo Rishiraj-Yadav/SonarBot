@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ def configure_logging(log_path: Path) -> None:
         handlers=[logging.FileHandler(log_path, encoding="utf-8"), logging.StreamHandler()],
         force=True,
     )
+    _suppress_noisy_dependencies()
     if structlog is None:
         return
     structlog.configure(
@@ -39,3 +41,20 @@ def get_logger(name: str, **fields: Any):
     if structlog is None:  # pragma: no cover - fallback logger
         return logging.getLogger(name)
     return structlog.get_logger(name).bind(**fields)
+
+
+def _suppress_noisy_dependencies() -> None:
+    for logger_name in (
+        "httpx",
+        "httpcore",
+        "sentence_transformers",
+        "transformers",
+        "huggingface_hub",
+        "watchfiles",
+        "watchfiles.main",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    warnings.filterwarnings(
+        "ignore",
+        message="You are sending unauthenticated requests to the HF Hub.*",
+    )

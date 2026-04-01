@@ -1,8 +1,9 @@
 import { WorkspaceHero } from "../../components/WorkspaceHero";
+import { gatewayUrl } from "../../lib/backend";
 
 async function getSettings() {
   try {
-    const response = await fetch("http://localhost:8765/api/settings", { cache: "no-store" });
+    const response = await fetch(gatewayUrl("/api/settings"), { cache: "no-store" });
     if (!response.ok) {
       return null;
     }

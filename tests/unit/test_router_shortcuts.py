@@ -61,6 +61,15 @@ class DummyHookRunner:
         return type("HookEvent", (), {"messages": []})()
 
 
+class TrackingHookRunner:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    async def fire_event(self, event_name: str, *, context: dict[str, object]):
+        self.events.append((event_name, context))
+        return type("HookEvent", (), {"messages": []})()
+
+
 class DummySkillRegistry:
     def __init__(self, enabled=None, matches=None) -> None:
         self._enabled = enabled or []
@@ -172,6 +181,7 @@ class DummyToolRegistry:
             "search_host_files",
             "exec_shell",
             "write_host_file",
+            "delete_host_file",
             "read_host_document",
             "set_windows_brightness",
         }:
@@ -330,6 +340,16 @@ class DummyToolRegistry:
                 "approval_mode": "session_cache",
                 "approval_category": "ask_once",
                 "audit_id": "audit-2",
+                "host": True,
+            }
+        if tool_name == "delete_host_file":
+            return {
+                "path": payload["path"],
+                "deleted": True,
+                "status": "completed",
+                "approval_mode": "session_cache",
+                "approval_category": "ask_once",
+                "audit_id": "audit-del",
                 "host": True,
             }
         if tool_name == "browser_sessions_list":
@@ -1700,6 +1720,72 @@ async def test_router_host_shortcut_selects_file_type_from_richer_reply(app_conf
         "read_host_document",
         "llm_task",
     ]
+
+
+@pytest.mark.asyncio
+async def test_router_host_file_selection_delete_first_then_yes_skips_browser_resume(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    browser_workflow_engine = ContextualBrowserWorkflowEngine()
+    session_manager = DummySessionManager()
+    session_manager.session.metadata["host_file_confirmation"] = {
+        "mode": "file_selection",
+        "display_name": "arch",
+        "candidates": [
+            {"name": "arch.png", "path": "C:/Users/User/Downloads/arch.png", "is_dir": False},
+            {"name": "architect.png", "path": "C:/Users/User/Downloads/architect.png", "is_dir": False},
+        ],
+    }
+    session_manager.session.metadata.update(
+        browser_task_state_update(
+            active_task={
+                "recipe_name": "calendar_book_event",
+                "site_name": "google calendar",
+                "query": "",
+                "execution_mode": "headless",
+                "awaiting_followup": "workflow_plan",
+            }
+        )
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        browser_workflow_engine=browser_workflow_engine,
+    )
+
+    first_response = await router.route_user_message(
+        connection_id="conn-host-delete-select",
+        request_id="req-host-delete-select",
+        session_key="telegram:123",
+        message="delete the first one",
+        metadata={"trace_id": "trace-host-delete-select", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    second_response = await router.route_user_message(
+        connection_id="conn-host-delete-confirm",
+        request_id="req-host-delete-confirm",
+        session_key="telegram:123",
+        message="yes",
+        metadata={"trace_id": "trace-host-delete-confirm", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert first_response.ok is True
+    assert "Do you mean delete `arch.png`?" in first_response.payload["command_response"]
+    assert second_response.ok is True
+    assert second_response.payload["command_response"] == "Deleted C:/Users/User/Downloads/arch.png."
+    assert [call[0] for call in tool_registry.calls[:1]] == ["delete_host_file"]
+    assert browser_workflow_engine.calls == []
     assert browser_workflow_engine.calls == []
 
 
@@ -1769,6 +1855,42 @@ async def test_router_host_shortcut_opens_notepad(app_config) -> None:
     assert response.ok is True
     assert "launched notepad" in response.payload["command_response"].lower()
     assert tool_registry.calls[0][0] == "exec_shell"
+    assert tool_registry.calls[0][1]["host"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_host_shortcut_opens_android_studio(app_config) -> None:
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-host-android-studio",
+        request_id="req-host-android-studio",
+        session_key="telegram:123",
+        message="open android studio",
+        metadata={"trace_id": "trace-host-android-studio", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "launched android_studio" in response.payload["command_response"].lower()
+    assert tool_registry.calls[0][0] == "exec_shell"
+    assert "studio64.exe" in str(tool_registry.calls[0][1]["command"]).lower()
     assert tool_registry.calls[0][1]["host"] is True
 
 
@@ -3027,3 +3149,67 @@ async def test_router_uses_classifier_for_plausible_skill_candidates(app_config)
     assert response.payload["activated_skill"] == "daily-briefing"
     enqueued = agent_loop.enqueued[-1]
     assert enqueued.metadata["skill_activation_source"] == "classifier"
+
+
+@pytest.mark.asyncio
+async def test_router_matches_natural_oauth_status_phrase(app_config) -> None:
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-oauth-natural",
+        request_id="req-oauth-natural",
+        session_key="webchat_main",
+        message="are my accounts linked?",
+        metadata={"trace_id": "trace-oauth-natural", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "OAuth providers" in response.payload["command_response"]
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_fire_message_received_hook(app_config) -> None:
+    hook_runner = TrackingHookRunner()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=hook_runner,
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-shortcut-hook",
+        request_id="req-shortcut-hook",
+        session_key="webchat_main",
+        message="show my latest email",
+        metadata={"trace_id": "trace-shortcut-hook", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert any(name == "message:received" for name, _ in hook_runner.events)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -31,6 +32,8 @@ class AgentLoop:
         event_emitter: EventEmitter,
         typing_emitter: TypingEmitter | None = None,
         memory_capture_runner=None,
+        tool_router=None,
+        ml_metrics_tracker=None,
     ) -> None:
         self.config = config
         self.model_provider = model_provider
@@ -40,6 +43,8 @@ class AgentLoop:
         self.event_emitter = event_emitter
         self.typing_emitter = typing_emitter
         self.memory_capture_runner = memory_capture_runner
+        self.tool_router = tool_router
+        self.ml_metrics_tracker = ml_metrics_tracker
         self.queue = AgentQueue()
         self.compaction_manager = CompactionManager(config, session_manager, model_provider, tool_registry)
         self._task: asyncio.Task[None] | None = None
@@ -135,10 +140,10 @@ class AgentLoop:
             create_message("user", request.message, **(request.metadata or {})),
         )
 
-        system_prompt = await self.system_prompt_builder.build()
+        initial_system_prompt = await self.system_prompt_builder.build()
         if request.system_suffix:
-            system_prompt = f"{system_prompt}\n\n{request.system_suffix}".strip()
-        await self.compaction_manager.maybe_compact(session, system_prompt)
+            initial_system_prompt = f"{initial_system_prompt}\n\n{request.system_suffix}".strip()
+        await self.compaction_manager.maybe_compact(session, initial_system_prompt)
 
         current_connection_id = request.connection_id
         final_text = ""
@@ -175,7 +180,7 @@ class AgentLoop:
                 final_text = assistant_text
             skip_assistant_record = request.silent and assistant_text.strip().upper() == "NO_REPLY" and not tool_calls
             if (assistant_text or tool_calls) and not skip_assistant_record:
-                persisted_assistant_text = "" if tool_calls else assistant_text
+                persisted_assistant_text = assistant_text
                 await self.session_manager.append_message(
                     session,
                     create_message(
@@ -195,6 +200,9 @@ class AgentLoop:
                         ),
                     ),
                 )
+                if assistant_text and tool_calls and not request.silent and current_connection_id:
+                    for chunk in self._chunk_for_delivery(assistant_text):
+                        await self.event_emitter(current_connection_id, "agent.chunk", {"text": chunk})
 
             if not tool_calls:
                 if request.result_future is not None and not request.result_future.done():
@@ -284,7 +292,7 @@ class AgentLoop:
         async for response in self.model_provider.complete(
             messages=model_messages,
             system=system_prompt,
-            tools=self.tool_registry.get_tools_schema(),
+            tools=self._tools_for_turn(model_messages),
             stream=True,
         ):
             if response.text:
@@ -294,6 +302,61 @@ class AgentLoop:
             if response.usage is not None:
                 usage = response.usage
         return text_chunks, tool_calls, usage
+
+    def _tools_for_turn(self, model_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        latest_user = ""
+        for message in reversed(model_messages):
+            if str(message.get("role", "")).strip().lower() == "user":
+                latest_user = str(message.get("content", "")).strip().lower()
+                break
+        if self._looks_like_small_talk(latest_user):
+            return []
+        schemas = self.tool_registry.get_tools_schema()
+        if self.tool_router is None:
+            return schemas
+        selected, decision = self.tool_router.select_tools(latest_user, schemas)
+        if self.ml_metrics_tracker is not None:
+            self.ml_metrics_tracker.record_tool_router(
+                tools_available=len(schemas),
+                tools_selected=len(selected),
+                confidence=decision.confidence,
+                fallback_used=decision.fallback_used,
+                latency_ms=decision.latency_ms,
+                reason=decision.reason,
+            )
+        return selected
+
+    def _looks_like_small_talk(self, message: str) -> bool:
+        if not message:
+            return False
+        normalized = re.sub(r"\s+", " ", message).strip().lower()
+        return normalized in {
+            "hey",
+            "hi",
+            "hello",
+            "thanks",
+            "thank you",
+            "ok thanks",
+            "okay thanks",
+            "bye",
+            "goodbye",
+            "how are you",
+            "what's up",
+            "whats up",
+            "cool",
+            "nice",
+            "awesome",
+            "great",
+            "got it",
+            "ok",
+            "okay",
+            "alright",
+            "sure",
+            "who are you",
+            "what can you do",
+            "lol",
+            "haha",
+        }
 
     def _default_context_limit(self, session_key: str) -> int | None:
         return 32 if session_key.startswith("automation:") else 64

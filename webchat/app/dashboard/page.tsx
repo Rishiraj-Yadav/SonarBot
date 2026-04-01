@@ -1,8 +1,9 @@
 import { WorkspaceHero } from "../../components/WorkspaceHero";
+import { gatewayUrl } from "../../lib/backend";
 
 async function getDashboard() {
   try {
-    const response = await fetch("http://localhost:8765/api/dashboard", { cache: "no-store" });
+    const response = await fetch(gatewayUrl("/api/dashboard"), { cache: "no-store" });
     if (!response.ok) {
       return null;
     }

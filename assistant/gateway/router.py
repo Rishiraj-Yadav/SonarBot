@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -149,24 +149,6 @@ class GatewayRouter:
 
         normalized_lowered = re.sub(r"\s+", " ", stripped).strip().lower()
         small_talk_turn = self._looks_like_small_talk(normalized_lowered)
-        browser_task_state = await self._get_browser_task_state(session_key)
-        browser_followup_turn = self._looks_like_browser_followup(stripped, browser_task_state)
-        browser_context_turn = (not small_talk_turn) and (
-            browser_followup_turn or self._looks_like_browser_contextual_query(stripped, browser_task_state)
-        )
-        if browser_context_turn:
-            browser_workflow = await self._handle_browser_workflow(
-                connection_id=connection_id,
-                request_id=request_id,
-                session_key=session_key,
-                message=message,
-                metadata=metadata,
-            )
-            if browser_workflow is not None:
-                return browser_workflow
-        host_shortcut = None if browser_context_turn else await self._handle_host_shortcut(request_id, session_key, stripped, stripped.lower(), metadata)
-        if host_shortcut is not None:
-            return host_shortcut
 
         if not small_talk_turn:
             browser_workflow = await self._handle_browser_workflow(
@@ -1340,7 +1322,14 @@ class GatewayRouter:
 
     def _looks_like_oauth_status_request(self, message: str) -> bool:
         lowered = message.lower().strip()
-        return lowered in {"oauth status", "show oauth status", "show connected oauth providers"}
+        if lowered in {"oauth status", "show oauth status", "show connected oauth providers"}:
+            return True
+        return bool(
+            re.search(
+                r"\b(oauth|connected|linked)\b.*\b(status|accounts?|providers?)\b|\b(accounts?|providers?)\b.*\b(linked|connected)\b",
+                lowered,
+            )
+        )
 
     async def _resolve_skill_intent(self, message: str) -> tuple[Any, str] | None:
         matches = self.skill_registry.match_natural_language(message)
@@ -1709,6 +1698,14 @@ class GatewayRouter:
         if self._looks_like_browser_followup(message, task_state):
             return True
         if len(normalized.split()) <= 5:
+            if any(re.search(rf"\b{kw}\b", normalized) for kw in (
+                "what", "how", "when", "where", "who", "why",
+                "set", "change", "check", "remind", "tell",
+                "email", "mail", "brightness", "volume",
+                "create", "delete", "remove", "open", "close",
+                "mute", "unmute", "weather", "time", "date",
+            )):
+                return False
             return True
         return False
 
@@ -1800,6 +1797,26 @@ class GatewayRouter:
         if len(exact) > 1:
             return exact[0]
         return None
+
+    def _pick_candidate_by_position(self, candidates: list[dict[str, Any]], lowered: str) -> dict[str, Any] | None:
+        if not candidates:
+            return None
+        tokens = (
+            (0, ("first", "1st", "one", "1")),
+            (1, ("second", "2nd", "two", "2")),
+            (2, ("third", "3rd", "three", "3")),
+            (3, ("fourth", "4th", "four", "4")),
+        )
+        for index, aliases in tokens:
+            if index >= len(candidates):
+                continue
+            for alias in aliases:
+                if re.search(rf"\b{re.escape(alias)}\b", lowered):
+                    return candidates[index]
+        return None
+
+    def _looks_like_delete_request(self, lowered: str) -> bool:
+        return bool(re.search(r"\b(delete|remove|trash)\b", lowered))
 
     def _format_file_selection_prompt(self, file_name: str, matches: list[dict[str, Any]]) -> str:
         lines = [f"I found {len(matches)} files named like {file_name}:"]
@@ -2343,13 +2360,41 @@ class GatewayRouter:
                 extension_choice = self._extract_document_extension_choice(lowered)
                 selected_path = None
                 candidates = list(pending_confirmation.get("candidates") or [])
+                selected_candidate: dict[str, Any] | None = None
                 if extension_choice:
                     selected = self._pick_candidate_by_extension(candidates, extension_choice)
                     if selected is not None:
+                        selected_candidate = selected
                         selected_path = str(selected.get("path", "")) or None
+                if selected_path is None:
+                    ordinal_pick = self._pick_candidate_by_position(candidates, lowered)
+                    if ordinal_pick is not None:
+                        selected_candidate = ordinal_pick
+                        selected_path = str(ordinal_pick.get("path", "")) or None
                 if selected_path is None and self._looks_like_affirmative_reply(lowered) and len(candidates) == 1:
+                    selected_candidate = candidates[0]
                     selected_path = str(candidates[0].get("path", "")) or None
                 if selected_path is not None:
+                    if self._looks_like_delete_request(lowered):
+                        selected_name = str((selected_candidate or {}).get("name", "")).strip() or selected_path
+                        await self._update_session_metadata(
+                            session_key,
+                            updates={
+                                HOST_FILE_CONFIRMATION_KEY: {
+                                    "mode": "file_confirmation",
+                                    "action": "delete",
+                                    "path": selected_path,
+                                    "display_name": selected_name,
+                                }
+                            },
+                        )
+                        response_text = f"Do you mean delete `{selected_name}`?"
+                        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                        return ResponseFrame(
+                            id=request_id,
+                            ok=True,
+                            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                        )
                     response = await self._read_and_summarize_host_file(
                         request_id=request_id,
                         session_key=session_key,
@@ -2362,6 +2407,9 @@ class GatewayRouter:
                     return response
                 if extension_choice is not None:
                     response_text = f"I couldn't find a {extension_choice} version in that list. Try `pptx`, `pdf`, `docx`, or paste the full path."
+                elif self._looks_like_new_intent_escaping_pending(lowered, original_message):
+                    await self._clear_host_file_confirmation(session_key)
+                    return None
                 else:
                     response_text = "Please reply with the file type you want, like `pptx`, `pdf`, or `docx`."
                 await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
@@ -2381,6 +2429,36 @@ class GatewayRouter:
                         payload={"queued": False, "session_key": session_key, "command_response": response_text},
                     )
                 if self._looks_like_affirmative_reply(lowered):
+                    pending_action = str(pending_confirmation.get("action", "")).strip().lower()
+                    if pending_action == "delete":
+                        target_path = str(pending_confirmation.get("path", "")).strip()
+                        try:
+                            result = await self.tool_registry.dispatch(
+                                "delete_host_file",
+                                {
+                                    "path": target_path,
+                                    "session_key": session_key,
+                                    "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                                    "channel_name": metadata.get("channel", ""),
+                                },
+                            )
+                        except Exception as exc:
+                            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                        if bool(result.get("deleted")):
+                            response_text = f"Deleted {target_path}."
+                        else:
+                            response_text = (
+                                str(result.get("stderr", "")).strip()
+                                or str(result.get("error", "")).strip()
+                                or f"I couldn't delete {target_path}."
+                            )
+                        await self._clear_host_file_confirmation(session_key)
+                        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+                        return ResponseFrame(
+                            id=request_id,
+                            ok=True,
+                            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+                        )
                     response = await self._read_and_summarize_host_file(
                         request_id=request_id,
                         session_key=session_key,
@@ -2406,6 +2484,30 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_host_directory_response(folder_name, result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        app_name = self._match_app_open_request(lowered)
+        if app_name:
+            command = self._build_app_launch_command(app_name)
+            try:
+                result = await self.tool_registry.dispatch(
+                    "exec_shell",
+                    {
+                        "command": command,
+                        "host": True,
+                        "session_key": session_key,
+                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
+                        "channel_name": metadata.get("channel", ""),
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_host_exec_response(app_name, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -2630,30 +2732,6 @@ class GatewayRouter:
                     response_text = self._format_host_search_response(search_term, result)
             else:
                 response_text = self._format_host_search_response(search_term, result)
-            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
-            return ResponseFrame(
-                id=request_id,
-                ok=True,
-                payload={"queued": False, "session_key": session_key, "command_response": response_text},
-            )
-
-        app_name = self._match_app_open_request(lowered)
-        if app_name:
-            command = self._build_app_launch_command(app_name)
-            try:
-                result = await self.tool_registry.dispatch(
-                    "exec_shell",
-                    {
-                        "command": command,
-                        "host": True,
-                        "session_key": session_key,
-                        "user_id": metadata.get("user_id", self.config.users.default_user_id),
-                        "channel_name": metadata.get("channel", ""),
-                    },
-                )
-            except Exception as exc:
-                return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            response_text = self._format_host_exec_response(app_name, result)
             await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
@@ -3151,7 +3229,7 @@ class GatewayRouter:
             tzinfo=now.tzinfo,
         )
 
-    def _parse_one_time_reminder_date(self, value: str, default_year: int) -> datetime.date | None:
+    def _parse_one_time_reminder_date(self, value: str, default_year: int) -> date | None:
         cleaned = re.sub(r"\s+", " ", value.strip().lower())
         for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d", "%b %d"):
             try:
@@ -3194,19 +3272,32 @@ class GatewayRouter:
 
     def _looks_like_small_talk(self, normalized: str) -> bool:
         return normalized in {
-            "hey",
-            "hi",
-            "hello",
-            "yo",
-            "sup",
-            "thanks",
-            "thank you",
-            "ok thanks",
-            "okay thanks",
-            "good morning",
-            "good afternoon",
-            "good evening",
+            "hey", "hi", "hello", "yo", "sup", "hola",
+            "thanks", "thank you", "ok thanks", "okay thanks", "thx",
+            "good morning", "good afternoon", "good evening", "good night",
+            "bye", "goodbye", "see you", "see ya", "later", "gn",
+            "how are you", "how's it going", "what's up", "whats up",
+            "cool", "nice", "awesome", "great", "perfect", "got it",
+            "ok", "okay", "alright", "sure", "fine",
+            "who are you", "what are you", "what can you do",
+            "tell me a joke", "lol", "haha", "hehe",
+            "gm", "morning", "night", "nite",
         }
+
+    def _looks_like_new_intent_escaping_pending(self, lowered: str, original: str) -> bool:
+        """Return True when the user is issuing a new command, not answering a file-type prompt."""
+        action_verbs = (
+            "delete", "remove", "open", "launch", "create", "make", "write",
+            "search", "find", "run", "start", "stop", "play", "set",
+            "change", "remind", "tell", "show", "check", "list",
+        )
+        if any(re.search(rf"\b{v}\b", lowered) for v in action_verbs):
+            return True
+        if len(lowered.split()) > 6:
+            return True
+        if lowered.startswith("/"):
+            return True
+        return False
 
     def _build_schedule_from_frequency_and_time(self, frequency: str, time_text: str) -> str | None:
         parsed_time = self._parse_reminder_time(time_text)
@@ -3679,6 +3770,8 @@ class GatewayRouter:
             "paint": "paint",
             "file explorer": "explorer",
             "explorer": "explorer",
+            "android studio": "android_studio",
+            "androidstudio": "android_studio",
         }
         for alias, app_name in app_aliases.items():
             if alias in lowered:
@@ -3691,6 +3784,16 @@ class GatewayRouter:
             "calculator": "Start-Process -FilePath 'calc.exe'",
             "paint": "Start-Process -FilePath 'mspaint.exe'",
             "explorer": "Start-Process -FilePath 'explorer.exe'",
+            "android_studio": (
+                "$candidates = @("
+                "Join-Path $env:ProgramFiles 'Android\\Android Studio\\bin\\studio64.exe', "
+                "Join-Path $env:LocalAppData 'Programs\\Android Studio\\bin\\studio64.exe', "
+                "'studio64.exe'"
+                "); "
+                "$target = $candidates | Where-Object { $_ -and (($_ -eq 'studio64.exe') -or (Test-Path $_)) } | Select-Object -First 1; "
+                "if (-not $target) { throw 'Android Studio was not found in the usual install locations.' }; "
+                "Start-Process -FilePath $target"
+            ),
         }
         return command_map.get(app_name, f"Start-Process -FilePath '{app_name}'")
 
@@ -4249,6 +4352,7 @@ class GatewayRouter:
         assistant_message: str,
         metadata: dict[str, Any],
     ) -> None:
+        await self._fire_message_received(session_key, user_message, metadata)
         session = await self.session_manager.load_or_create(session_key)
         await self.session_manager.append_message(
             session,

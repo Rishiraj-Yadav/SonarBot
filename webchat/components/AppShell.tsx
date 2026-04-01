@@ -67,6 +67,12 @@ const navGroups: Array<{ title: string; items: NavItem[] }> = [
         eyebrow: "Runtime",
         description: "Inspect the current backend configuration snapshot exposed by the gateway.",
       },
+      {
+        href: "/ml",
+        label: "ML Status",
+        eyebrow: "Models",
+        description: "Monitor tool-router health, confidence, fallback rate, and token-savings metrics.",
+      },
     ],
   },
 ];

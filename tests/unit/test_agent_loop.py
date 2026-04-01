@@ -171,11 +171,11 @@ async def test_agent_loop_hides_intermediate_tool_call_text(app_config) -> None:
     await prompt_builder.stop()
 
     chunks = [payload["text"] for event_name, payload in events if event_name == "agent.chunk"]
-    assert chunks == ["You have 1 repository connected."]
+    assert chunks == ["Let me check your repositories first.", "You have 1 repository connected."]
     session = await session_manager.load_or_create("main")
     assistant_tool_messages = [message for message in session.messages if message.get("role") == "assistant" and message.get("tool_calls")]
     assert assistant_tool_messages
-    assert assistant_tool_messages[0].get("content", "") == ""
+    assert assistant_tool_messages[0].get("content", "") == "Let me check your repositories first."
 
 
 @pytest.mark.asyncio

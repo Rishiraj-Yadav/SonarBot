@@ -218,6 +218,37 @@ class SandboxConfig(BaseModel):
     memory_limit_mb: int = 512
 
 
+class MLToolRouterConfig(BaseModel):
+    enabled: bool = False
+    shadow_mode: bool = True
+    min_confidence: float = 0.45
+    model_path: str = "~/.assistant/ml_models/tool_router.joblib"
+    safety_tools: list[str] = Field(
+        default_factory=lambda: [
+            "llm_task",
+            "read_file",
+            "write_file",
+            "list_files",
+            "browser_navigate",
+            "browser_click",
+            "browser_type",
+        ]
+    )
+
+
+class MLMemoryClassifierConfig(BaseModel):
+    enabled: bool = False
+    min_confidence: float = 0.55
+    model_path: str = "~/.assistant/ml_models/memory_classifier.joblib"
+
+
+class MLConfig(BaseModel):
+    enabled: bool = False
+    metrics_log_path: str = "~/.assistant/logs/ml_metrics.jsonl"
+    tool_router: MLToolRouterConfig = Field(default_factory=MLToolRouterConfig)
+    memory_classifier: MLMemoryClassifierConfig = Field(default_factory=MLMemoryClassifierConfig)
+
+
 SystemAccessDecision = Literal["auto_allow", "ask_once", "always_ask", "deny"]
 
 
@@ -307,6 +338,7 @@ class AppConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    ml: MLConfig = Field(default_factory=MLConfig)
     system_access: SystemAccessConfig = Field(default_factory=SystemAccessConfig)
     users: UsersConfig = Field(default_factory=UsersConfig)
 
@@ -352,6 +384,10 @@ class AppConfig(BaseModel):
         return self.agent.workspace_dir / "sandbox"
 
     @property
+    def ml_models_dir(self) -> Path:
+        return self.assistant_home / "ml_models"
+
+    @property
     def data_db_path(self) -> Path:
         return self.assistant_home / "assistant.db"
 
@@ -376,6 +412,7 @@ class AppConfig(BaseModel):
         self.skills_home.mkdir(parents=True, exist_ok=True)
         self.hooks_home.mkdir(parents=True, exist_ok=True)
         self.oauth_dir.mkdir(parents=True, exist_ok=True)
+        self.ml_models_dir.mkdir(parents=True, exist_ok=True)
         self.agent.workspace_dir.mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "memory").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "inbox").mkdir(parents=True, exist_ok=True)

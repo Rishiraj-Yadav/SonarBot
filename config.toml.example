@@ -121,6 +121,22 @@ image = "python:3.12-slim"
 cpu_limit = 0.5
 memory_limit_mb = 512
 
+[ml]
+enabled = false
+metrics_log_path = "~/.assistant/logs/ml_metrics.jsonl"
+
+[ml.tool_router]
+enabled = false
+shadow_mode = true
+min_confidence = 0.45
+model_path = "~/.assistant/ml_models/tool_router.joblib"
+safety_tools = ["llm_task", "read_file", "write_file", "list_files", "browser_navigate", "browser_click", "browser_type"]
+
+[ml.memory_classifier]
+enabled = false
+min_confidence = 0.55
+model_path = "~/.assistant/ml_models/memory_classifier.joblib"
+
 [system_access]
 enabled = true
 home_root = "~"

@@ -122,3 +122,19 @@ def test_gemini_provider_detects_leaked_api_key_configuration_error() -> None:
     assert error is not None
     assert "reported as leaked" in str(error)
     assert "llm.gemini_api_key" in str(error)
+
+
+def test_gemini_provider_detects_expired_api_key_configuration_error() -> None:
+    provider = GeminiProvider(api_key="fake-key", model="gemini-test")
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent")
+    response = httpx.Response(
+        400,
+        request=request,
+        text='{"error":{"code":400,"message":"API key expired. Please renew the API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}',
+    )
+
+    error = provider._configuration_error_for_response(response)
+
+    assert error is not None
+    assert "expired or invalid" in str(error)
+    assert "GEMINI_API_KEY" in str(error)

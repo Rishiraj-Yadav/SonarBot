@@ -7,6 +7,8 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import importlib.util
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +43,7 @@ from assistant.gateway.protocol import ConnectFrame, HelloOkFrame, RequestFrame,
 from assistant.gateway.router import GatewayRouter
 from assistant.hooks.runner import HookRunner
 from assistant.memory import MemoryAutoCaptureRunner, MemoryManager
+from assistant.ml import MLMetricsTracker, MemoryClassifier, ToolRouter
 from assistant.models import get_provider
 from assistant.multi_agent import ACPClient, PresenceRegistry, SubAgentManager
 from assistant.oauth import OAuthFlowManager, OAuthTokenManager
@@ -122,6 +125,9 @@ class GatewayServices:
     browser_runtime: Any
     browser_workflow_engine: BrowserWorkflowEngine | None
     browser_monitor_service: BrowserMonitorService | None
+    tool_router: ToolRouter | None
+    memory_classifier: MemoryClassifier | None
+    ml_metrics: MLMetricsTracker | None
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -162,6 +168,23 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             skill_registry=skill_registry,
         )
         provider = model_provider or get_provider(runtime_config)
+        tool_router: ToolRouter | None = None
+        memory_classifier: MemoryClassifier | None = None
+        ml_metrics: MLMetricsTracker | None = None
+        if getattr(runtime_config, "ml", None) is not None and bool(runtime_config.ml.enabled):
+            ml_metrics = MLMetricsTracker(Path(str(runtime_config.ml.metrics_log_path)).expanduser().resolve())
+            tool_router = ToolRouter(
+                enabled=bool(runtime_config.ml.tool_router.enabled),
+                shadow_mode=bool(runtime_config.ml.tool_router.shadow_mode),
+                min_confidence=float(runtime_config.ml.tool_router.min_confidence),
+                model_path=Path(str(runtime_config.ml.tool_router.model_path)).expanduser().resolve(),
+                safety_tools=list(runtime_config.ml.tool_router.safety_tools),
+            )
+            memory_classifier = MemoryClassifier(
+                enabled=bool(runtime_config.ml.memory_classifier.enabled),
+                min_confidence=float(runtime_config.ml.memory_classifier.min_confidence),
+                model_path=Path(str(runtime_config.ml.memory_classifier.model_path)).expanduser().resolve(),
+            )
         tool_registry = create_default_tool_registry(
             runtime_config,
             memory_manager=memory_manager,
@@ -200,6 +223,8 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             event_emitter=connection_manager.send_event,
             typing_emitter=connection_manager.send_typing,
             memory_capture_runner=memory_capture_runner,
+            tool_router=tool_router,
+            ml_metrics_tracker=ml_metrics,
         )
         presence_registry.register("main", "main", capabilities=tool_registry.names())
         sub_agent_manager = SubAgentManager(
@@ -298,6 +323,9 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_runtime=browser_runtime,
             browser_workflow_engine=browser_workflow_engine,
             browser_monitor_service=browser_monitor_service,
+            tool_router=tool_router,
+            memory_classifier=memory_classifier,
+            ml_metrics=ml_metrics,
         )
         browser_health_task: asyncio.Task[None] | None = None
         await session_manager.start_pruning_task()
@@ -398,6 +426,42 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         resolved = _resolve_webchat_session_key(session_key)
         history = await services.session_manager.session_history(resolved, limit=min(max(limit, 1), 200))
         return {"session_key": resolved, "messages": _format_webchat_history(history)}
+
+    @app.get("/api/ml/status")
+    async def ml_status() -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        tool_router_payload = services.tool_router.status() if services.tool_router is not None else {"enabled": False}
+        memory_classifier_payload = (
+            services.memory_classifier.status()
+            if services.memory_classifier is not None
+            else {"enabled": False}
+        )
+        metrics_payload = services.ml_metrics.snapshot() if services.ml_metrics is not None else {}
+        onnx_path = services.config.assistant_home / "ml_models" / "browser_intent.onnx"
+        onnx_available = bool(importlib.util.find_spec("onnxruntime"))
+        browser_intent_payload = {
+            "enabled": bool(onnx_path.exists()),
+            "model_path": str(onnx_path),
+            "model_loaded": bool(onnx_path.exists() and onnx_available),
+            "model_error": "" if onnx_path.exists() and onnx_available else (
+                "model_not_found" if not onnx_path.exists() else "onnxruntime_not_installed"
+            ),
+            "onnxruntime_available": onnx_available,
+        }
+        models_payload = {
+            "tool_router": tool_router_payload,
+            "memory_classifier": memory_classifier_payload,
+            "browser_intent_onnx": browser_intent_payload,
+        }
+        return {
+            "enabled": bool(getattr(services.config, "ml", None) and services.config.ml.enabled),
+            "models": models_payload,
+            "tool_router": tool_router_payload,
+            "memory_classifier": memory_classifier_payload,
+            "browser_intent_onnx": browser_intent_payload,
+            "metrics": metrics_payload,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
     @app.get("/api/dashboard")
     async def dashboard(session_key: str = "webchat_main") -> dict[str, Any]:

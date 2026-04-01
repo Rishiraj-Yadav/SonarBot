@@ -9,7 +9,7 @@ from assistant.skills.formatter import format_skills_for_prompt
 
 from watchfiles import awatch
 
-PROMPT_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "IDENTITY.md", "TOOLS.md"]
+PROMPT_FILES = ["SOUL.md", "AGENTS.md", "USER.md", "IDENTITY.md", "TOOLS.md", "BOOT.md", "STANDING_ORDERS.md"]
 
 
 class SystemPromptBuilder:
