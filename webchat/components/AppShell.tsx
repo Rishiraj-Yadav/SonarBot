@@ -51,6 +51,12 @@ const navGroups: Array<{ title: string; items: NavItem[] }> = [
         description: "Cron jobs, notifications, and live rule state in one focused surface.",
       },
       {
+        href: "/coworker",
+        label: "Coworker",
+        eyebrow: "Visual loop",
+        description: "Track screenshot-driven desktop tasks, retries, backend health, and verification history.",
+      },
+      {
         href: "/host-access",
         label: "Host access",
         eyebrow: "Approvals",

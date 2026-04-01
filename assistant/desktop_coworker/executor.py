@@ -6,6 +6,7 @@ from typing import Any
 
 from assistant.desktop_coworker.recovery import DesktopCoworkerRecovery
 from assistant.desktop_coworker.state import DesktopCoworkerStateCollector
+from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
 
 
 class DesktopCoworkerExecutor:
@@ -14,6 +15,7 @@ class DesktopCoworkerExecutor:
         self.tool_registry = tool_registry
         self.state = DesktopCoworkerStateCollector(config, tool_registry)
         self.recovery = DesktopCoworkerRecovery(config)
+        self.visual = DesktopCoworkerVisualController(config, tool_registry)
 
     async def execute_next_step(
         self,
@@ -29,6 +31,34 @@ class DesktopCoworkerExecutor:
         if current_index >= len(steps):
             raise RuntimeError("This coworker task has no remaining steps to run.")
         step = dict(steps[current_index])
+        if str(step.get("type", "")).strip().lower() == "visual_task":
+            result = await self.visual.run_visual_task(
+                goal=str(step.get("payload", {}).get("goal") or task.get("request_text", "")),
+                task=task,
+                session_key=session_key,
+                user_id=user_id,
+                connection_id=connection_id,
+                channel_name=channel_name,
+            )
+            return {
+                "step_index": current_index,
+                "step_type": step.get("type", ""),
+                "title": step.get("title", ""),
+                "status": str(result.get("status", "failed")),
+                "attempts": len(result.get("substeps", [])) or 1,
+                "verification": dict(result.get("verification", {})),
+                "tool_result": dict(result.get("tool_result", {})),
+                "state_before": dict(result.get("state_before", {})),
+                "state_after": dict(result.get("state_after", {})),
+                "summary": str(result.get("summary", "")).strip() or "Completed the visual coworker task.",
+                "visual_substeps": list(result.get("substeps", [])),
+                "latest_state": dict(result.get("latest_state", {})),
+                "last_backend": str(result.get("latest_state", {}).get("last_backend", "")),
+                "current_attempt": int(result.get("latest_state", {}).get("current_attempt", 0) or 0),
+                "stop_reason": str(result.get("latest_state", {}).get("stop_reason", "")),
+                "artifacts": list(result.get("latest_state", {}).get("artifacts", [])),
+                "last_candidates": list(result.get("latest_state", {}).get("last_candidates", [])),
+            }
         attempts = 0
         last_result: dict[str, Any] | None = None
         verification_failed = False

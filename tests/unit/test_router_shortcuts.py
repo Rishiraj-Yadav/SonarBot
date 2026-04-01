@@ -842,8 +842,20 @@ class DummyCoworkerService:
         self.planned: list[str] = []
         self.ran: list[str] = []
 
-    def can_handle_request(self, request_text: str) -> bool:
-        return "task manager" in request_text.lower() or "copy selected text and summarize it" in request_text.lower()
+    async def can_handle_request(self, request_text: str) -> bool:
+        lowered = request_text.lower()
+        return (
+            "task manager" in lowered
+            or "copy selected text and summarize it" in lowered
+            or "turn off the bluetooth" in lowered
+            or "turn on the bluetooth" in lowered
+            or "disable bluetooth" in lowered
+            or "enable bluetooth" in lowered
+            or "see on screen" in lowered
+            or "on screen now" in lowered
+            or "visible file" in lowered
+            or bool(re.match(r"^(?:click(?:\s+on)?|select|double click|double-click)\s+(?!at\b)(?:the\s+)?[a-z0-9][\w\s._()&-]*$", lowered))
+        )
 
     async def plan_task(self, *, user_id: str, session_key: str, request_text: str) -> dict[str, object]:
         self.planned.append(request_text)
@@ -4087,3 +4099,111 @@ async def test_router_natural_language_coworker_shortcut_runs_task(app_config) -
     assert "Latest window: Task Manager" in response.payload["command_response"]
     assert coworker_service.ran == ["help me open task manager and summarize system usage"]
     assert [message["role"] for message in session_manager.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_router_natural_language_visual_coworker_shortcut_runs_task(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-3",
+        request_id="req-coworker-3",
+        session_key="webchat_main",
+        message="open the file you see on screen now",
+        metadata={"trace_id": "trace-coworker-3"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Status: completed" in response.payload["command_response"]
+    assert coworker_service.ran == ["open the file you see on screen now"]
+
+
+@pytest.mark.asyncio
+async def test_router_visual_click_phrase_routes_to_coworker(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(screen_tools_enabled=True, input_tools_enabled=True),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-visual-click",
+        request_id="req-coworker-visual-click",
+        session_key="webchat_main",
+        message="click on the desktop",
+        metadata={"trace_id": "trace-coworker-visual-click"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Status: completed" in response.payload["command_response"]
+    assert coworker_service.ran == ["click on the desktop"]
+
+
+@pytest.mark.asyncio
+async def test_router_telegram_bluetooth_toggle_phrase_routes_to_coworker(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(app_skill_tools_enabled=True, screen_tools_enabled=True, input_tools_enabled=True),
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-telegram-bt",
+        request_id="req-coworker-telegram-bt",
+        session_key="telegram:123",
+        message="open bluetooth settings and turn off the bluetooth",
+        metadata={"trace_id": "trace-coworker-telegram-bt", "user_id": "default", "channel": "telegram"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Status: completed" in response.payload["command_response"]
+    assert coworker_service.ran == ["open bluetooth settings and turn off the bluetooth"]

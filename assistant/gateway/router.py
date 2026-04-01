@@ -1970,7 +1970,7 @@ class GatewayRouter:
     ) -> ResponseFrame | None:
         if self.coworker_service is None or not getattr(self.config.desktop_coworker, "enabled", False):
             return None
-        parsed = self._parse_desktop_coworker_request(original_message, lowered)
+        parsed = await self._parse_desktop_coworker_request(original_message, lowered)
         if parsed is None:
             return None
         user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
@@ -2977,7 +2977,7 @@ class GatewayRouter:
             return {"action": "hotkey", "hotkey": press_match.group(1)}
         return None
 
-    def _parse_desktop_coworker_request(self, original_message: str, lowered: str) -> dict[str, Any] | None:
+    async def _parse_desktop_coworker_request(self, original_message: str, lowered: str) -> dict[str, Any] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
         if normalized.startswith("help me "):
             return {"request": original_message.strip()}
@@ -2987,7 +2987,45 @@ class GatewayRouter:
             " and summarize",
             " and tell me whether",
         ]
-        if any(marker in normalized for marker in multi_step_markers) and self.coworker_service.can_handle_request(original_message):
+        if any(marker in normalized for marker in multi_step_markers) and await self.coworker_service.can_handle_request(original_message):
+            return {"request": original_message.strip()}
+        bluetooth_toggle_patterns = (
+            r"\bturn\s+off\s+(?:the\s+)?bluetooth\b",
+            r"\bturn\s+(?:the\s+)?bluetooth\s+off\b",
+            r"\bswitch\s+off\s+(?:the\s+)?bluetooth\b",
+            r"\bswitch\s+(?:the\s+)?bluetooth\s+off\b",
+            r"\bdisable\s+(?:the\s+)?bluetooth\b",
+            r"\bturn\s+on\s+(?:the\s+)?bluetooth\b",
+            r"\bturn\s+(?:the\s+)?bluetooth\s+on\b",
+            r"\bswitch\s+on\s+(?:the\s+)?bluetooth\b",
+            r"\bswitch\s+(?:the\s+)?bluetooth\s+on\b",
+            r"\benable\s+(?:the\s+)?bluetooth\b",
+        )
+        if any(re.search(pattern, normalized) for pattern in bluetooth_toggle_patterns):
+            if await self.coworker_service.can_handle_request(original_message):
+                return {"request": original_message.strip()}
+        if re.match(r"^(?:click(?:\s+on)?|select|double click|double-click)\s+(?!at\b)(?:the\s+)?[a-z0-9][\w\s._()&-]*$", normalized):
+            if await self.coworker_service.can_handle_request(original_message):
+                return {"request": original_message.strip()}
+        visual_markers = [
+            "see on screen",
+            "see on the screen",
+            "visible on screen",
+            "visible on the screen",
+            "on screen now",
+            "on the screen now",
+            "you are seeing on the screen",
+            "shown on screen",
+            "highlighted",
+            "visible file",
+            "visible item",
+            "visible button",
+            "visible tab",
+        ]
+        if (
+            any(marker in normalized for marker in visual_markers)
+            or re.search(r"\b(?:open|click|select|double click|double-click)\b.+\bvisible\b", normalized)
+        ) and await self.coworker_service.can_handle_request(original_message):
             return {"request": original_message.strip()}
         return None
 
@@ -3173,7 +3211,9 @@ class GatewayRouter:
             "Examples:\n"
             "- /coworker run open task manager and summarize system usage\n"
             "- /coworker run open bluetooth settings and tell me whether bluetooth is available\n"
-            "- /coworker run open R:/6_semester/mini_project in vscode and confirm the window is focused"
+            "- /coworker run open bluetooth settings and turn off the bluetooth\n"
+            "- /coworker run open R:/6_semester/mini_project in vscode and confirm the window is focused\n"
+            "- /coworker run open the file you see on screen now"
         )
 
     def _format_coworker_task(self, task: dict[str, Any], *, planned: bool = False) -> str:
@@ -3206,6 +3246,12 @@ class GatewayRouter:
         capture_path = task.get("latest_state", {}).get("capture_path", "") if isinstance(task.get("latest_state"), dict) else ""
         if capture_path:
             lines.append(f"Latest capture: {capture_path}")
+        if task.get("last_backend"):
+            lines.append(f"Targeting backend: {task.get('last_backend')}")
+        if task.get("current_attempt"):
+            lines.append(f"Current attempt: {task.get('current_attempt')}")
+        if task.get("stop_reason"):
+            lines.append(f"Stop reason: {task.get('stop_reason')}")
         if task.get("error"):
             lines.append(f"Error: {task['error']}")
         return "\n".join(lines)

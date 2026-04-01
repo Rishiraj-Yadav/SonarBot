@@ -252,6 +252,9 @@ def test_webchat_coworker_api_supports_plan_and_history(app_config) -> None:
                 }
             ]
 
+        def backend_health(self) -> dict[str, object]:
+            return {"uia": {"available": False}, "ocr_boxes": {"available": True}}
+
     with TestClient(app) as client:
         app.state.services.coworker_service = FakeCoworkerService()
 
@@ -267,3 +270,85 @@ def test_webchat_coworker_api_supports_plan_and_history(app_config) -> None:
         assert history_response.status_code == 200
         assert history_response.json()["enabled"] is True
         assert history_response.json()["tasks"][0]["task_id"] == "coworker-1"
+        assert "backend_health" in history_response.json()["tasks"][0]
+
+
+def test_webchat_coworker_api_supports_retry_and_artifact_download(app_config, tmp_path) -> None:
+    app_config.desktop_coworker.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+    artifact = tmp_path / "coworker-artifact.png"
+    artifact.write_bytes(b"fake-image")
+
+    class FakeCoworkerService:
+        async def retry_task(self, *, user_id: str, task_id: str) -> dict[str, object]:
+            return {
+                "task_id": task_id,
+                "user_id": user_id,
+                "session_key": "webchat_main",
+                "request_text": "click on the desktop",
+                "summary": "Click on the desktop.",
+                "status": "failed",
+                "current_step_index": 0,
+                "total_steps": 1,
+                "artifacts": [
+                    {
+                        "artifact_id": "artifact-1",
+                        "path": str(artifact),
+                        "kind": "screenshot",
+                        "created_at": "2026-04-01T00:00:00+00:00",
+                    }
+                ],
+                "latest_state": {
+                    "artifacts": [
+                        {
+                            "artifact_id": "artifact-1",
+                            "path": str(artifact),
+                            "kind": "screenshot",
+                            "created_at": "2026-04-01T00:00:00+00:00",
+                        }
+                    ],
+                    "stop_reason": "The visible target did not change.",
+                },
+                "transcript": [],
+                "last_backend": "ocr_boxes",
+                "current_attempt": 2,
+                "stop_reason": "The visible target did not change.",
+            }
+
+        async def get_task(self, *, user_id: str, task_id: str) -> dict[str, object]:
+            return await self.retry_task(user_id=user_id, task_id=task_id)
+
+        def backend_health(self) -> dict[str, object]:
+            return {"uia": {"available": False}, "ocr_boxes": {"available": True}}
+
+    with TestClient(app) as client:
+        app.state.services.coworker_service = FakeCoworkerService()
+
+        retry_response = client.post("/api/coworker/tasks/coworker-1/retry")
+        artifact_response = client.get("/api/coworker/tasks/coworker-1/artifacts/artifact-1")
+
+        assert retry_response.status_code == 200
+        assert retry_response.json()["ok"] is True
+        assert retry_response.json()["task"]["current_attempt"] == 2
+        assert artifact_response.status_code == 200
+        assert artifact_response.content == b"fake-image"
+
+
+def test_settings_api_exposes_coworker_backend_health(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    class FakeCoworkerService:
+        def backend_health(self) -> dict[str, object]:
+            return {"uia": {"available": False}, "ocr_boxes": {"available": True}}
+
+    with TestClient(app) as client:
+        app.state.services.coworker_service = FakeCoworkerService()
+        response = client.get("/api/settings")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["desktop_coworker"]["enabled"] is True
+        assert payload["desktop_coworker"]["backend_health"]["ocr_boxes"]["available"] is True

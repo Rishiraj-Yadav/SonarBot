@@ -22,11 +22,14 @@ class DesktopCoworkerStateCollector:
         snapshot: dict[str, Any] = {
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "active_window": await self._active_window(),
+            "capture_target": capture_target,
         }
         if include_ocr and self.tool_registry.has("desktop_read_screen"):
             target = "window" if capture_target == "window" else "desktop"
             read_result = await self.tool_registry.dispatch("desktop_read_screen", {"target": target})
             snapshot["capture_path"] = str(read_result.get("path", ""))
+            snapshot["capture_width"] = int(read_result.get("width", 0) or 0)
+            snapshot["capture_height"] = int(read_result.get("height", 0) or 0)
             snapshot["screen_text"] = str(read_result.get("content", ""))
             if not snapshot.get("active_window") and isinstance(read_result.get("active_window"), dict):
                 snapshot["active_window"] = dict(read_result["active_window"])
@@ -34,11 +37,15 @@ class DesktopCoworkerStateCollector:
             if capture_target == "window" and self.tool_registry.has("desktop_window_screenshot"):
                 capture = await self.tool_registry.dispatch("desktop_window_screenshot", {})
                 snapshot["capture_path"] = str(capture.get("path", ""))
+                snapshot["capture_width"] = int(capture.get("width", 0) or 0)
+                snapshot["capture_height"] = int(capture.get("height", 0) or 0)
                 if not snapshot.get("active_window") and isinstance(capture.get("active_window"), dict):
                     snapshot["active_window"] = dict(capture["active_window"])
             elif self.tool_registry.has("desktop_screenshot"):
                 capture = await self.tool_registry.dispatch("desktop_screenshot", {})
                 snapshot["capture_path"] = str(capture.get("path", ""))
+                snapshot["capture_width"] = int(capture.get("width", 0) or 0)
+                snapshot["capture_height"] = int(capture.get("height", 0) or 0)
                 if not snapshot.get("active_window") and isinstance(capture.get("active_window"), dict):
                     snapshot["active_window"] = dict(capture["active_window"])
         if include_clipboard and self.tool_registry.has("desktop_clipboard_read"):

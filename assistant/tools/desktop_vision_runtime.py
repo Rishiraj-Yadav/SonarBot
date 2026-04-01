@@ -110,6 +110,8 @@ class DesktopVisionRuntime:
             "target": normalized_target,
             "path": capture["path"],
             "active_window": capture["active_window"],
+            "width": capture.get("width", 0),
+            "height": capture.get("height", 0),
             "content": ocr["content"],
             "truncated": ocr["truncated"],
             "captured_at": capture["captured_at"],

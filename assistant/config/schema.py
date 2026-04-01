@@ -194,9 +194,24 @@ class DesktopCoworkerConfig(BaseModel):
     screenshot_after_each_step: bool = True
     ocr_after_each_step: bool = False
     store_transcripts: bool = True
+    visual_tasks_enabled: bool = True
+    max_visual_steps: int = 8
+    max_target_candidates: int = 8
+    visual_target_confidence_threshold: float = 0.7
+    ask_on_low_confidence: bool = True
     allow_semantic_clicks: bool = False
     allow_ui_text_entry: bool = True
+    default_visual_capture_target: Literal["window", "desktop"] = "window"
     stop_on_low_confidence: bool = True
+    targeting_backend: Literal["legacy", "ocr_boxes", "uia", "hybrid"] = "hybrid"
+    uia_enabled: bool = True
+    ocr_boxes_enabled: bool = True
+    keyboard_fallback_enabled: bool = True
+    max_recovery_attempts: int = 3
+    max_visual_replans: int = 2
+    reopen_missing_apps: bool = True
+    approval_preview_screenshots: bool = True
+    artifact_retention_count: int = 20
 
 
 def _default_desktop_known_apps() -> dict[str, Path]:

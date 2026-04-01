@@ -8,6 +8,7 @@ from assistant.desktop_coworker.executor import DesktopCoworkerExecutor
 from assistant.desktop_coworker.models import DesktopCoworkerTask, utc_now_iso
 from assistant.desktop_coworker.planner import DesktopCoworkerPlanner
 from assistant.desktop_coworker.store import DesktopCoworkerStore
+from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
 
 
 class DesktopCoworkerService:
@@ -16,6 +17,7 @@ class DesktopCoworkerService:
         self.tool_registry = tool_registry
         self.store = DesktopCoworkerStore(config)
         self.planner = DesktopCoworkerPlanner(config, tool_registry)
+        self.visual = DesktopCoworkerVisualController(config, tool_registry)
         self.executor = DesktopCoworkerExecutor(config, tool_registry)
 
     async def initialize(self) -> None:
@@ -25,17 +27,19 @@ class DesktopCoworkerService:
         if not bool(getattr(self.config.desktop_coworker, "enabled", False)):
             raise RuntimeError("Desktop coworker is not enabled.")
 
-    def can_handle_request(self, request_text: str) -> bool:
+    async def can_handle_request(self, request_text: str) -> bool:
         if not bool(getattr(self.config.desktop_coworker, "enabled", False)):
             return False
         try:
-            return self.planner.can_handle(request_text)
+            return self.planner.can_handle(request_text) or await self.visual.can_handle(request_text)
         except Exception:
             return False
 
     async def plan_task(self, *, user_id: str, session_key: str, request_text: str) -> dict[str, Any]:
         self.ensure_enabled()
         plan = self.planner.plan(request_text)
+        if plan is None:
+            plan = await self.visual.build_plan(request_text)
         if plan is None:
             raise ValueError("I couldn't turn that into a bounded coworker task yet. Try /coworker help for supported requests.")
         task = DesktopCoworkerTask.new(
@@ -47,7 +51,8 @@ class DesktopCoworkerService:
             status="planned",
         )
         await self.store.create_task(task)
-        return await self.store.get_task(task.task_id) or {}
+        stored = await self.store.get_task(task.task_id) or {}
+        return self._decorate_task(stored)
 
     async def run_task_request(
         self,
@@ -77,7 +82,7 @@ class DesktopCoworkerService:
         self.ensure_enabled()
         task = await self._require_task(user_id, task_id)
         if str(task.get("status")) in {"completed", "failed", "stopped"}:
-            return task
+            return self._decorate_task(task)
         while int(task.get("current_step_index", 0)) < int(task.get("total_steps", 0)):
             task = await self.step_task(
                 user_id=user_id,
@@ -87,7 +92,7 @@ class DesktopCoworkerService:
             )
             if str(task.get("status")) in {"failed", "stopped"}:
                 break
-        return task
+        return self._decorate_task(task)
 
     async def step_task(
         self,
@@ -101,7 +106,7 @@ class DesktopCoworkerService:
         task = await self._require_task(user_id, task_id)
         status = str(task.get("status", "planned"))
         if status in {"completed", "failed", "stopped"}:
-            return task
+            return self._decorate_task(task)
         current_index = int(task.get("current_step_index", 0))
         if current_index >= int(task.get("total_steps", 0)):
             updated = await self.store.update_task(task_id, status="completed", completed_at=utc_now_iso())
@@ -144,26 +149,65 @@ class DesktopCoworkerService:
             error=error,
             completed_at=completed_at,
         )
-        return updated or task
+        return self._decorate_task(updated or task)
+
+    async def retry_task(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        connection_id: str = "",
+        channel_name: str = "",
+    ) -> dict[str, Any]:
+        self.ensure_enabled()
+        task = await self._require_task(user_id, task_id)
+        status = str(task.get("status", "planned"))
+        if status == "completed":
+            return self._decorate_task(task)
+        if status in {"failed", "stopped"}:
+            retried = await self.store.update_task(task_id, status="in_progress", error="", completed_at="")
+            task = retried or task
+        return await self.step_task(
+            user_id=user_id,
+            task_id=task_id,
+            connection_id=connection_id,
+            channel_name=channel_name,
+        )
 
     async def stop_task(self, *, user_id: str, task_id: str) -> dict[str, Any]:
         self.ensure_enabled()
         task = await self._require_task(user_id, task_id)
         if str(task.get("status")) == "completed":
-            return task
+            return self._decorate_task(task)
         stopped = await self.store.stop_task(task_id)
-        return stopped or task
+        return self._decorate_task(stopped or task)
 
     async def get_task(self, *, user_id: str, task_id: str) -> dict[str, Any]:
         self.ensure_enabled()
-        return await self._require_task(user_id, task_id)
+        task = await self._require_task(user_id, task_id)
+        return self._decorate_task(task)
 
     async def list_tasks(self, *, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         self.ensure_enabled()
-        return await self.store.list_tasks(user_id, limit=limit)
+        return [self._decorate_task(task) for task in await self.store.list_tasks(user_id, limit=limit)]
+
+    def backend_health(self) -> dict[str, Any]:
+        return self.visual.backend_health()
 
     async def _require_task(self, user_id: str, task_id: str) -> dict[str, Any]:
         task = await self.store.get_task(task_id)
         if task is None or str(task.get("user_id", "")) != user_id:
             raise KeyError(f"Unknown coworker task '{task_id}'.")
         return task
+
+    def _decorate_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        latest_state = dict(task.get("latest_state", {}))
+        decorated = dict(task)
+        decorated.setdefault("total_steps", len(task.get("steps", [])))
+        decorated["current_attempt"] = int(latest_state.get("current_attempt", 0) or 0)
+        decorated["last_backend"] = str(latest_state.get("last_backend", "")).strip()
+        decorated["stop_reason"] = str(latest_state.get("stop_reason", "") or task.get("error", "")).strip()
+        decorated["artifacts"] = [dict(item) for item in latest_state.get("artifacts", []) if isinstance(item, dict)]
+        decorated["pending_approval"] = dict(latest_state.get("pending_approval", {})) if isinstance(latest_state.get("pending_approval"), dict) else {}
+        decorated["last_candidates"] = [dict(item) for item in latest_state.get("last_candidates", []) if isinstance(item, dict)]
+        return decorated

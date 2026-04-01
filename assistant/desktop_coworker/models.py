@@ -60,3 +60,13 @@ class DesktopCoworkerTask:
             summary=summary,
             steps=steps,
         )
+
+
+def build_artifact(*, path: str, kind: str, label: str = "", created_at: str | None = None) -> dict[str, Any]:
+    return {
+        "artifact_id": uuid4().hex[:12],
+        "path": str(path),
+        "kind": str(kind),
+        "label": str(label).strip(),
+        "created_at": created_at or utc_now_iso(),
+    }

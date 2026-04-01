@@ -106,7 +106,12 @@ def build_desktop_input_tools(config, system_access_manager=None) -> tuple[list[
         y = int(payload["y"])
         button = str(payload.get("button", "left")).lower()
         count = int(payload.get("count", 1))
-        category = "always_ask" if bool(getattr(config.desktop_input, "confirm_clicks", True)) else "auto_allow"
+        low_risk_visual = bool(payload.get("coworker_low_risk_visual", False))
+        category = (
+            "auto_allow"
+            if low_risk_visual
+            else ("always_ask" if bool(getattr(config.desktop_input, "confirm_clicks", True)) else "auto_allow")
+        )
         return await _run_action(
             tool_name="desktop_mouse_click",
             action_kind="desktop_click",

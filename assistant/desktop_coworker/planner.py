@@ -30,6 +30,7 @@ class DesktopCoworkerPlanner:
         for builder in (
             self._plan_copy_and_summarize,
             self._plan_task_manager_summary,
+            self._plan_bluetooth_toggle,
             self._plan_bluetooth_check,
             self._plan_preset_run,
             self._plan_vscode_open,
@@ -70,6 +71,8 @@ class DesktopCoworkerPlanner:
     def _plan_bluetooth_check(self, original: str, lowered: str) -> dict[str, Any] | None:
         if "bluetooth" not in lowered:
             return None
+        if self._bluetooth_toggle_target(lowered) is not None:
+            return None
         if "settings" not in lowered and "whether bluetooth" not in lowered and "check bluetooth" not in lowered:
             return None
         if not self.tool_registry.has("system_open_settings") or not self.tool_registry.has("system_bluetooth_status"):
@@ -90,6 +93,64 @@ class DesktopCoworkerPlanner:
                 },
             ],
         }
+
+    def _plan_bluetooth_toggle(self, original: str, lowered: str) -> dict[str, Any] | None:
+        target_state = self._bluetooth_toggle_target(lowered)
+        if target_state is None:
+            return None
+        if not self.tool_registry.has("system_open_settings"):
+            raise ValueError("Bluetooth coworker tasks require the Phase 5 system skill pack to be enabled.")
+        if not self.tool_registry.has("desktop_read_screen") or not self.tool_registry.has("desktop_mouse_click"):
+            raise ValueError("Bluetooth toggle coworker tasks require desktop vision and desktop input to be enabled.")
+        target_label = "off" if target_state == "off" else "on"
+        verb = "turn off" if target_state == "off" else "turn on"
+        return {
+            "summary": f"Open Bluetooth settings and {verb} Bluetooth.",
+            "steps": [
+                {
+                    "type": "system_open_settings",
+                    "title": "Open Bluetooth settings",
+                    "payload": {"page": "bluetooth"},
+                    "verification": {"kind": "tool_status"},
+                },
+                {
+                    "type": "visual_task",
+                    "title": f"{verb.title()} the visible Bluetooth toggle",
+                    "payload": {
+                        "goal": (
+                            f"In Windows Bluetooth settings, {verb} Bluetooth. "
+                            f"Only complete once the visible Bluetooth toggle clearly shows {target_label.title()}."
+                        )
+                    },
+                    "verification": {"kind": "visual_task"},
+                    "retryable": False,
+                    "risky": True,
+                },
+            ],
+        }
+
+    def _bluetooth_toggle_target(self, lowered: str) -> str | None:
+        if "bluetooth" not in lowered:
+            return None
+        off_patterns = (
+            r"\bturn\s+off\s+(?:the\s+)?bluetooth\b",
+            r"\bturn\s+(?:the\s+)?bluetooth\s+off\b",
+            r"\bswitch\s+off\s+(?:the\s+)?bluetooth\b",
+            r"\bswitch\s+(?:the\s+)?bluetooth\s+off\b",
+            r"\bdisable\s+(?:the\s+)?bluetooth\b",
+        )
+        on_patterns = (
+            r"\bturn\s+on\s+(?:the\s+)?bluetooth\b",
+            r"\bturn\s+(?:the\s+)?bluetooth\s+on\b",
+            r"\bswitch\s+on\s+(?:the\s+)?bluetooth\b",
+            r"\bswitch\s+(?:the\s+)?bluetooth\s+on\b",
+            r"\benable\s+(?:the\s+)?bluetooth\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in off_patterns):
+            return "off"
+        if any(re.search(pattern, lowered) for pattern in on_patterns):
+            return "on"
+        return None
 
     def _plan_vscode_open(self, original: str, lowered: str) -> dict[str, Any] | None:
         match = re.match(

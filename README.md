@@ -17,7 +17,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - [x] Desktop Input V1: optional Windows-only mouse position/move/click, keyboard typing/hotkeys, clipboard read/write, and approval-gated `/input` + `/clipboard` commands
 - [x] Desktop Routines V1: optional structured routines that combine app control, host file actions, desktop vision, and desktop input into manual, scheduled, reminder, and file-watch workflows
 - [x] App Skills V1: optional higher-level VS Code, document, Excel, system control, Task Manager, browser workspace, and study/work preset commands built on the current desktop primitives
-- [x] Desktop Coworker V1: optional bounded `/coworker` task planning and verified execution for multi-step desktop flows with transcripts, step-by-step verification, and safe skill-first fallbacks
+- [x] Desktop Coworker V2: optional bounded `/coworker` planning with verified visual screen loops, transcripts, step-by-step verification, and safe skill-first fallbacks
 
 ## What You Can Use Today
 
@@ -33,7 +33,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - optional Windows desktop keyboard/mouse/clipboard control with `/input` and `/clipboard` commands
 - optional Windows desktop routines with `/routine` commands plus bounded natural-language setup phrases such as `create a study mode that opens chrome and 6_semester folder`
 - optional Windows app skills with `/vscode`, `/doc`, `/excel`, `/system`, `/task`, `/preset`, and `/browser-skill`
-- optional Windows coworker tasks with `/coworker` commands for verified multi-step desktop work such as `open task manager and summarize system usage`
+- optional Windows coworker tasks with `/coworker` commands for verified multi-step desktop work such as `open task manager and summarize system usage` or `open the file you see on screen now`
 - host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
 - GitHub tools: list repos, list issues, list pull requests, get pull request details
@@ -359,11 +359,11 @@ Example commands:
 
 App Skills V1 is disabled by default. Document and Excel operations continue to use the existing host approval model, and the browser workspace pack is intentionally isolated from the main browser runtime implementation path.
 
-## Desktop Coworker V1
+## Desktop Coworker V2
 
 SonarBot now also includes an optional Windows-only coworker layer that plans and executes short verified desktop tasks on top of the existing app control, desktop vision, desktop input, routines, and app skills.
 
-Phase 6A includes:
+Phase 6B includes:
 
 - persisted coworker task records and transcripts
 - `/coworker plan`, `/coworker run`, `/coworker step`, `/coworker status`, `/coworker stop`, and `/coworker history`
@@ -373,13 +373,15 @@ Phase 6A includes:
   - open a project in VS Code and verify focus
   - update a document and verify the text change
   - copy selected text and summarize it
+  - open the file you see on screen now
 - step-by-step verification using active-window state, screen capture, OCR, clipboard state, or structured tool results
 - safe reuse of Phase 5 app skills first, with lower-level desktop primitives only when needed
+- screenshot-aware visual coworker loops that use screenshot -> LLM decision -> action -> screenshot verification for visible file and item flows
 
-Phase 6A does not include:
+Phase 6B does not include:
 
 - open-ended autonomous desktop control
-- semantic clicking like `click the save button`
+- unrestricted image-only object detection
 - drag-and-drop or macro recording
 - submit/send/finalize actions without explicit approval
 - unrestricted multi-step planning outside the supported bounded patterns
@@ -394,11 +396,26 @@ max_retries_per_step = 2
 verification_required_by_default = true
 ask_before_submission = true
 screenshot_after_each_step = true
-ocr_after_each_step = false
+ocr_after_each_step = true
 store_transcripts = true
-allow_semantic_clicks = false
+visual_tasks_enabled = true
+max_visual_steps = 8
+max_target_candidates = 8
+visual_target_confidence_threshold = 0.7
+ask_on_low_confidence = true
+allow_semantic_clicks = true
 allow_ui_text_entry = true
+default_visual_capture_target = "window"
 stop_on_low_confidence = true
+targeting_backend = "hybrid"
+uia_enabled = true
+ocr_boxes_enabled = true
+keyboard_fallback_enabled = true
+max_recovery_attempts = 3
+max_visual_replans = 2
+reopen_missing_apps = true
+approval_preview_screenshots = true
+artifact_retention_count = 20
 ```
 
 Example commands:
@@ -407,12 +424,22 @@ Example commands:
 - `/coworker run open task manager and summarize system usage`
 - `/coworker run open bluetooth settings and tell me whether bluetooth is available`
 - `/coworker run open R:/6_semester/mini_project in vscode and confirm the window is focused`
+- `/coworker run open the file you see on screen now`
 - `/coworker status <task_id>`
 - `/coworker history`
 - `help me open task manager and summarize system usage`
 - `help me copy selected text and summarize it`
+- `open the visible hindi_english_parallel file`
 
-Desktop Coworker V1 is disabled by default, remains intentionally bounded, and prefers deterministic Phase 5 skills before falling back to lower-level desktop actions.
+WebChat now includes a dedicated `/coworker` panel for:
+
+- active task state and current attempt
+- screenshot timeline artifacts
+- retry / continue / stop controls
+- backend health for UIA, OCR boxes, and the legacy visual fallback
+- pending host approval previews when a task blocks on input approval
+
+Desktop Coworker V2 is disabled by default, remains intentionally bounded, and prefers deterministic Phase 5 skills before falling back to lower-level desktop actions. It does not watch the desktop as a live video stream; it runs a bounded screenshot-and-verification loop when a task depends on what is currently visible on screen.
 
 ## Proactive Life Context Engine
 

@@ -144,17 +144,32 @@ meeting_apps = ["chrome"]
 meeting_browser_urls = []
 
 [desktop_coworker]
-enabled = false
+enabled = true
 max_steps_per_task = 6
 max_retries_per_step = 2
 verification_required_by_default = true
 ask_before_submission = true
 screenshot_after_each_step = true
-ocr_after_each_step = false
+ocr_after_each_step = true
 store_transcripts = true
-allow_semantic_clicks = false
+visual_tasks_enabled = true
+max_visual_steps = 8
+max_target_candidates = 8
+visual_target_confidence_threshold = 0.7
+ask_on_low_confidence = true
+allow_semantic_clicks = true
 allow_ui_text_entry = true
+default_visual_capture_target = "window"
 stop_on_low_confidence = true
+targeting_backend = "hybrid"
+uia_enabled = true
+ocr_boxes_enabled = true
+keyboard_fallback_enabled = true
+max_recovery_attempts = 3
+max_visual_replans = 2
+reopen_missing_apps = true
+approval_preview_screenshots = true
+artifact_retention_count = 20
 
 [oauth.google]
 client_id = ""
