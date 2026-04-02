@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from assistant.automation.models import Notification
@@ -16,15 +17,15 @@ class NotificationDispatcher:
         self.connection_manager = connection_manager
 
     async def dispatch(self, notification: Notification) -> Notification:
-        await self.store.create_notification(notification)
         profile = await self.user_profiles.get_profile(notification.user_id)
         delivery_channels = await self._resolve_channels(notification, profile)
+        notification.target_channels = delivery_channels
+        await self.store.create_notification(notification)
         delivered = False
 
         for channel_name in delivery_channels:
             if await self._deliver_to_channel(notification, channel_name):
                 delivered = True
-                break
 
         if delivered:
             notification.status = "delivered"
@@ -45,6 +46,40 @@ class NotificationDispatcher:
             channel_name="webchat",
         )
         return notification
+
+    async def send_text(self, user_id: str, text: str, *, channel_name: str = "telegram") -> bool:
+        if channel_name == "telegram":
+            recipient = await self._telegram_recipient_for_user(user_id)
+            if recipient is None:
+                return False
+            return await self.connection_manager.send_channel_message("telegram", recipient, text)
+
+        if channel_name == "webchat":
+            await self.connection_manager.send_user_event(
+                user_id,
+                "report.message",
+                {"body": text},
+                channel_name="webchat",
+            )
+            return True
+
+        return False
+
+    async def send_file(self, user_id: str, file_path: Path, *, channel_name: str = "telegram", caption: str = "") -> bool:
+        if channel_name != "telegram" or not file_path.exists():
+            return False
+        recipient = await self._telegram_recipient_for_user(user_id)
+        if recipient is None:
+            return False
+        channel = self.connection_manager.get_channel("telegram")
+        if channel is None or not hasattr(channel, "bot"):
+            return False
+        try:
+            from aiogram.types import FSInputFile  # type: ignore
+        except Exception:
+            return False
+        await channel.bot.send_document(int(recipient), FSInputFile(str(file_path)), caption=caption or None)
+        return True
 
     async def _resolve_channels(self, notification: Notification, profile: dict[str, Any]) -> list[str]:
         primary = str(profile.get("primary_channel") or self.config.users.primary_channel)
@@ -73,10 +108,9 @@ class NotificationDispatcher:
 
     async def _deliver_to_channel(self, notification: Notification, channel_name: str) -> bool:
         if channel_name == "telegram":
-            identity = await self.user_profiles.get_identity(notification.user_id, "telegram")
-            if identity is None:
+            recipient = await self._telegram_recipient_for_user(notification.user_id)
+            if recipient is None:
                 return False
-            recipient = str(identity.get("metadata", {}).get("chat_id") or identity.get("identity_value"))
             try:
                 await self.connection_manager.send_channel_message("telegram", recipient, notification.body)
                 await self.store.record_delivery(notification.notification_id, "telegram", recipient, "delivered")
@@ -109,6 +143,15 @@ class NotificationDispatcher:
 
         return False
 
+    async def _telegram_recipient_for_user(self, user_id: str) -> str | None:
+        identity = await self.user_profiles.get_identity(user_id, "telegram")
+        if identity is not None:
+            return str(identity.get("metadata", {}).get("chat_id") or identity.get("identity_value"))
+        allowed = [str(item) for item in getattr(self.config.telegram, "allowed_user_ids", []) if str(item).strip()]
+        if len(allowed) == 1 and user_id == self.config.users.default_user_id:
+            return allowed[0]
+        return None
+
     def _notification_payload(self, notification: Notification) -> dict[str, Any]:
         return {
             "notification_id": notification.notification_id,
@@ -117,5 +160,6 @@ class NotificationDispatcher:
             "source": notification.source,
             "severity": notification.severity,
             "status": notification.status,
+            "target_channels": list(notification.target_channels),
             "created_at": notification.created_at,
         }

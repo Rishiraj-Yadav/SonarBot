@@ -198,6 +198,24 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
                     }
                 ]
             )
+        if url.endswith("/repos/octo/repo"):
+            return FakeResponse(
+                {
+                    "full_name": "octo/repo",
+                    "description": "Example repo",
+                    "html_url": "https://github.com/octo/repo",
+                    "private": False,
+                    "default_branch": "main",
+                    "language": "Python",
+                    "topics": ["automation", "ai"],
+                    "open_issues_count": 3,
+                    "stargazers_count": 42,
+                    "forks_count": 7,
+                    "watchers_count": 10,
+                    "updated_at": "2026-01-02T00:00:00Z",
+                    "pushed_at": "2026-01-03T00:00:00Z",
+                }
+            )
         if url.endswith("/repos/octo/repo/issues"):
             return FakeResponse(
                 [
@@ -223,6 +241,19 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
                         "html_url": "https://github.com/octo/repo/pull/7",
                         "head": {"ref": "feature"},
                         "base": {"ref": "main"},
+                    }
+                ]
+            )
+        if url.endswith("/repos/octo/repo/commits"):
+            return FakeResponse(
+                [
+                    {
+                        "sha": "abc123",
+                        "html_url": "https://github.com/octo/repo/commit/abc123",
+                        "commit": {
+                            "message": "Fix automation edge case\n\nExtra body",
+                            "author": {"name": "octocat", "date": "2026-01-03T00:00:00Z"},
+                        },
                     }
                 ]
             )
@@ -264,3 +295,11 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
     pr_detail = await tools["github_get_pull_request"].handler({"owner": "octo", "repo": "repo", "number": 7})
     assert pr_detail["files"][0]["filename"] == "app.py"
     assert pr_detail["reviews"][0]["state"] == "APPROVED"
+
+    repo_summary = await tools["github_get_repo_summary"].handler({"owner": "octo", "repo": "repo"})
+    assert repo_summary["repository"]["full_name"] == "octo/repo"
+    assert repo_summary["counts"]["open_pull_requests"] == 1
+    assert repo_summary["counts"]["open_issues"] == 1
+    assert repo_summary["counts"]["likely_blockers"] == 1
+    assert repo_summary["recent_commits"][0]["message"] == "Fix automation edge case"
+    assert "octo/repo has 1 ready pull request(s)" in repo_summary["summary_markdown"]

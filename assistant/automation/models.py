@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 from uuid import uuid4
+
+from pydantic import BaseModel, Field
 
 
 def utc_now_iso() -> str:
@@ -155,3 +158,42 @@ class DesktopRoutineRule:
     last_event_at: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+
+
+class ReportSource(str, Enum):
+    folder = "folder"
+    web_search = "web_search"
+    memory = "memory"
+    mixed = "mixed"
+
+
+class ReportFormat(str, Enum):
+    markdown = "markdown"
+    txt = "txt"
+    docx = "docx"
+    pdf = "pdf"
+
+
+class ReportJob(BaseModel):
+    job_id: str = Field(default_factory=lambda: str(uuid4()))
+    user_id: str = "default"
+    topic: str
+    source_type: ReportSource = ReportSource.mixed
+    source_path: str | None = None
+    output_format: ReportFormat = ReportFormat.markdown
+    save_path: str | None = None
+    deliver_via: str = "file"
+    schedule: str | None = None
+    run_once_at: str | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    paused: bool = False
+
+
+class ReportResult(BaseModel):
+    job_id: str
+    topic: str
+    save_path: str
+    format: str
+    byte_size: int
+    generated_at: str
+    summary_preview: str

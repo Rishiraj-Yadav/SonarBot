@@ -69,6 +69,19 @@ class AutomationScheduler:
                     user_id=str(routine["user_id"]),
                     run_at=str(routine["run_at"]),
                 )
+        for job in await self.automation_engine.list_report_jobs():
+            if bool(job.get("paused")):
+                continue
+            if job.get("schedule"):
+                self._add_report_job(
+                    job_id=str(job["job_id"]),
+                    schedule=str(job["schedule"]),
+                )
+            elif job.get("run_once_at"):
+                self._add_report_one_shot(
+                    job_id=str(job["job_id"]),
+                    run_at=str(job["run_once_at"]),
+                )
         self.scheduler.start()
 
     async def stop(self) -> None:
@@ -98,6 +111,14 @@ class AutomationScheduler:
             message=str(reminder["message"]),
             user_id=str(reminder["user_id"]),
         )
+
+    async def register_report_job(self, job) -> None:
+        if self.scheduler is None or bool(getattr(job, "paused", False)):
+            return
+        if getattr(job, "schedule", None):
+            self._add_report_job(job_id=str(job.job_id), schedule=str(job.schedule))
+        elif getattr(job, "run_once_at", None):
+            self._add_report_one_shot(job_id=str(job.job_id), run_at=str(job.run_once_at))
 
     async def pause_dynamic_job(self, cron_id: str) -> None:
         if self.scheduler is None:
@@ -130,6 +151,13 @@ class AutomationScheduler:
         job = self.scheduler.get_job(self._one_time_job_id(reminder_id))
         if job is not None:
             self.scheduler.remove_job(self._one_time_job_id(reminder_id))
+
+    async def remove_report_job(self, job_id: str) -> None:
+        if self.scheduler is None:
+            return
+        job = self.scheduler.get_job(self._report_job_id(job_id))
+        if job is not None:
+            self.scheduler.remove_job(self._report_job_id(job_id))
 
     async def register_desktop_rule(self, rule: dict[str, object]) -> None:
         if self.scheduler is None or str(rule.get("trigger_type", "schedule")) != "schedule":
@@ -212,6 +240,31 @@ class AutomationScheduler:
             replace_existing=True,
         )
 
+    def _add_report_job(self, job_id: str, schedule: str) -> None:
+        from apscheduler.triggers.cron import CronTrigger  # type: ignore
+
+        trigger = CronTrigger.from_crontab(schedule)
+        self.scheduler.add_job(
+            self.automation_engine.handle_report_job,
+            trigger=trigger,
+            id=self._report_job_id(job_id),
+            kwargs={"job_id": job_id},
+            replace_existing=True,
+        )
+
+    def _add_report_one_shot(self, job_id: str, run_at: str) -> None:
+        from apscheduler.triggers.date import DateTrigger  # type: ignore
+        from datetime import datetime
+
+        trigger = DateTrigger(run_date=datetime.fromisoformat(run_at))
+        self.scheduler.add_job(
+            self.automation_engine.handle_report_job,
+            trigger=trigger,
+            id=self._report_job_id(job_id),
+            kwargs={"job_id": job_id},
+            replace_existing=True,
+        )
+
     def _add_desktop_job(
         self,
         *,
@@ -284,3 +337,6 @@ class AutomationScheduler:
 
     def _routine_reminder_job_id(self, routine_id: str) -> str:
         return f"routine-reminder-{routine_id}"
+
+    def _report_job_id(self, job_id: str) -> str:
+        return f"report-job-{job_id}"

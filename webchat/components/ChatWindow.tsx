@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { MessageBubble } from "./MessageBubble";
-import { createGatewaySocket, fetchJson } from "../lib/gateway_client";
+import { createGatewaySocket, fetchJson, synthesizeVoiceReply, transcribeVoiceClip } from "../lib/gateway_client";
 
 type ChatMessage = {
   id: string;
@@ -15,7 +15,31 @@ type HistoryResponse = {
   messages: ChatMessage[];
 };
 
+type SettingsResponse = {
+  voice?: {
+    enabled?: boolean;
+    webchat_enabled?: boolean;
+    webchat_tts_enabled?: boolean;
+    auto_send_transcript?: boolean;
+    max_record_seconds?: number;
+  };
+};
+
+type PendingSend = {
+  requestId: string;
+  replyId: string;
+  message: string;
+  metadata: Record<string, unknown>;
+  isVoice: boolean;
+};
+
 const deviceKey = "sonarbot-webchat-device-id";
+const voicePreferenceKey = "sonarbot-webchat-voice-enabled";
+const voiceStartThreshold = 0.08;
+const voiceStopThreshold = 0.045;
+const voiceRequiredFrames = 3;
+const voiceMinRecordingMs = 900;
+const voiceSilenceMs = 1100;
 
 function getDeviceId() {
   if (typeof window === "undefined") {
@@ -31,16 +55,65 @@ function getDeviceId() {
   return created;
 }
 
+function pickRecorderMimeType(): string {
+  if (typeof window === "undefined" || typeof MediaRecorder === "undefined") {
+    return "audio/webm";
+  }
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+  for (const candidate of candidates) {
+    if (MediaRecorder.isTypeSupported(candidate)) {
+      return candidate;
+    }
+  }
+  return "audio/webm";
+}
+
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [socketReady, setSocketReady] = useState(false);
+  const [backendVoiceEnabled, setBackendVoiceEnabled] = useState(false);
+  const [backendVoiceReplyEnabled, setBackendVoiceReplyEnabled] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceReplyEnabled, setVoiceReplyEnabled] = useState(false);
+  const [autoSendTranscript, setAutoSendTranscript] = useState(true);
+  const [maxRecordSeconds, setMaxRecordSeconds] = useState(60);
+  const [isListening, setIsListening] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isSpeakingReply, setIsSpeakingReply] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const [inputLevel, setInputLevel] = useState(0);
+  const [lastTranscript, setLastTranscript] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const queuedRequestIdsRef = useRef<string[]>([]);
   const requestReplyMapRef = useRef<Map<string, string>>(new Map());
   const ignoredInlineChunksRef = useRef<string[]>([]);
+  const replyContentRef = useRef<Map<string, string>>(new Map());
+  const voiceRequestIdsRef = useRef<Set<string>>(new Set());
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const listeningStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordStartedAtRef = useRef<number | null>(null);
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioLevelDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const levelFrameRef = useRef<number | null>(null);
+  const detectionTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const loudFrameCountRef = useRef(0);
+  const lastSoundAtRef = useRef(0);
+  const discardRecordingRef = useRef(false);
+  const isListeningRef = useRef(false);
+  const isRecordingRef = useRef(false);
+  const isTranscribingRef = useRef(false);
+  const isSpeakingReplyRef = useRef(false);
+  const voiceEnabledRef = useRef(false);
+  const voiceReplyEnabledRef = useRef(false);
+  const activeAudioUrlRef = useRef<string | null>(null);
+  const pendingSendsRef = useRef<PendingSend[]>([]);
   const deviceId = useMemo(() => getDeviceId(), []);
   const quickPrompts = [
     { label: "Check inbox", value: "check my inbox" },
@@ -50,12 +123,102 @@ export function ChatWindow() {
   ];
 
   useEffect(() => {
+    voiceEnabledRef.current = voiceEnabled;
+  }, [voiceEnabled]);
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  useEffect(() => {
+    isTranscribingRef.current = isTranscribing;
+  }, [isTranscribing]);
+
+  useEffect(() => {
+    isSpeakingReplyRef.current = isSpeakingReply;
+  }, [isSpeakingReply]);
+
+  useEffect(() => {
+    voiceReplyEnabledRef.current = voiceReplyEnabled;
+  }, [voiceReplyEnabled]);
+
+  const applyVoiceSettings = (payload: SettingsResponse) => {
+    const voice = payload.voice ?? {};
+    const serverVoiceEnabled = Boolean(voice.enabled && voice.webchat_enabled);
+    const serverVoiceReplyEnabled = Boolean(serverVoiceEnabled && voice.webchat_tts_enabled);
+    let preferredVoiceEnabled = serverVoiceEnabled;
+    if (typeof window !== "undefined") {
+      const savedPreference = window.localStorage.getItem(voicePreferenceKey);
+      if (savedPreference === "true") {
+        preferredVoiceEnabled = true;
+      } else if (savedPreference === "false") {
+        preferredVoiceEnabled = false;
+      }
+    }
+    setBackendVoiceEnabled(serverVoiceEnabled);
+    setBackendVoiceReplyEnabled(serverVoiceReplyEnabled);
+    setVoiceEnabled(Boolean(serverVoiceEnabled && preferredVoiceEnabled));
+    setAutoSendTranscript(voice.auto_send_transcript !== false);
+    setMaxRecordSeconds(Math.max(5, Number(voice.max_record_seconds ?? 60)));
+    if (serverVoiceEnabled) {
+      setVoiceError((current) => (current.startsWith("Voice is disabled in backend settings") ? "" : current));
+    }
+    return serverVoiceEnabled;
+  };
+
+  const refreshVoiceSettings = async () => {
+    const payload = await fetchJson<SettingsResponse>("/api/settings");
+    return applyVoiceSettings(payload);
+  };
+
+  useEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) {
       return;
     }
     transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    void refreshVoiceSettings().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    setVoiceReplyEnabled(Boolean(voiceEnabled && backendVoiceReplyEnabled));
+  }, [voiceEnabled, backendVoiceReplyEnabled]);
+
+  function dispatchPendingSend(entry: PendingSend): boolean {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    socket.send(
+      JSON.stringify({
+        type: "req",
+        id: entry.requestId,
+        method: "agent.send",
+        params: { message: entry.message, metadata: entry.metadata },
+      }),
+    );
+    return true;
+  }
+
+  function flushPendingSends() {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const stillPending: PendingSend[] = [];
+    for (const entry of pendingSendsRef.current) {
+      if (!dispatchPendingSend(entry)) {
+        stillPending.push(entry);
+      }
+    }
+    pendingSendsRef.current = stillPending;
+  }
 
   useEffect(() => {
     let disposed = false;
@@ -74,6 +237,7 @@ export function ChatWindow() {
           reconnectTimer = null;
         }
         setSocketReady(true);
+        flushPendingSends();
       };
       socket.onclose = () => {
         setSocketReady(false);
@@ -97,6 +261,7 @@ export function ChatWindow() {
             return;
           }
           requestReplyMapRef.current.delete(requestId);
+          voiceRequestIdsRef.current.delete(requestId);
           if (activeRequestIdRef.current === requestId) {
             activeRequestIdRef.current = queuedRequestIdsRef.current.shift() ?? null;
             return;
@@ -104,12 +269,11 @@ export function ChatWindow() {
           queuedRequestIdsRef.current = queuedRequestIdsRef.current.filter((item) => item !== requestId);
         };
 
-        const currentReplyId = () => {
-          const activeRequestId = activeRequestIdRef.current;
-          if (!activeRequestId) {
-            return null;
+        const updateReplyContent = (replyId: string | null, content: string) => {
+          if (!replyId) {
+            return;
           }
-          return requestReplyMapRef.current.get(activeRequestId) ?? null;
+          replyContentRef.current.set(replyId, content);
         };
 
         if (frame.type === "res") {
@@ -119,10 +283,9 @@ export function ChatWindow() {
             const errorText = String(frame.error ?? "Unknown request error");
             const replyId = replyIdForRequest(requestId);
             setMessages((current) =>
-              current.map((item) =>
-                item.id === replyId ? { ...item, content: `[Error] ${errorText}` } : item,
-              ),
+              current.map((item) => (item.id === replyId ? { ...item, content: `[Error] ${errorText}` } : item)),
             );
+            updateReplyContent(replyId, `[Error] ${errorText}`);
             cleanupRequest(requestId);
             return;
           }
@@ -133,10 +296,9 @@ export function ChatWindow() {
           if (commandResponse) {
             ignoredInlineChunksRef.current.push(commandResponse);
             const replyId = replyIdForRequest(requestId);
+            updateReplyContent(replyId, commandResponse);
             setMessages((current) => {
-              const placeholder = [...current]
-                .reverse()
-                .find((item) => item.id === replyId && item.role === "assistant");
+              const placeholder = [...current].reverse().find((item) => item.id === replyId && item.role === "assistant");
               if (placeholder) {
                 return current.map((item) =>
                   item.id === placeholder.id ? { ...item, content: commandResponse } : item,
@@ -144,17 +306,18 @@ export function ChatWindow() {
               }
               const existing = current.find((item) => item.id === replyId);
               if (existing) {
-                return current.map((item) =>
-                  item.id === replyId ? { ...item, content: commandResponse } : item,
-                );
+                return current.map((item) => (item.id === replyId ? { ...item, content: commandResponse } : item));
               }
               return replyId ? [...current, { id: replyId, role: "assistant", content: commandResponse }] : current;
             });
+            void maybeSpeakReply(requestId, replyId);
           }
           if (!queued || commandResponse) {
             cleanupRequest(requestId);
           }
+          return;
         }
+
         if (frame.type === "event" && frame.event === "agent.chunk") {
           const text = String((frame.payload as Record<string, unknown> | undefined)?.text ?? "");
           const ignoredIndex = ignoredInlineChunksRef.current.indexOf(text);
@@ -162,35 +325,54 @@ export function ChatWindow() {
             ignoredInlineChunksRef.current.splice(ignoredIndex, 1);
             return;
           }
-          const replyId = currentReplyId();
+          const requestId = activeRequestIdRef.current;
+          const replyId = requestId ? requestReplyMapRef.current.get(requestId) ?? null : null;
           if (!replyId) {
             return;
           }
           setMessages((current) => {
             const existing = current.find((item) => item.id === replyId);
             if (!existing) {
+              updateReplyContent(replyId, text);
               return [...current, { id: replyId, role: "assistant", content: text }];
             }
-            if (existing.content === "Thinking...") {
-              return current.map((item) =>
-                item.id === replyId ? { ...item, content: text } : item,
-              );
-            }
-            const existingContent = existing.content;
-            return current.map((item) =>
-              item.id === replyId ? { ...item, content: existingContent + text } : item,
-            );
+            const updated = existing.content === "Thinking..." ? text : existing.content + text;
+            updateReplyContent(replyId, updated);
+            return current.map((item) => (item.id === replyId ? { ...item, content: updated } : item));
           });
+          return;
         }
+
         if (frame.type === "event" && frame.event === "notification.created") {
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(
-              new CustomEvent("sonarbot:notification", {
-                detail: (frame.payload as Record<string, unknown> | undefined) ?? {},
-              }),
-            );
+          const detail = (frame.payload as Record<string, unknown> | undefined) ?? {};
+          const notificationId = String(detail.notification_id ?? crypto.randomUUID());
+          const title = String(detail.title ?? "Automation update").trim();
+          const body = String(detail.body ?? "").trim();
+          const content = body && body !== title ? `${title}\n\n${body}` : title;
+          if (content) {
+            setMessages((current) => {
+              const messageId = `notification-${notificationId}`;
+              if (current.some((item) => item.id === messageId)) {
+                return current;
+              }
+              return [...current, { id: messageId, role: "assistant", content }];
+            });
           }
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("sonarbot:notification", { detail }));
+          }
+          return;
         }
+
+        if (frame.type === "event" && frame.event === "report.message") {
+          const detail = (frame.payload as Record<string, unknown> | undefined) ?? {};
+          const body = String(detail.body ?? "").trim();
+          if (body) {
+            setMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: body }]);
+          }
+          return;
+        }
+
         if (frame.type === "event" && typeof frame.event === "string" && frame.event.startsWith("browser.")) {
           if (typeof window !== "undefined") {
             window.dispatchEvent(
@@ -199,7 +381,9 @@ export function ChatWindow() {
               }),
             );
           }
+          return;
         }
+
         if (frame.type === "event" && (frame.event === "host_approval.created" || frame.event === "host_approval.updated")) {
           if (typeof window !== "undefined") {
             window.dispatchEvent(
@@ -208,17 +392,18 @@ export function ChatWindow() {
               }),
             );
           }
+          return;
         }
+
         if (frame.type === "event" && frame.event === "agent.done") {
           const requestId = activeRequestIdRef.current;
-          const replyId = currentReplyId();
+          const replyId = requestId ? requestReplyMapRef.current.get(requestId) ?? null : null;
           setMessages((current) =>
             current.map((item) =>
-              item.id === replyId && item.content.trim() === ""
-                ? { ...item, content: "(no response)" }
-                : item,
+              item.id === replyId && item.content.trim() === "" ? { ...item, content: "(no response)" } : item,
             ),
           );
+          void maybeSpeakReply(requestId, replyId);
           cleanupRequest(requestId);
         }
       };
@@ -230,14 +415,299 @@ export function ChatWindow() {
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }
+      void stopVoiceSession({ disableVoice: false, discardRecording: true });
+      if (activeAudioUrlRef.current) {
+        URL.revokeObjectURL(activeAudioUrlRef.current);
+        activeAudioUrlRef.current = null;
+      }
       socketRef.current?.close();
     };
   }, [deviceId]);
 
-  function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    if (!input.trim() || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+  useEffect(() => {
+    if (!voiceEnabled) {
+      void stopVoiceSession({ disableVoice: false, discardRecording: true });
       return;
+    }
+    void ensureVoiceSession();
+  }, [voiceEnabled]);
+
+  function currentLevel(): number {
+    const analyser = analyserRef.current;
+    const data = audioLevelDataRef.current;
+    if (!analyser || !data) {
+      return 0;
+    }
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let index = 0; index < data.length; index += 1) {
+      const centered = (data[index] - 128) / 128;
+      sum += centered * centered;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    return Math.max(0, Math.min(1, rms * 3.5));
+  }
+
+  function startLevelAnimation() {
+    if (levelFrameRef.current !== null) {
+      cancelAnimationFrame(levelFrameRef.current);
+    }
+    const tick = () => {
+      setInputLevel(currentLevel());
+      levelFrameRef.current = requestAnimationFrame(tick);
+    };
+    levelFrameRef.current = requestAnimationFrame(tick);
+  }
+
+  function stopLevelAnimation() {
+    if (levelFrameRef.current !== null) {
+      cancelAnimationFrame(levelFrameRef.current);
+      levelFrameRef.current = null;
+    }
+    setInputLevel(0);
+  }
+
+  function voiceDetectorTick() {
+    if (!voiceEnabledRef.current || !isListeningRef.current) {
+      return;
+    }
+    const level = currentLevel();
+    const now = Date.now();
+    const recorder = mediaRecorderRef.current;
+    const agentBusy = activeRequestIdRef.current !== null || isTranscribingRef.current || isSpeakingReplyRef.current;
+
+    if (recorder && recorder.state === "recording") {
+      if (level >= voiceStopThreshold) {
+        lastSoundAtRef.current = now;
+      }
+      const recordingStartedAt = recordStartedAtRef.current ?? now;
+      const elapsed = now - recordingStartedAt;
+      if (elapsed >= maxRecordSeconds * 1000) {
+        stopSegmentRecording();
+        return;
+      }
+      if (elapsed >= voiceMinRecordingMs && now - lastSoundAtRef.current >= voiceSilenceMs) {
+        stopSegmentRecording();
+      }
+      return;
+    }
+
+    if (agentBusy) {
+      loudFrameCountRef.current = 0;
+      return;
+    }
+
+    if (level >= voiceStartThreshold) {
+      loudFrameCountRef.current += 1;
+      lastSoundAtRef.current = now;
+    } else {
+      loudFrameCountRef.current = 0;
+    }
+
+    if (loudFrameCountRef.current >= voiceRequiredFrames) {
+      loudFrameCountRef.current = 0;
+      void startSegmentRecording();
+    }
+  }
+
+  async function ensureVoiceSession() {
+    if (listeningStreamRef.current) {
+      setIsListening(true);
+      return;
+    }
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setVoiceError("Voice recording is not supported in this browser.");
+      setVoiceEnabled(false);
+      return;
+    }
+    try {
+      setVoiceError("");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      listeningStreamRef.current = stream;
+      const audioContext = new AudioContext();
+      audioContextRef.current = audioContext;
+      const sourceNode = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.86;
+      sourceNode.connect(analyser);
+      analyserRef.current = analyser;
+      audioLevelDataRef.current = new Uint8Array(new ArrayBuffer(analyser.fftSize)) as Uint8Array<ArrayBuffer>;
+      setIsListening(true);
+      startLevelAnimation();
+      if (detectionTimerRef.current !== null) {
+        clearInterval(detectionTimerRef.current);
+      }
+      detectionTimerRef.current = setInterval(voiceDetectorTick, 140);
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : "Unable to access the microphone.");
+      setVoiceEnabled(false);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(voicePreferenceKey, "false");
+      }
+    }
+  }
+
+  async function stopVoiceSession(options?: { disableVoice?: boolean; discardRecording?: boolean }) {
+    if (options?.discardRecording) {
+      discardRecordingRef.current = true;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    if (detectionTimerRef.current !== null) {
+      clearInterval(detectionTimerRef.current);
+      detectionTimerRef.current = null;
+    }
+    stopLevelAnimation();
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    listeningStreamRef.current?.getTracks().forEach((track) => track.stop());
+    listeningStreamRef.current = null;
+    try {
+      await audioContextRef.current?.close();
+    } catch {
+      // Ignore audio context cleanup errors.
+    }
+    audioContextRef.current = null;
+    analyserRef.current = null;
+    audioLevelDataRef.current = null;
+    loudFrameCountRef.current = 0;
+    setIsListening(false);
+    setIsRecording(false);
+    if (options?.disableVoice) {
+      setVoiceEnabled(false);
+    }
+  }
+
+  async function startSegmentRecording() {
+    if (!listeningStreamRef.current || mediaRecorderRef.current?.state === "recording" || isTranscribingRef.current) {
+      return;
+    }
+    try {
+      const mimeType = pickRecorderMimeType();
+      const recorder = new MediaRecorder(listeningStreamRef.current, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      discardRecordingRef.current = false;
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = () => {
+        const durationMs = recordStartedAtRef.current ? Math.max(1, Date.now() - recordStartedAtRef.current) : 0;
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || mimeType || "audio/webm" });
+        audioChunksRef.current = [];
+        recordStartedAtRef.current = null;
+        mediaRecorderRef.current = null;
+        setIsRecording(false);
+        if (stopTimerRef.current) {
+          clearTimeout(stopTimerRef.current);
+          stopTimerRef.current = null;
+        }
+        if (discardRecordingRef.current) {
+          discardRecordingRef.current = false;
+          return;
+        }
+        if (blob.size > 0) {
+          void uploadRecordedAudio(blob, durationMs);
+        }
+      };
+      recordStartedAtRef.current = Date.now();
+      lastSoundAtRef.current = Date.now();
+      recorder.start();
+      setIsRecording(true);
+      stopTimerRef.current = setTimeout(() => stopSegmentRecording(), maxRecordSeconds * 1000);
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : "Unable to start recording.");
+    }
+  }
+
+  function stopSegmentRecording(discard = false) {
+    if (discard) {
+      discardRecordingRef.current = true;
+    }
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    } else {
+      setIsRecording(false);
+    }
+  }
+
+  async function uploadRecordedAudio(blob: Blob, durationMs: number) {
+    setIsTranscribing(true);
+    setVoiceError("");
+    try {
+      const transcript = await transcribeVoiceClip(blob, durationMs, deviceId);
+      const transcriptText = transcript.text.trim();
+      if (!transcriptText) {
+        setVoiceError("I couldn't detect any speech in that recording.");
+        return;
+      }
+      setLastTranscript(transcriptText);
+      if (autoSendTranscript) {
+        sendMessage(transcriptText, { metadata: transcript.metadata, isVoice: true });
+      } else {
+        setInput(transcriptText);
+      }
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : "Voice transcription failed.");
+    } finally {
+      setIsTranscribing(false);
+    }
+  }
+
+  async function maybeSpeakReply(requestId: string | null | undefined, replyId: string | null | undefined) {
+    if (!requestId || !replyId || !voiceReplyEnabledRef.current || !voiceRequestIdsRef.current.has(requestId)) {
+      return;
+    }
+    const replyText = replyContentRef.current.get(replyId)?.trim() ?? "";
+    if (!replyText || replyText.startsWith("[Error]")) {
+      return;
+    }
+    try {
+      setIsSpeakingReply(true);
+      const audioBlob = await synthesizeVoiceReply(replyText);
+      if (activeAudioUrlRef.current) {
+        URL.revokeObjectURL(activeAudioUrlRef.current);
+      }
+      const objectUrl = URL.createObjectURL(audioBlob);
+      activeAudioUrlRef.current = objectUrl;
+      const audio = new Audio(objectUrl);
+      audio.onended = () => {
+        URL.revokeObjectURL(objectUrl);
+        if (activeAudioUrlRef.current === objectUrl) {
+          activeAudioUrlRef.current = null;
+        }
+        setIsSpeakingReply(false);
+      };
+      audio.onerror = () => {
+        setIsSpeakingReply(false);
+      };
+      await audio.play();
+    } catch {
+      setIsSpeakingReply(false);
+    }
+  }
+
+  function sendMessage(messageText: string, options?: { metadata?: Record<string, unknown>; isVoice?: boolean }) {
+    const normalized = messageText.trim();
+    if (!normalized) {
+      return false;
     }
     const requestId = crypto.randomUUID();
     const replyId = crypto.randomUUID();
@@ -247,21 +717,79 @@ export function ChatWindow() {
     } else {
       queuedRequestIdsRef.current.push(requestId);
     }
+    if (options?.isVoice) {
+      voiceRequestIdsRef.current.add(requestId);
+    }
+    replyContentRef.current.set(replyId, "Thinking...");
     setMessages((current) => [
       ...current,
-      { id: requestId, role: "user", content: input.trim() },
+      { id: requestId, role: "user", content: normalized },
       { id: replyId, role: "assistant", content: "Thinking..." },
     ]);
-    socketRef.current.send(
-      JSON.stringify({
-        type: "req",
-        id: requestId,
-        method: "agent.send",
-        params: { message: input.trim() },
-      }),
-    );
-    setInput("");
+    const pending: PendingSend = {
+      requestId,
+      replyId,
+      message: normalized,
+      metadata: options?.metadata ?? {},
+      isVoice: Boolean(options?.isVoice),
+    };
+    if (!dispatchPendingSend(pending)) {
+      pendingSendsRef.current.push(pending);
+      setSocketReady(false);
+    }
+    return true;
   }
+
+  async function toggleVoiceMode() {
+    if (voiceEnabled) {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(voicePreferenceKey, "false");
+      }
+      await stopVoiceSession({ disableVoice: true, discardRecording: true });
+      setVoiceError("");
+      return;
+    }
+    let canUseVoice = backendVoiceEnabled;
+    if (!canUseVoice) {
+      try {
+        canUseVoice = await refreshVoiceSettings();
+      } catch {
+        setVoiceError("Unable to fetch voice settings from backend. Restart the gateway and check port 8765.");
+        return;
+      }
+    }
+    if (!canUseVoice) {
+      setVoiceError("Voice is disabled in backend settings. Enable [voice.enabled] and [voice.webchat_enabled] in config.toml.");
+      return;
+    }
+    setVoiceEnabled(true);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(voicePreferenceKey, "true");
+    }
+    setVoiceError("");
+  }
+
+  function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (sendMessage(input.trim())) {
+      setInput("");
+      setVoiceError("");
+    }
+  }
+
+  const voiceStatus = isSpeakingReply
+    ? "Speaking"
+    : isTranscribing
+      ? "Transcribing"
+      : isRecording
+        ? "Listening"
+        : isListening
+          ? "Live"
+          : voiceEnabled
+            ? "Starting"
+            : backendVoiceEnabled
+              ? "Disabled"
+              : "Unavailable";
 
   return (
     <section className="rounded-[2rem] border border-white/85 bg-white/88 p-5 shadow-panel backdrop-blur sm:p-6">
@@ -274,7 +802,7 @@ export function ChatWindow() {
             dedicated operational view.
           </p>
         </div>
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-4">
           <div
             className={`rounded-[1.2rem] px-4 py-3 text-sm ${
               socketReady ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
@@ -289,8 +817,22 @@ export function ChatWindow() {
           </div>
           <div className="rounded-[1.2rem] bg-sand px-4 py-3 text-sm text-slate-700">
             <div className="text-[11px] uppercase tracking-[0.2em] text-accent">Input mode</div>
-            <div className="mt-1">Slash + natural</div>
+            <div className="mt-1">{voiceEnabled ? "Live voice + text" : "Slash + natural"}</div>
           </div>
+          <button
+            type="button"
+            onClick={() => void toggleVoiceMode()}
+            className={`rounded-[1.2rem] border px-4 py-3 text-left text-sm transition ${
+              voiceEnabled
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : backendVoiceEnabled
+                  ? "border-line/70 bg-white text-slate-700 hover:border-accent hover:text-accent"
+                  : "border-line/70 bg-slate-100 text-slate-500"
+            }`}
+          >
+            <div className="text-[11px] uppercase tracking-[0.2em]">Mic control</div>
+            <div className="mt-1">{voiceEnabled ? "Disable mic" : backendVoiceEnabled ? "Enable mic" : "Mic unavailable"}</div>
+          </button>
         </div>
       </div>
 
@@ -310,12 +852,65 @@ export function ChatWindow() {
       </div>
 
       <div className="mt-5 rounded-[1.75rem] border border-line/70 bg-white/92 p-4">
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <div
+            className={`flex items-center gap-3 rounded-[1.25rem] border px-4 py-3 text-sm transition ${
+              voiceEnabled ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-line/70 bg-foam/70 text-slate-500"
+            }`}
+          >
+            <div className="flex h-8 items-end gap-1" aria-hidden="true">
+              {[0.5, 0.75, 1, 0.75, 0.5].map((multiplier, index) => {
+                const height = 10 + Math.round(inputLevel * 26 * multiplier);
+                return (
+                  <span
+                    key={index}
+                    className={`w-1.5 rounded-full transition-all duration-150 ${
+                      voiceEnabled ? "bg-emerald-500" : "bg-slate-300"
+                    }`}
+                    style={{ height: `${height}px`, opacity: voiceEnabled ? 0.55 + multiplier * 0.2 : 0.4 }}
+                  />
+                );
+              })}
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.2em]">Voice status</div>
+              <div className="mt-1 font-medium">
+                {voiceStatus}
+                {voiceEnabled ? " mode" : ""}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void toggleVoiceMode()}
+            className={`rounded-[1.25rem] px-4 py-3 text-sm font-medium transition ${
+              voiceEnabled
+                ? "border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                : backendVoiceEnabled
+                  ? "border border-line/70 bg-white text-slate-700 hover:border-accent hover:text-accent"
+                  : "border border-line/70 bg-slate-100 text-slate-500"
+            }`}
+          >
+            {voiceEnabled ? "Disable mic" : "Enable mic"}
+          </button>
+          {lastTranscript ? (
+            <div className="min-w-[220px] flex-1 rounded-[1.25rem] border border-line/60 bg-white px-4 py-3 text-sm text-slate-600">
+              <span className="mr-2 text-[11px] uppercase tracking-[0.2em] text-slate-400">Last heard</span>
+              {lastTranscript}
+            </div>
+          ) : null}
+        </div>
+
         <form onSubmit={onSubmit} className="flex flex-col gap-3 lg:flex-row">
           <input
             className="min-w-0 flex-1 rounded-[1.25rem] border border-line/70 bg-foam/70 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-accent"
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="Ask about Gmail, GitHub, memory, browser actions, or try /skills"
+            placeholder={
+              voiceEnabled
+                ? "Mic is live. Speak naturally or type here."
+                : "Ask about Gmail, GitHub, memory, browser actions, or try /skills"
+            }
           />
           <button
             className="rounded-[1.25rem] bg-accent px-6 py-3 text-sm font-medium text-white transition hover:bg-ink"
@@ -324,6 +919,20 @@ export function ChatWindow() {
             Send
           </button>
         </form>
+        {voiceError ? <p className="mt-3 text-sm text-rose-600">{voiceError}</p> : null}
+        <p className="mt-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+          {voiceEnabled
+            ? isSpeakingReply
+              ? "Assistant is speaking. Voice capture resumes automatically when playback ends."
+              : isTranscribing
+                ? "Speech captured. Gemini is transcribing it now."
+                : isRecording
+                  ? "Listening for your voice. Your transcript will appear as a normal chat message."
+                  : "Mic is live. Speak naturally and SonarBot will keep listening until you disable the mic."
+            : backendVoiceEnabled
+              ? "Enable the mic to start continuous voice conversation with Gemini STT and TTS."
+              : "Voice is disabled in backend config."}
+        </p>
         <div className="mt-4 flex flex-wrap gap-2">
           {quickPrompts.map((prompt) => (
             <button

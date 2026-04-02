@@ -24,6 +24,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - CLI chat over `WS /ws`
 - Telegram bot replies with streaming edits
 - WebChat UI over `WS /webchat/ws`
+- optional Gemini-backed voice commands for WebChat and Telegram, with WebChat spoken replies
 - persistent sessions with compaction and snapshots
 - markdown memory with hybrid search, temporal decay, MMR, and memory stats
 - browser, PDF, web search, shell, file, OAuth, ACP, and sub-agent tools
@@ -36,7 +37,7 @@ SonarBot is a local-first autonomous AI assistant that runs as a daemon, keeps i
 - optional Windows coworker tasks with `/coworker` commands for verified multi-step desktop work such as `open task manager and summarize system usage` or `open the file you see on screen now`
 - host-system file access with policy-based drive and folder rules
 - Gmail tools: search, read thread, send, create draft
-- GitHub tools: list repos, list issues, list pull requests, get pull request details
+- GitHub tools: list repos, list issues, list pull requests, get pull request details, and get repository summaries
 - hooks, cron jobs, heartbeat turns, standing orders, and signed webhooks
 - chat-managed cron jobs via `/cron add`, `/cron list`, `/cron pause`, `/cron resume`, and `/cron delete`
 - automation inbox and run history in WebChat
@@ -86,6 +87,49 @@ npm run dev
 ```
 
 Then open `http://localhost:3000`.
+
+## Voice Commands V1
+
+SonarBot now includes an optional Gemini-powered voice layer that reuses the same text routing pipeline as typed commands.
+
+Voice input currently works in:
+
+- WebChat via push-to-talk microphone recording
+- Telegram via native voice notes
+
+Voice output currently works in:
+
+- WebChat only, using Gemini text-to-speech playback for assistant replies
+
+Voice does not create a separate command system. After transcription, SonarBot routes the text through the same NLP, command shortcuts, skills, reports, browser actions, coworker flows, and automation handlers that typed messages already use.
+
+Enable it in `~/.assistant/config.toml`:
+
+```toml
+[voice]
+enabled = true
+stt_model = "gemini-2.5-flash"
+tts_model = "gemini-2.5-flash-tts"
+tts_voice_name = "Kore"
+webchat_enabled = true
+telegram_enabled = true
+webchat_tts_enabled = true
+telegram_tts_enabled = false
+auto_send_transcript = true
+clarify_below_confidence = 0.75
+max_record_seconds = 60
+max_upload_bytes = 10485760
+retain_audio = false
+```
+
+Examples:
+
+- speak `open chrome` in WebChat
+- send a Telegram voice note saying `take a screenshot`
+- speak `make a report on AI trends`
+- speak `list report jobs`
+
+If the voice transcript confidence is low, SonarBot asks one clarifying question before taking risky action instead of guessing.
 
 ## Browser Automation V2
 

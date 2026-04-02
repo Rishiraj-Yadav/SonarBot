@@ -20,13 +20,22 @@ class DesktopCoworkerVisualReasoner:
         self._analysis_cache: dict[str, dict[str, Any]] = {}
 
     async def can_handle(self, request_text: str) -> bool:
-        analysis = await self._analyze_request(request_text)
+        analysis = await self.analyze_request(request_text)
         return bool(analysis.get("desktop_ui_task", False))
+
+    async def analyze_request(self, request_text: str) -> dict[str, Any]:
+        return await self._analyze_request(request_text)
 
     async def _analyze_request(self, request_text: str) -> dict[str, Any]:
         lowered = re.sub(r"\s+", " ", request_text.strip().lower())
         if not lowered:
-            return {"desktop_ui_task": False, "task_kind": "non_desktop", "summary": "", "normalized_request": ""}
+            return {
+                "desktop_ui_task": False,
+                "task_kind": "non_desktop",
+                "summary": "",
+                "normalized_request": "",
+                "requires_visual_context": False,
+            }
         if lowered in self._analysis_cache:
             return dict(self._analysis_cache[lowered])
         if not self.config.llm.gemini_api_key:
@@ -51,12 +60,14 @@ class DesktopCoworkerVisualReasoner:
                 "task_kind": "visual",
                 "summary": summary,
                 "normalized_request": cleaned,
+                "requires_visual_context": True,
             }
         return {
             "desktop_ui_task": False,
             "task_kind": "non_desktop",
             "summary": "",
             "normalized_request": original.strip(),
+            "requires_visual_context": False,
         }
 
     def _regex_can_handle(self, lowered: str) -> bool:
@@ -136,6 +147,7 @@ class DesktopCoworkerVisualReasoner:
                                 "Return JSON only.\n"
                                 "Desktop UI tasks include opening apps, clicking visible UI elements, interacting with dialogs, "
                                 "typing into focused fields, scrolling visible windows, and screen-aware actions.\n"
+                                "Requests such as 'turn off bluetooth', 'set volume to 40', and 'increase brightness to 100' are desktop UI tasks and are usually structured.\n"
                                 "Do not classify pure file-read/write tasks, browser-only web automation, or general questions as desktop UI tasks.\n"
                                 "Use task_kind=\"visual\" for tasks that should go through the screenshot-aware coworker loop.\n"
                                 "Use task_kind=\"structured\" for desktop UI tasks that are better handled by a deterministic desktop coworker task.\n"
@@ -146,7 +158,8 @@ class DesktopCoworkerVisualReasoner:
                                 '  "desktop_ui_task": true,\n'
                                 '  "task_kind": "visual|structured|non_desktop",\n'
                                 '  "summary": "short action-oriented summary",\n'
-                                '  "normalized_request": "cleaned request to execute"\n'
+                                '  "normalized_request": "cleaned request to execute",\n'
+                                '  "requires_visual_context": false\n'
                                 "}"
                             )
                         }
@@ -166,6 +179,7 @@ class DesktopCoworkerVisualReasoner:
             "task_kind": task_kind,
             "summary": summary,
             "normalized_request": normalized_request,
+            "requires_visual_context": bool(parsed.get("requires_visual_context", task_kind == "visual")),
         }
 
     async def decide(

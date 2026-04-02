@@ -137,6 +137,43 @@ class DesktopCoworkerExecutor:
             return await self.tool_registry.dispatch("system_open_settings", {**payload, **context})
         if step_type == "system_bluetooth_status":
             return await self.tool_registry.dispatch("system_bluetooth_status", {})
+        if step_type == "system_bluetooth_set":
+            result = await self.tool_registry.dispatch("system_bluetooth_set", {**payload, **context})
+            requested_state = str(payload.get("mode", "")).strip().lower()
+            succeeded = (
+                str(result.get("status", "")).strip().lower() == "completed"
+                and str(result.get("radio_state_after", "")).strip().lower() == requested_state
+            )
+            should_fallback = bool(payload.get("fallback_visual", False)) and not succeeded
+            if should_fallback:
+                if bool(payload.get("open_settings_on_fallback", False)):
+                    await self.tool_registry.dispatch("system_open_settings", {"page": str(payload.get("open_settings_page", "bluetooth")), **context})
+                visual_result = await self.visual.run_visual_task(
+                    goal=str(payload.get("goal") or f"Turn Bluetooth {requested_state}."),
+                    task=task,
+                    session_key=session_key,
+                    user_id=user_id,
+                    connection_id=connection_id,
+                    channel_name=channel_name,
+                )
+                return {
+                    "status": "completed" if str(visual_result.get("status", "failed")) == "completed" else "failed",
+                    "requested_state": requested_state,
+                    "fallback_visual_used": True,
+                    "direct_result": result,
+                    "visual_result": visual_result,
+                    "radio_state_after": str(visual_result.get("state_after", {}).get("screen_text", "")),
+                    "message": str(visual_result.get("summary", "")).strip(),
+                }
+            return result
+        if step_type == "system_volume_set":
+            return await self.tool_registry.dispatch("system_volume_set", {**payload, **context})
+        if step_type == "system_brightness_set":
+            return await self.tool_registry.dispatch("system_brightness_set", {**payload, **context})
+        if step_type == "apps_open":
+            return await self.tool_registry.dispatch("apps_open", {**payload})
+        if step_type == "apps_focus":
+            return await self.tool_registry.dispatch("apps_focus", {**payload})
         if step_type == "vscode_open_target":
             return await self.tool_registry.dispatch("vscode_open_target", {**payload, **context})
         if step_type == "document_read":
@@ -220,6 +257,38 @@ class DesktopCoworkerExecutor:
                 "kind": kind,
                 "message": "" if ok else f"Expected summary keys {keys} were not present.",
             }
+        if kind == "bluetooth_state":
+            expected_state = str(verification.get("state", "")).strip().lower()
+            visual_result = tool_result.get("visual_result", {})
+            if isinstance(visual_result, dict) and str(visual_result.get("status", "")).strip().lower() == "completed":
+                return {"ok": True, "kind": kind, "message": ""}
+            after_state = str(tool_result.get("radio_state_after", "")).strip().lower()
+            ok = bool(expected_state and after_state == expected_state)
+            return {
+                "ok": ok,
+                "kind": kind,
+                "message": "" if ok else f"Bluetooth did not reach the requested '{expected_state}' state.",
+            }
+        if kind == "volume_state":
+            expected_percent = int(verification.get("percent", 0) or 0)
+            actual_percent = int(tool_result.get("volume_percent", -1) or -1)
+            ok = actual_percent == expected_percent
+            return {
+                "ok": ok,
+                "kind": kind,
+                "message": "" if ok else f"Volume remained at {actual_percent}% instead of {expected_percent}%.",
+            }
+        if kind == "brightness_state":
+            if not bool(tool_result.get("supported", True)):
+                return {"ok": False, "kind": kind, "message": str(tool_result.get("message", "Direct brightness control is unavailable."))}
+            expected_percent = int(verification.get("percent", 0) or 0)
+            actual_percent = int(tool_result.get("brightness_percent", -1) or -1)
+            ok = actual_percent == expected_percent
+            return {
+                "ok": ok,
+                "kind": kind,
+                "message": "" if ok else f"Brightness remained at {actual_percent}% instead of {expected_percent}%.",
+            }
         return {"ok": True, "kind": kind, "message": ""}
 
     def _merge_latest_state(
@@ -230,6 +299,14 @@ class DesktopCoworkerExecutor:
     ) -> dict[str, Any]:
         merged = dict(existing_state or {})
         merged.update(state_after)
+        visual_result = tool_result.get("visual_result")
+        if isinstance(visual_result, dict):
+            visual_latest_state = visual_result.get("latest_state", {})
+            visual_state_after = visual_result.get("state_after", {})
+            if isinstance(visual_state_after, dict):
+                merged.update(visual_state_after)
+            if isinstance(visual_latest_state, dict):
+                merged.update(visual_latest_state)
         if "content" in tool_result and isinstance(tool_result.get("content"), str):
             if tool_result.get("path"):
                 merged["last_document_content"] = str(tool_result.get("content", ""))
@@ -251,6 +328,20 @@ class DesktopCoworkerExecutor:
             return f"{title}: CPU {summary.get('cpu_percent', 0)}%, memory and disk summary captured."
         if step_type == "system_bluetooth_status":
             return f"{title}: Bluetooth availability checked."
+        if step_type == "system_bluetooth_set":
+            if bool(tool_result.get("fallback_visual_used")):
+                return f"{title}: completed through the Settings fallback."
+            return f"{title}: Bluetooth is now {tool_result.get('radio_state_after', 'unknown')}."
+        if step_type == "system_volume_set":
+            return f"{title}: Volume is now {tool_result.get('volume_percent', 0)}%."
+        if step_type == "system_brightness_set":
+            if not bool(tool_result.get("supported", True)):
+                return f"{title}: {tool_result.get('message', 'brightness control is unavailable')}"
+            return f"{title}: Brightness is now {tool_result.get('brightness_percent', 0)}%."
+        if step_type == "apps_open":
+            return f"{title}: opened {tool_result.get('alias', tool_result.get('target', 'the app'))}."
+        if step_type == "apps_focus":
+            return f"{title}: focused {tool_result.get('target', step.get('payload', {}).get('target', 'the app'))}."
         if step_type == "document_read":
             return f"{title}: Read {tool_result.get('path', 'the document')}."
         if step_type == "document_replace_text":

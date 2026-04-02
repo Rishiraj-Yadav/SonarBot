@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,11 +12,78 @@ from uuid import uuid4
 
 from assistant.agent.session import create_message
 from assistant.agent.queue import AgentRequest, QueueMode
+from assistant.automation.models import ReportJob, ReportSource
 from assistant.gateway.protocol import AgentSendParams, RequestFrame, ResponseFrame
 from assistant.utils.logging import get_logger
 
 
 LOGGER = get_logger("skill_router")
+
+APP_CONTROL_OPEN_PATTERN = r"^(?:can you\s+|please\s+)?(?:open|launch|start)\s+(?P<target>.+)$"
+APP_CONTROL_FOCUS_PATTERN = r"^(?:switch to|focus(?: on)?)\s+(?P<target>.+)$"
+APP_CONTROL_MINIMIZE_PATTERN = r"^minimize\s+(?P<target>.+)$"
+APP_CONTROL_MAXIMIZE_PATTERN = r"^maximize\s+(?P<target>.+)$"
+APP_CONTROL_RESTORE_PATTERN = r"^restore\s+(?P<target>.+)$"
+APP_CONTROL_SNAP_PATTERN = (
+    r"^(?:put|move|snap)\s+(?P<target>.+?)\s+(?:on|to)\s+(?:the\s+)?(?P<position>left|right)$"
+)
+APP_SKILL_VOLUME_SET_PATTERN = r"^(?:set|change)\s+volume\s+to\s+(\d{1,3})$"
+APP_SKILL_BRIGHTNESS_SET_PATTERN = r"^(?:set|change|increase|raise)\s+brightness(?:\s+to)?\s+(\d{1,3})$"
+APP_SKILL_SETTINGS_PATTERN = r"^(?:open|show)\s+(sound|display|brightness|bluetooth|wifi|network|notifications)\s+settings$"
+APP_SKILL_WORKSPACE_PATTERN = r"^(?:open|start)\s+(study|work|meeting)\s+browser\s+workspace$"
+APP_SKILL_VSCODE_PATTERN = r"^(?:open|launch|start)\s+(.+?)\s+in\s+vscode$"
+DESKTOP_INPUT_CLIPBOARD_WRITE_PATTERN = r"^(?:set|write)\s+clipboard\s+to\s+(.+)$"
+DESKTOP_INPUT_MOVE_PATTERN = r"^(?:move|move mouse|move the mouse)\s+to\s+(-?\d+)[,\s]+(-?\d+)$"
+DESKTOP_INPUT_CLICK_PATTERN = r"^click\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$"
+DESKTOP_INPUT_DOUBLE_CLICK_PATTERN = r"^(?:double click|double-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$"
+DESKTOP_INPUT_RIGHT_CLICK_PATTERN = r"^(?:right click|right-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$"
+DESKTOP_INPUT_SCROLL_PATTERN = r"^scroll\s+(up|down)(?:\s+(\d+))?$"
+DESKTOP_INPUT_TYPE_PATTERN = r"^type\s+(.+)$"
+DESKTOP_INPUT_PRESS_PATTERN = r"^(?:press|hit)\s+(.+)$"
+DESKTOP_VISION_ACTIVE_PHRASES = {
+    "what app is active",
+    "which app is active",
+    "what window is active",
+}
+DESKTOP_VISION_CAPTURE_PHRASES = {
+    "take a screenshot of my desktop",
+    "take a screenshot of the desktop",
+    "take a screenshot of my screen",
+    "capture my desktop",
+    "capture the desktop",
+}
+DESKTOP_VISION_WINDOW_PHRASES = {
+    "capture the active window",
+    "take a screenshot of the active window",
+    "screenshot the active window",
+}
+DESKTOP_VISION_READ_DESKTOP_PHRASES = {
+    "read the text on my screen",
+    "read my screen",
+    "read the screen",
+}
+DESKTOP_VISION_READ_WINDOW_PHRASES = {
+    "read the active window",
+    "read text from the active window",
+    "read the text in the active window",
+}
+NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN = (
+    r"daily|day|weekdays|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekly"
+)
+NATURAL_LANGUAGE_CRON_PATTERNS = (
+    rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^remind me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
+    rf"^(?:set|create|make)\s+(?:a\s+)?reminder\s+for\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^remind me at\s+(?P<time>.+?)\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+to\s+(?P<message>.+)$",
+    rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+reminder\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+remind me to\s+(?P<message>.+)$",
+)
+ONE_TIME_REMINDER_PATTERNS = (
+    r"^remind me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+    r"^remind me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
+    r"^(?:set|create|make)\s+(?:a\s+)?reminder for (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+)
 
 
 @dataclass(slots=True)
@@ -36,6 +103,12 @@ class GatewayRouter:
     started_at: datetime
     system_access_manager: Any = None
     coworker_service: Any = None
+    _nlp: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        from assistant.gateway.nlp_classifier import IntentClassifier
+
+        self._nlp = IntentClassifier(self.config)
 
     async def handle_request(self, connection_id: str, request: RequestFrame) -> ResponseFrame:
         if request.method == "health":
@@ -49,6 +122,7 @@ class GatewayRouter:
                 "channel": getattr(connection, "channel_name", "ws"),
                 "device_id": getattr(connection, "device_id", ""),
             }
+            metadata.update(dict(params.metadata or {}))
             return await self.route_user_message(
                 connection_id=connection_id,
                 request_id=request.id,
@@ -75,29 +149,88 @@ class GatewayRouter:
         metadata.setdefault("user_id", self.config.users.default_user_id)
         metadata.setdefault("connection_id", connection_id)
         stripped = message.strip()
-        system_suffix = self._augment_system_suffix_for_intent(stripped, system_suffix)
-        if stripped.startswith("/"):
+        is_voice_input = self._is_voice_input(metadata)
+        voice_confidence = self._voice_confidence(metadata)
+        low_confidence_voice = is_voice_input and voice_confidence < float(
+            getattr(getattr(self.config, "voice", None), "clarify_below_confidence", 0.75)
+        )
+        routed_message = stripped
+        if is_voice_input and not low_confidence_voice:
+            voice_alias = self._normalize_spoken_command_alias(stripped)
+            if voice_alias:
+                metadata["voice_normalized_command"] = voice_alias
+                routed_message = voice_alias
+        canonical = routed_message
+        classification = {
+            "intent": "unknown",
+            "target": "",
+            "action": "",
+            "time_expr": "",
+            "corrected": stripped,
+            "confidence": 0.0,
+            "raw_slots": {},
+        }
+        if not routed_message.startswith("/"):
+            canonical = await self._nlp.rewrite_canonical(routed_message)
+            classification = await self._nlp.classify(canonical)
+            matching_aliases = self._known_app_aliases()
+            if classification.get("confidence", 0.0) >= 0.75 and classification.get("intent") == "open_app" and matching_aliases:
+                target_hint = str(classification.get("target", "")).strip()
+                corrected_target = await self._nlp.fuzzy_match_app(target_hint, matching_aliases) if target_hint else None
+                if corrected_target:
+                    classification["target"] = corrected_target
+                    classification["corrected"] = self._rewrite_target_text(canonical, target_hint, corrected_target)
+                    canonical = str(classification["corrected"])
+        metadata["nlp_classification"] = dict(classification)
+        extra_intent_hints: list[str] = []
+        lowered_canonical = canonical.lower().strip()
+        if classification.get("confidence", 0.0) >= 0.75 and classification.get("intent") == "browser_task":
+            extra_intent_hints.append(
+                "User wants a browser task. Prefer browser_navigate and browser_click tools."
+            )
+        if (
+            not routed_message.startswith("/")
+            and classification.get("confidence", 0.0) < 0.45
+            and not self._matches_known_shortcut(canonical, lowered_canonical)
+        ):
+            extra_intent_hints.append(
+                "The user intent is unclear. Ask a single clarifying question before acting."
+            )
+        if low_confidence_voice:
+            extra_intent_hints.append(
+                f"This message came from voice transcription with low confidence ({voice_confidence:.2f}). "
+                "Ask one brief clarifying question before taking action."
+            )
+        system_suffix = self._augment_system_suffix_for_intent(canonical, system_suffix, extra_hints=extra_intent_hints)
+        if routed_message.startswith("/") and not low_confidence_voice:
             return await self._handle_slash_command(
                 connection_id=connection_id,
                 request_id=request_id,
                 session_key=session_key,
-                raw_command=stripped,
+                raw_command=routed_message,
             )
-        oauth_provider = self._match_oauth_connect_request(stripped)
+        oauth_provider = None if low_confidence_voice else self._match_oauth_connect_request(canonical)
         if oauth_provider is not None:
             return await self._start_oauth_flow(request_id, session_key, oauth_provider)
-        if self._looks_like_oauth_status_request(stripped):
+        if not low_confidence_voice and self._looks_like_oauth_status_request(canonical):
             return await self._handle_slash_command(
                 connection_id=connection_id,
                 request_id=request_id,
                 session_key=session_key,
                 raw_command="/oauth-status",
             )
-        shortcut = await self._handle_tool_shortcut(request_id, session_key, stripped, metadata)
-        if shortcut is not None:
-            return shortcut
+        if not low_confidence_voice:
+            shortcut = await self._handle_tool_shortcut(
+                request_id,
+                session_key,
+                canonical,
+                metadata,
+                original_message=message,
+            )
+            if shortcut is not None:
+                return shortcut
 
-        skill_activation = await self._resolve_skill_intent(stripped)
+        skill_activation = None if low_confidence_voice else await self._resolve_skill_intent(canonical)
         if skill_activation is not None:
             skill, activation_source = skill_activation
             metadata["activated_skill"] = skill.name
@@ -664,6 +797,148 @@ class GatewayRouter:
                 )
             return ResponseFrame(id=request_id, ok=False, error="Unknown /cron subcommand. Use /cron help.")
 
+        if command_name == "report":
+            if self.automation_engine is None or not getattr(self.config.reports, "enabled", True):
+                return ResponseFrame(id=request_id, ok=False, error="Report automation is not enabled.")
+            user_id = await self._resolve_user_id(connection_id, session_key)
+            subcommand, subargs = self._split_command_arguments(arguments)
+            subcommand = subcommand.lower()
+            if subcommand in {"", "help"}:
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": self._report_help_text(),
+                    },
+                )
+            if subcommand in {"list", "ls"}:
+                report_jobs = await self.automation_engine.list_report_jobs(user_id)
+                lines = [
+                    f"- {item['job_id']}: {'paused' if item.get('paused') else 'active'} | {item.get('topic', '')}"
+                    + (
+                        f" | {item['schedule']}"
+                        if item.get("schedule")
+                        else (f" | once at {item['run_once_at']}" if item.get("run_once_at") else "")
+                    )
+                    for item in report_jobs
+                ] or ["No report jobs configured."]
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": "Report jobs:\n" + "\n".join(lines),
+                        "report_jobs": report_jobs,
+                    },
+                )
+            if subcommand == "run":
+                job_id = subargs.strip()
+                if not job_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /report run <job_id>.")
+                try:
+                    result = await self.automation_engine.run_report_job_now(job_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": (
+                            f"Generated report '{result.job_id}' for {result.topic}.\n"
+                            f"Saved to: {result.save_path}"
+                        ),
+                        "report_result": result.model_dump(),
+                    },
+                )
+            if subcommand in {"delete", "remove", "rm"}:
+                job_id = subargs.strip()
+                if not job_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /report delete <job_id>.")
+                deleted = await self.automation_engine.delete_report_job(job_id, user_id=user_id)
+                if not deleted:
+                    return ResponseFrame(id=request_id, ok=False, error=f"Unknown report job '{job_id}'.")
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Deleted report job '{job_id}'.",
+                    },
+                )
+            if subcommand == "pause":
+                job_id = subargs.strip()
+                if not job_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /report pause <job_id>.")
+                try:
+                    job = await self.automation_engine.pause_report_job(user_id, job_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Paused report job '{job_id}'.",
+                        "report_job": job,
+                    },
+                )
+            if subcommand == "resume":
+                job_id = subargs.strip()
+                if not job_id:
+                    return ResponseFrame(id=request_id, ok=False, error="Use /report resume <job_id>.")
+                try:
+                    job = await self.automation_engine.resume_report_job(user_id, job_id)
+                except KeyError as exc:
+                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": f"Resumed report job '{job_id}'.",
+                        "report_job": job,
+                    },
+                )
+            if subcommand == "digest":
+                digest_runner = getattr(self.automation_engine, "digest_runner", None)
+                if digest_runner is None:
+                    return ResponseFrame(id=request_id, ok=False, error="Daily digest runner is not configured.")
+                nested_subcommand, nested_args = self._split_command_arguments(subargs)
+                if nested_subcommand.lower() == "schedule":
+                    try:
+                        hour = int(nested_args.strip())
+                    except ValueError:
+                        return ResponseFrame(id=request_id, ok=False, error="Use /report digest schedule <hour>.")
+                    await digest_runner.schedule_daily(hour=hour, minute=self.config.reports.daily_digest_minute)
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={
+                            "queued": False,
+                            "session_key": session_key,
+                            "command_response": f"Scheduled daily digest at {hour:02d}:{self.config.reports.daily_digest_minute:02d}.",
+                        },
+                    )
+                digest = await digest_runner.run(user_id=user_id)
+                return ResponseFrame(
+                    id=request_id,
+                    ok=True,
+                    payload={
+                        "queued": False,
+                        "session_key": session_key,
+                        "command_response": digest,
+                    },
+                )
+            return ResponseFrame(id=request_id, ok=False, error="Unknown /report subcommand. Use /report help.")
+
         if command_name == "apps":
             if not getattr(self.config.desktop_apps, "enabled", False):
                 return ResponseFrame(id=request_id, ok=False, error="Desktop app control is not enabled.")
@@ -1125,8 +1400,15 @@ class GatewayRouter:
                         result = await self.tool_registry.dispatch("system_brightness_status", {})
                         response_text = self._format_system_response("brightness", result)
                 elif subcommand == "bluetooth":
-                    result = await self.tool_registry.dispatch("system_bluetooth_status", {})
-                    response_text = self._format_system_response("bluetooth", result)
+                    bluetooth_arg = subargs.strip().lower()
+                    if bluetooth_arg in {"", "status"}:
+                        result = await self.tool_registry.dispatch("system_bluetooth_status", {})
+                        response_text = self._format_system_response("bluetooth", result)
+                    elif bluetooth_arg in {"on", "off", "toggle"}:
+                        result = await self.tool_registry.dispatch("system_bluetooth_set", {"mode": bluetooth_arg, **context})
+                        response_text = self._format_system_response("bluetooth-set", result)
+                    else:
+                        return ResponseFrame(id=request_id, ok=False, error="Unknown /system bluetooth action. Use /system bluetooth [status|on|off|toggle].")
                 else:
                     return ResponseFrame(id=request_id, ok=False, error="Unknown /system subcommand. Use /system help.")
             except Exception as exc:
@@ -1635,12 +1917,15 @@ class GatewayRouter:
         session_key: str,
         message: str,
         metadata: dict[str, Any],
+        *,
+        original_message: str | None = None,
     ) -> ResponseFrame | None:
+        display_message = original_message if original_message is not None else message
         lowered = message.lower().strip()
         cron_shortcut = await self._handle_natural_language_cron_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1650,7 +1935,7 @@ class GatewayRouter:
         desktop_routine_shortcut = await self._handle_desktop_routine_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1660,17 +1945,27 @@ class GatewayRouter:
         one_time_shortcut = await self._handle_natural_language_one_time_reminder_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
         if one_time_shortcut is not None:
             return one_time_shortcut
 
+        immediate_report_shortcut = await self._handle_immediate_report_shortcut(
+            request_id,
+            session_key,
+            display_message,
+            lowered,
+            metadata,
+        )
+        if immediate_report_shortcut is not None:
+            return immediate_report_shortcut
+
         desktop_vision_shortcut = await self._handle_desktop_vision_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1680,7 +1975,7 @@ class GatewayRouter:
         desktop_input_shortcut = await self._handle_desktop_input_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1690,7 +1985,7 @@ class GatewayRouter:
         desktop_coworker_shortcut = await self._handle_desktop_coworker_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1700,7 +1995,7 @@ class GatewayRouter:
         app_skill_shortcut = await self._handle_app_skill_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1710,7 +2005,7 @@ class GatewayRouter:
         app_control_shortcut = await self._handle_app_control_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
@@ -1720,14 +2015,14 @@ class GatewayRouter:
         desktop_automation_shortcut = await self._handle_desktop_automation_shortcut(
             request_id,
             session_key,
-            message,
+            display_message,
             lowered,
             metadata,
         )
         if desktop_automation_shortcut is not None:
             return desktop_automation_shortcut
 
-        host_shortcut = await self._handle_host_shortcut(request_id, session_key, message, lowered, metadata)
+        host_shortcut = await self._handle_host_shortcut(request_id, session_key, display_message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
 
@@ -1737,7 +2032,7 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_latest_email_response(result)
-            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            await self._persist_inline_exchange(session_key, display_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
                 ok=True,
@@ -1751,7 +2046,7 @@ class GatewayRouter:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             repositories = result.get("repositories", []) if isinstance(result, dict) else []
             response_text = f"You currently have {len(repositories)} repositories visible through the connected GitHub account."
-            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            await self._persist_inline_exchange(session_key, display_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
                 ok=True,
@@ -1759,13 +2054,13 @@ class GatewayRouter:
             )
 
         if self._looks_like_pull_request_check(lowered):
-            repo_ref = await self._resolve_repo_reference(session_key, message)
+            repo_ref = await self._resolve_repo_reference(session_key, display_message)
             if repo_ref is None:
                 response_text = (
                     "I need the repository name to check pull requests. Tell me the repo as owner/name, "
                     "for example Rishiraj-Yadav/Personal-AI-Assistant."
                 )
-                await self._persist_inline_exchange(session_key, message, response_text, metadata)
+                await self._persist_inline_exchange(session_key, display_message, response_text, metadata)
                 return ResponseFrame(
                     id=request_id,
                     ok=True,
@@ -1780,7 +2075,7 @@ class GatewayRouter:
             except Exception as exc:
                 return ResponseFrame(id=request_id, ok=False, error=str(exc))
             response_text = self._format_pull_request_response(owner, repo, result)
-            await self._persist_inline_exchange(session_key, message, response_text, metadata)
+            await self._persist_inline_exchange(session_key, display_message, response_text, metadata)
             return ResponseFrame(
                 id=request_id,
                 ok=True,
@@ -1800,6 +2095,31 @@ class GatewayRouter:
         parsed = self._parse_natural_language_cron_request(original_message, lowered)
         if parsed is None:
             return None
+        if isinstance(parsed, dict) and parsed.get("kind") == "report":
+            user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+            report_job = ReportJob(
+                user_id=user_id,
+                topic=str(parsed["topic"]),
+                source_type=ReportSource(str(parsed["source_type"])),
+                source_path=parsed.get("source_path"),
+                save_path=parsed.get("save_path"),
+                deliver_via=str(parsed.get("deliver_via") or self.config.reports.default_deliver_via),
+                schedule=str(parsed["schedule"]) if parsed.get("schedule") else None,
+                run_once_at=parsed.get("run_once_at"),
+            )
+            created = await self.automation_engine.create_report_job(report_job)
+            response_text = self._format_report_job_created_response(created.model_dump())
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": session_key,
+                    "command_response": response_text,
+                    "report_job": created.model_dump(),
+                },
+            )
         schedule, cron_message = parsed
         user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
         try:
@@ -1830,9 +2150,34 @@ class GatewayRouter:
         lowered: str,
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
-        parsed = self._parse_natural_language_one_time_reminder_request(lowered)
+        parsed = self._parse_natural_language_one_time_reminder_request(original_message, lowered)
         if parsed is None:
             return None
+        if isinstance(parsed, dict) and parsed.get("kind") == "report":
+            user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+            report_job = ReportJob(
+                user_id=user_id,
+                topic=str(parsed["topic"]),
+                source_type=ReportSource(str(parsed["source_type"])),
+                source_path=parsed.get("source_path"),
+                save_path=parsed.get("save_path"),
+                deliver_via=str(parsed.get("deliver_via") or self.config.reports.default_deliver_via),
+                schedule=parsed.get("schedule"),
+                run_once_at=str(parsed["run_once_at"]),
+            )
+            created = await self.automation_engine.create_report_job(report_job)
+            response_text = self._format_report_job_created_response(created.model_dump())
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={
+                    "queued": False,
+                    "session_key": session_key,
+                    "command_response": response_text,
+                    "report_job": created.model_dump(),
+                },
+            )
         run_at, reminder_message = parsed
         user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
         try:
@@ -1853,6 +2198,48 @@ class GatewayRouter:
                 "session_key": session_key,
                 "command_response": response_text,
                 "one_time_reminder": reminder,
+            },
+        )
+
+    async def _handle_immediate_report_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        parsed = self._parse_immediate_report_request(original_message, lowered)
+        if parsed is None:
+            return None
+        if self.automation_engine is None or not getattr(self.config.reports, "enabled", True):
+            return ResponseFrame(id=request_id, ok=False, error="Report automation is not enabled.")
+        generate_report_now = getattr(self.automation_engine, "generate_report_now", None)
+        if not callable(generate_report_now):
+            return ResponseFrame(id=request_id, ok=False, error="Immediate report generation is not available.")
+        user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
+        report_job = ReportJob(
+            user_id=user_id,
+            topic=str(parsed["topic"]),
+            source_type=ReportSource(str(parsed["source_type"])),
+            source_path=parsed.get("source_path"),
+            save_path=parsed.get("save_path"),
+            deliver_via=str(parsed.get("deliver_via") or self.config.reports.default_deliver_via),
+        )
+        try:
+            result = await generate_report_now(report_job, notify_channel=False)
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_immediate_report_response(result.model_dump())
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "report_result": result.model_dump(),
             },
         )
 
@@ -1970,7 +2357,7 @@ class GatewayRouter:
     ) -> ResponseFrame | None:
         if self.coworker_service is None or not getattr(self.config.desktop_coworker, "enabled", False):
             return None
-        parsed = await self._parse_desktop_coworker_request(original_message, lowered)
+        parsed = await self._parse_desktop_coworker_request(session_key, original_message, lowered)
         if parsed is None:
             return None
         user_id = str(metadata.get("user_id") or self.config.users.default_user_id)
@@ -1979,6 +2366,7 @@ class GatewayRouter:
                 user_id=user_id,
                 session_key=session_key,
                 request_text=str(parsed["request"]),
+                request_analysis=dict(parsed.get("analysis", {})) if isinstance(parsed.get("analysis"), dict) else None,
                 connection_id=str(metadata.get("connection_id", "")),
                 channel_name=str(metadata.get("channel", "")),
             )
@@ -2044,6 +2432,9 @@ class GatewayRouter:
             elif action == "bluetooth":
                 result = await self.tool_registry.dispatch("system_bluetooth_status", {})
                 response_text = self._format_system_response("bluetooth", result)
+            elif action == "bluetooth-set":
+                result = await self.tool_registry.dispatch("system_bluetooth_set", {"mode": str(parsed["mode"]), **context})
+                response_text = self._format_system_response("bluetooth-set", result)
             elif action == "preset-run":
                 result = await self.tool_registry.dispatch("preset_run", {"name": str(parsed["name"]), "user_id": user_id})
                 response_text = self._format_preset_response("run", result)
@@ -2078,7 +2469,7 @@ class GatewayRouter:
         lowered: str,
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
-        parsed = self._parse_app_control_request(lowered)
+        parsed = await self._parse_app_control_request(lowered)
         if parsed is None:
             return None
         if not getattr(self.config.desktop_apps, "enabled", False):
@@ -2641,9 +3032,15 @@ class GatewayRouter:
 
         return None
 
-    def _augment_system_suffix_for_intent(self, message: str, existing: str | None) -> str | None:
+    def _augment_system_suffix_for_intent(
+        self,
+        message: str,
+        existing: str | None,
+        *,
+        extra_hints: list[str] | None = None,
+    ) -> str | None:
         lowered = message.lower()
-        hints: list[str] = []
+        hints: list[str] = list(extra_hints or [])
         if (("last" in lowered or "latest" in lowered) and ("mail" in lowered or "email" in lowered)) or (
             "recent email" in lowered
         ):
@@ -2681,6 +3078,60 @@ class GatewayRouter:
         if existing:
             return f"{existing}\n\n## Intent Hint\n" + "\n".join(hints)
         return "## Intent Hint\n" + "\n".join(hints)
+
+    def _is_voice_input(self, metadata: dict[str, Any]) -> bool:
+        return str(metadata.get("input_mode", "")).strip().lower() == "voice"
+
+    def _voice_confidence(self, metadata: dict[str, Any]) -> float:
+        try:
+            value = float(metadata.get("voice_confidence", 1.0))
+        except Exception:
+            value = 1.0
+        return max(0.0, min(value, 1.0))
+
+    def _normalize_spoken_command_alias(self, message: str) -> str | None:
+        normalized = re.sub(r"\s+", " ", message.strip().lower())
+        if normalized in {"list report jobs", "show report jobs", "show my report jobs", "list my report jobs"}:
+            return "/report list"
+        if normalized in {"list cron jobs", "show cron jobs", "show my cron jobs", "list my cron jobs"}:
+            return "/cron list"
+        for pattern, command in (
+            (r"^(?:run|execute|start)\s+report\s+job\s+([a-z0-9-]+)$", "/report run {}"),
+            (r"^(?:delete|remove)\s+report\s+job\s+([a-z0-9-]+)$", "/report delete {}"),
+            (r"^(?:pause|stop)\s+report\s+job\s+([a-z0-9-]+)$", "/report pause {}"),
+            (r"^(?:resume|continue)\s+report\s+job\s+([a-z0-9-]+)$", "/report resume {}"),
+        ):
+            match = re.match(pattern, normalized)
+            if match is not None:
+                return command.format(match.group(1))
+        return None
+
+    def _rewrite_target_text(self, message: str, original_target: str, corrected_target: str) -> str:
+        original = str(original_target).strip()
+        corrected = str(corrected_target).strip()
+        if not original or not corrected:
+            return message
+        rewritten = re.sub(re.escape(original), corrected, message, count=1, flags=re.IGNORECASE)
+        return rewritten if rewritten else message
+
+    def _matches_known_shortcut(self, message: str, lowered: str) -> bool:
+        return any(
+            (
+                self._parse_natural_language_cron_request(message, lowered) is not None,
+                self._parse_natural_language_one_time_reminder_request(message, lowered) is not None,
+                self._parse_immediate_report_request(message, lowered) is not None,
+                self._parse_desktop_vision_request(lowered) is not None,
+                self._parse_desktop_input_request(lowered) is not None,
+                self._parse_app_skill_request(message, lowered) is not None,
+                self._parse_app_control_request_exact(lowered) is not None,
+                self._extract_explicit_host_path(message) is not None,
+                self._match_known_host_folder(lowered) is not None,
+                self._extract_host_search_root(lowered) is not None,
+                self._looks_like_latest_email_request(lowered),
+                self._looks_like_repo_count_request(lowered),
+                self._looks_like_pull_request_check(lowered),
+            )
+        )
 
     async def _fire_message_received(self, session_key: str, message: str, metadata: dict[str, Any]) -> Any:
         return await self.hook_runner.fire_event(
@@ -2723,6 +3174,41 @@ class GatewayRouter:
             "/cron resume <cron_id>\n"
             "/cron delete <cron_id>"
         )
+
+    def _report_help_text(self) -> str:
+        return (
+            "Report commands:\n"
+            "/report list\n"
+            "/report run <job_id>\n"
+            "/report delete <job_id>\n"
+            "/report pause <job_id>\n"
+            "/report resume <job_id>\n"
+            "/report digest\n"
+            "/report digest schedule <hour>"
+        )
+
+    def _format_report_job_created_response(self, job: dict[str, Any]) -> str:
+        if job.get("schedule"):
+            schedule_text = str(job["schedule"])
+            return (
+                f"Created report job '{job['job_id']}' on {schedule_text}.\n"
+                f"Topic: {job['topic']}"
+            )
+        run_once_at = str(job.get("run_once_at", "")).strip()
+        return (
+            f"Created one-time report job '{job['job_id']}' for {run_once_at}.\n"
+            f"Topic: {job['topic']}"
+        )
+
+    def _format_immediate_report_response(self, result: dict[str, Any]) -> str:
+        preview = str(result.get("summary_preview", "")).strip()
+        lines = [
+            f"Generated report for {result.get('topic', 'the requested topic')}.",
+            f"Saved to: {result.get('save_path', '')}",
+        ]
+        if preview:
+            lines.extend(["", preview])
+        return "\n".join(lines)
 
     def _apps_help_text(self) -> str:
         return (
@@ -2835,7 +3321,8 @@ class GatewayRouter:
             "/system volume set <0-100>\n"
             "/system brightness\n"
             "/system brightness set <0-100>\n"
-            "/system bluetooth"
+            "/system bluetooth\n"
+            "/system bluetooth <on|off|toggle>"
         )
 
     def _task_help_text(self) -> str:
@@ -2884,23 +3371,27 @@ class GatewayRouter:
             return {"action": "task-summary"}
         if normalized in {"what is the volume", "what's the volume", "current volume", "show volume"}:
             return {"action": "volume"}
-        volume_match = re.match(r"^(?:set|change)\s+volume\s+to\s+(\d{1,3})$", normalized)
+        volume_match = re.match(APP_SKILL_VOLUME_SET_PATTERN, normalized)
         if volume_match is not None:
             return {"action": "volume-set", "percent": int(volume_match.group(1))}
         if normalized in {"what is the brightness", "what's the brightness", "current brightness", "show brightness"}:
             return {"action": "brightness"}
-        brightness_match = re.match(r"^(?:set|change)\s+brightness\s+to\s+(\d{1,3})$", normalized)
+        brightness_match = re.match(APP_SKILL_BRIGHTNESS_SET_PATTERN, normalized)
         if brightness_match is not None:
             return {"action": "brightness-set", "percent": int(brightness_match.group(1))}
         if normalized in {"bluetooth status", "show bluetooth status", "what is the bluetooth status"}:
             return {"action": "bluetooth"}
-        settings_match = re.match(r"^(?:open|show)\s+(sound|display|brightness|bluetooth|wifi|network|notifications)\s+settings$", normalized)
+        if normalized in {"turn off bluetooth", "turn the bluetooth off", "switch off bluetooth", "disable bluetooth"}:
+            return {"action": "bluetooth-set", "mode": "off"}
+        if normalized in {"turn on bluetooth", "turn the bluetooth on", "switch on bluetooth", "enable bluetooth"}:
+            return {"action": "bluetooth-set", "mode": "on"}
+        settings_match = re.match(APP_SKILL_SETTINGS_PATTERN, normalized)
         if settings_match is not None:
             return {"action": "settings", "page": settings_match.group(1)}
-        workspace_match = re.match(r"^(?:open|start)\s+(study|work|meeting)\s+browser\s+workspace$", normalized)
+        workspace_match = re.match(APP_SKILL_WORKSPACE_PATTERN, normalized)
         if workspace_match is not None:
             return {"action": "browser-workspace", "workspace": workspace_match.group(1)}
-        vscode_match = re.match(r"^(?:open|launch|start)\s+(.+?)\s+in\s+vscode$", message.strip(), flags=re.IGNORECASE)
+        vscode_match = re.match(APP_SKILL_VSCODE_PATTERN, message.strip(), flags=re.IGNORECASE)
         if vscode_match is not None:
             target = str(vscode_match.group(1)).strip().strip("\"'")
             prefer = "file" if re.search(r"\.[A-Za-z0-9]{1,6}$", target) else "either"
@@ -2915,33 +3406,15 @@ class GatewayRouter:
 
     def _parse_desktop_vision_request(self, lowered: str) -> dict[str, str] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
-        if normalized in {"what app is active", "which app is active", "what window is active"}:
+        if normalized in DESKTOP_VISION_ACTIVE_PHRASES:
             return {"action": "active"}
-        if normalized in {
-            "take a screenshot of my desktop",
-            "take a screenshot of the desktop",
-            "take a screenshot of my screen",
-            "capture my desktop",
-            "capture the desktop",
-        }:
+        if normalized in DESKTOP_VISION_CAPTURE_PHRASES:
             return {"action": "capture"}
-        if normalized in {
-            "capture the active window",
-            "take a screenshot of the active window",
-            "screenshot the active window",
-        }:
+        if normalized in DESKTOP_VISION_WINDOW_PHRASES:
             return {"action": "window"}
-        if normalized in {
-            "read the text on my screen",
-            "read my screen",
-            "read the screen",
-        }:
+        if normalized in DESKTOP_VISION_READ_DESKTOP_PHRASES:
             return {"action": "read", "target": "desktop"}
-        if normalized in {
-            "read the active window",
-            "read text from the active window",
-            "read the text in the active window",
-        }:
+        if normalized in DESKTOP_VISION_READ_WINDOW_PHRASES:
             return {"action": "read", "target": "window"}
         return None
 
@@ -2951,81 +3424,43 @@ class GatewayRouter:
             return {"action": "copy-selected"}
         if normalized in {"what is on my clipboard", "what's on my clipboard", "read my clipboard", "get clipboard"}:
             return {"action": "clipboard-read"}
-        clipboard_match = re.match(r"^(?:set|write)\s+clipboard\s+to\s+(.+)$", normalized)
+        clipboard_match = re.match(DESKTOP_INPUT_CLIPBOARD_WRITE_PATTERN, normalized)
         if clipboard_match is not None:
             return {"action": "clipboard-write", "text": clipboard_match.group(1).strip()}
-        move_match = re.match(r"^(?:move|move mouse|move the mouse)\s+to\s+(-?\d+)[,\s]+(-?\d+)$", normalized)
+        move_match = re.match(DESKTOP_INPUT_MOVE_PATTERN, normalized)
         if move_match is not None:
             return {"action": "move", "x": int(move_match.group(1)), "y": int(move_match.group(2))}
-        click_match = re.match(r"^click\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        click_match = re.match(DESKTOP_INPUT_CLICK_PATTERN, normalized)
         if click_match is not None:
             return {"action": "click", "x": int(click_match.group(1)), "y": int(click_match.group(2))}
-        double_click_match = re.match(r"^(?:double click|double-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        double_click_match = re.match(DESKTOP_INPUT_DOUBLE_CLICK_PATTERN, normalized)
         if double_click_match is not None:
             return {"action": "double-click", "x": int(double_click_match.group(1)), "y": int(double_click_match.group(2))}
-        right_click_match = re.match(r"^(?:right click|right-click)\s+(?:at\s+)?(-?\d+)[,\s]+(-?\d+)$", normalized)
+        right_click_match = re.match(DESKTOP_INPUT_RIGHT_CLICK_PATTERN, normalized)
         if right_click_match is not None:
             return {"action": "right-click", "x": int(right_click_match.group(1)), "y": int(right_click_match.group(2))}
-        scroll_match = re.match(r"^scroll\s+(up|down)(?:\s+(\d+))?$", normalized)
+        scroll_match = re.match(DESKTOP_INPUT_SCROLL_PATTERN, normalized)
         if scroll_match is not None:
             return {"action": "scroll", "direction": scroll_match.group(1), "amount": int(scroll_match.group(2) or "1")}
-        type_match = re.match(r"^type\s+(.+)$", normalized)
+        type_match = re.match(DESKTOP_INPUT_TYPE_PATTERN, normalized)
         if type_match is not None:
             return {"action": "type", "text": type_match.group(1)}
-        press_match = re.match(r"^(?:press|hit)\s+(.+)$", normalized)
+        press_match = re.match(DESKTOP_INPUT_PRESS_PATTERN, normalized)
         if press_match is not None:
             return {"action": "hotkey", "hotkey": press_match.group(1)}
         return None
 
-    async def _parse_desktop_coworker_request(self, original_message: str, lowered: str) -> dict[str, Any] | None:
+    async def _parse_desktop_coworker_request(self, session_key: str, original_message: str, lowered: str) -> dict[str, Any] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
-        if normalized.startswith("help me "):
-            return {"request": original_message.strip()}
-        multi_step_markers = [
-            " and verify",
-            " and confirm",
-            " and summarize",
-            " and tell me whether",
-        ]
-        if any(marker in normalized for marker in multi_step_markers) and await self.coworker_service.can_handle_request(original_message):
-            return {"request": original_message.strip()}
-        bluetooth_toggle_patterns = (
-            r"\bturn\s+off\s+(?:the\s+)?bluetooth\b",
-            r"\bturn\s+(?:the\s+)?bluetooth\s+off\b",
-            r"\bswitch\s+off\s+(?:the\s+)?bluetooth\b",
-            r"\bswitch\s+(?:the\s+)?bluetooth\s+off\b",
-            r"\bdisable\s+(?:the\s+)?bluetooth\b",
-            r"\bturn\s+on\s+(?:the\s+)?bluetooth\b",
-            r"\bturn\s+(?:the\s+)?bluetooth\s+on\b",
-            r"\bswitch\s+on\s+(?:the\s+)?bluetooth\b",
-            r"\bswitch\s+(?:the\s+)?bluetooth\s+on\b",
-            r"\benable\s+(?:the\s+)?bluetooth\b",
-        )
-        if any(re.search(pattern, normalized) for pattern in bluetooth_toggle_patterns):
-            if await self.coworker_service.can_handle_request(original_message):
-                return {"request": original_message.strip()}
-        if re.match(r"^(?:click(?:\s+on)?|select|double click|double-click)\s+(?!at\b)(?:the\s+)?[a-z0-9][\w\s._()&-]*$", normalized):
-            if await self.coworker_service.can_handle_request(original_message):
-                return {"request": original_message.strip()}
-        visual_markers = [
-            "see on screen",
-            "see on the screen",
-            "visible on screen",
-            "visible on the screen",
-            "on screen now",
-            "on the screen now",
-            "you are seeing on the screen",
-            "shown on screen",
-            "highlighted",
-            "visible file",
-            "visible item",
-            "visible button",
-            "visible tab",
-        ]
-        if (
-            any(marker in normalized for marker in visual_markers)
-            or re.search(r"\b(?:open|click|select|double click|double-click)\b.+\bvisible\b", normalized)
-        ) and await self.coworker_service.can_handle_request(original_message):
+        if hasattr(self.coworker_service, "analyze_request"):
+            analysis = await self.coworker_service.analyze_request(session_key=session_key, request_text=original_message.strip())
+            if bool(analysis.get("desktop_ui_task", False)):
+                return {
+                    "request": str(analysis.get("normalized_request", "")).strip() or original_message.strip(),
+                    "analysis": analysis,
+                }
+            return None
+        if normalized.startswith("help me ") and await self.coworker_service.can_handle_request(original_message):
             return {"request": original_message.strip()}
         return None
 
@@ -3041,7 +3476,7 @@ class GatewayRouter:
             return None
         return str(match.group(1)), int(match.group(2) or "1")
 
-    def _parse_app_control_request(self, lowered: str) -> dict[str, str] | None:
+    def _parse_app_control_request_exact(self, lowered: str) -> dict[str, str] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
         aliases = self._known_app_aliases()
         if not aliases:
@@ -3054,44 +3489,85 @@ class GatewayRouter:
             target = re.sub(r"\s+window$", "", target)
             return target.strip()
 
-        open_match = re.match(r"^(?:can you\s+|please\s+)?(?:open|launch|start)\s+(?P<target>.+)$", normalized)
+        open_match = re.match(APP_CONTROL_OPEN_PATTERN, normalized)
         if open_match is not None:
             target = _clean_target(str(open_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "open", "target": target.lower()}
 
-        focus_match = re.match(r"^(?:switch to|focus(?: on)?)\s+(?P<target>.+)$", normalized)
+        focus_match = re.match(APP_CONTROL_FOCUS_PATTERN, normalized)
         if focus_match is not None:
             target = _clean_target(str(focus_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "focus", "target": target.lower()}
 
-        minimize_match = re.match(r"^minimize\s+(?P<target>.+)$", normalized)
+        minimize_match = re.match(APP_CONTROL_MINIMIZE_PATTERN, normalized)
         if minimize_match is not None:
             target = _clean_target(str(minimize_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "minimize", "target": target.lower()}
 
-        maximize_match = re.match(r"^maximize\s+(?P<target>.+)$", normalized)
+        maximize_match = re.match(APP_CONTROL_MAXIMIZE_PATTERN, normalized)
         if maximize_match is not None:
             target = _clean_target(str(maximize_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "maximize", "target": target.lower()}
 
-        restore_match = re.match(r"^restore\s+(?P<target>.+)$", normalized)
+        restore_match = re.match(APP_CONTROL_RESTORE_PATTERN, normalized)
         if restore_match is not None:
             target = _clean_target(str(restore_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "restore", "target": target.lower()}
 
-        snap_match = re.match(
-            r"^(?:put|move|snap)\s+(?P<target>.+?)\s+(?:on|to)\s+(?:the\s+)?(?P<position>left|right)$",
-            normalized,
-        )
+        snap_match = re.match(APP_CONTROL_SNAP_PATTERN, normalized)
         if snap_match is not None:
             target = _clean_target(str(snap_match.group("target")))
             if target.lower() in aliases:
                 return {"action": "snap", "target": target.lower(), "position": str(snap_match.group("position")).lower()}
+        return None
+
+    async def _parse_app_control_request(self, lowered: str) -> dict[str, str] | None:
+        exact_match = self._parse_app_control_request_exact(lowered)
+        if exact_match is not None:
+            return exact_match
+        normalized = re.sub(r"\s+", " ", lowered).strip()
+        aliases = self._known_app_aliases()
+        if not aliases:
+            return None
+
+        def _clean_target(value: str) -> str:
+            target = value.strip().strip("\"'")
+            target = re.sub(r"^(?:the|my)\s+", "", target)
+            target = re.sub(r"\s+app$", "", target)
+            target = re.sub(r"\s+window$", "", target)
+            return target.strip()
+
+        for action_name, pattern in (
+            ("open", APP_CONTROL_OPEN_PATTERN),
+            ("focus", APP_CONTROL_FOCUS_PATTERN),
+            ("minimize", APP_CONTROL_MINIMIZE_PATTERN),
+            ("maximize", APP_CONTROL_MAXIMIZE_PATTERN),
+            ("restore", APP_CONTROL_RESTORE_PATTERN),
+        ):
+            match = re.match(pattern, normalized)
+            if match is None:
+                continue
+            target_word = _clean_target(str(match.group("target")))
+            corrected_target = await self._nlp.fuzzy_match_app(target_word, aliases)
+            if corrected_target:
+                return {"action": action_name, "target": corrected_target}
+            return None
+        snap_match = re.match(APP_CONTROL_SNAP_PATTERN, normalized)
+        if snap_match is None:
+            return None
+        target_word = _clean_target(str(snap_match.group("target")))
+        corrected_target = await self._nlp.fuzzy_match_app(target_word, aliases)
+        if corrected_target:
+            return {
+                "action": "snap",
+                "target": corrected_target,
+                "position": str(snap_match.group("position")).lower(),
+            }
         return None
 
     def _format_app_control_response(self, action: str, result: dict[str, Any]) -> str:
@@ -3342,8 +3818,13 @@ class GatewayRouter:
             return (
                 f"Bluetooth is {availability}.\n"
                 f"Service: {result.get('service_status', 'Unknown')}\n"
-                f"Connected/ready devices: {result.get('device_count', 0)}"
+                f"Connected/ready devices: {result.get('device_count', 0)}\n"
+                f"Radio state: {result.get('radio_state', 'Unknown')}"
             )
+        if action == "bluetooth-set":
+            if str(result.get("status", "")).strip().lower() == "completed":
+                return f"Bluetooth is now {result.get('radio_state_after', result.get('requested_state', 'updated'))}."
+            return str(result.get("message") or "Bluetooth did not change state.")
         if action == "status":
             memory = result.get("memory", {}) if isinstance(result.get("memory"), dict) else {}
             disk = result.get("disk", {}) if isinstance(result.get("disk"), dict) else {}
@@ -3439,23 +3920,14 @@ class GatewayRouter:
         normalized = value.strip().strip("\"'")
         return normalized or None
 
-    def _parse_natural_language_cron_request(self, message: str, lowered: str) -> tuple[str, str] | None:
+    def _parse_natural_language_cron_request(self, message: str, lowered: str) -> tuple[str, str] | dict[str, Any] | None:
+        report_request = self._parse_natural_language_report_request(message, lowered, one_time=False)
+        if report_request is not None:
+            return report_request
         normalized = re.sub(r"\s+", " ", lowered).strip()
         normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
         normalized = re.sub(r"^(?:set up|setup)\s+", "set ", normalized)
-        frequency_pattern = (
-            r"daily|day|weekdays|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekly"
-        )
-        patterns = (
-            rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            rf"^remind me every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            rf"^every\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
-            rf"^(?:set|create|make)\s+(?:a\s+)?reminder\s+for\s+(?P<frequency>{frequency_pattern})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            rf"^remind me at\s+(?P<time>.+?)\s+(?P<frequency>{frequency_pattern})s?\s+to\s+(?P<message>.+)$",
-            rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+reminder\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-            rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+remind me to\s+(?P<message>.+)$",
-        )
-        for pattern in patterns:
+        for pattern in NATURAL_LANGUAGE_CRON_PATTERNS:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if not match:
                 continue
@@ -3474,15 +3946,17 @@ class GatewayRouter:
                 return schedule, reminder_message
         return None
 
-    def _parse_natural_language_one_time_reminder_request(self, lowered: str) -> tuple[datetime, str] | None:
+    def _parse_natural_language_one_time_reminder_request(
+        self,
+        message: str,
+        lowered: str,
+    ) -> tuple[datetime, str] | dict[str, Any] | None:
+        report_request = self._parse_natural_language_report_request(message, lowered, one_time=True)
+        if report_request is not None:
+            return report_request
         normalized = re.sub(r"\s+", " ", lowered).strip()
         normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
-        patterns = (
-            r"^remind me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
-            r"^remind me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
-            r"^(?:set|create|make)\s+(?:a\s+)?reminder for (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
-        )
-        for pattern in patterns:
+        for pattern in ONE_TIME_REMINDER_PATTERNS:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if not match:
                 continue
@@ -3491,6 +3965,177 @@ class GatewayRouter:
             if run_at is not None and reminder_message:
                 return run_at, reminder_message
         return None
+
+    def _parse_natural_language_report_request(
+        self,
+        message: str,
+        lowered: str,
+        *,
+        one_time: bool,
+    ) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", message).strip()
+        lowered_normalized = re.sub(r"\s+", " ", lowered).strip()
+        if "report" not in lowered_normalized:
+            return None
+        if not re.search(r"\b(?:make|create|generate|prepare|write)\b", lowered_normalized):
+            return None
+        has_one_time_marker = any(token in lowered_normalized for token in ("today", "tomorrow", "tonight"))
+        if one_time and not has_one_time_marker:
+            return None
+        if not one_time and has_one_time_marker:
+            return None
+
+        topic = self._extract_report_topic(normalized)
+        if not topic:
+            return None
+        time_expr = self._extract_report_time_expression(lowered_normalized)
+        if not time_expr:
+            return None
+
+        deliver_via = self._extract_report_delivery(lowered_normalized)
+        save_path = self._extract_report_save_path(normalized)
+        source_path = self._extract_report_source_path(normalized)
+        source_type = self._infer_report_source_type(lowered_normalized, topic, source_path)
+
+        if one_time:
+            day_token = "today"
+            if "tomorrow" in lowered_normalized:
+                day_token = "tomorrow"
+            run_at = self._build_one_time_reminder_datetime(day_token, time_expr)
+            if run_at is None:
+                return None
+            return {
+                "kind": "report",
+                "topic": topic,
+                "source_type": source_type,
+                "source_path": source_path,
+                "save_path": save_path,
+                "deliver_via": deliver_via,
+                "run_once_at": run_at.astimezone(timezone.utc).isoformat(),
+                "schedule": None,
+            }
+
+        frequency = self._extract_report_frequency(lowered_normalized) or "day"
+        schedule = self._build_schedule_from_frequency_and_time(frequency, time_expr)
+        if schedule is None:
+            return None
+        return {
+            "kind": "report",
+            "topic": topic,
+            "source_type": source_type,
+            "source_path": source_path,
+            "save_path": save_path,
+            "deliver_via": deliver_via,
+            "schedule": schedule,
+            "run_once_at": None,
+        }
+
+    def _parse_immediate_report_request(self, message: str, lowered: str) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", " ", message).strip()
+        lowered_normalized = re.sub(r"\s+", " ", lowered).strip()
+        if "report" not in lowered_normalized:
+            return None
+        if not re.search(r"\b(?:make|create|generate|prepare|write)\b", lowered_normalized):
+            return None
+        if self._extract_report_time_expression(lowered_normalized) is not None:
+            return None
+        if self._extract_report_frequency(lowered_normalized) is not None:
+            return None
+        if any(token in lowered_normalized for token in ("today at", "tomorrow", "tonight", "this evening", "this morning", "this afternoon")):
+            return None
+        topic = self._extract_report_topic(normalized)
+        if not topic:
+            return None
+        save_path = self._extract_report_save_path(normalized)
+        source_path = self._extract_report_source_path(normalized)
+        return {
+            "kind": "report_now",
+            "topic": topic,
+            "source_type": self._infer_report_source_type(lowered_normalized, topic, source_path),
+            "source_path": source_path,
+            "save_path": save_path,
+            "deliver_via": self._extract_report_delivery(lowered_normalized),
+        }
+
+    def _extract_report_topic(self, message: str) -> str | None:
+        match = re.search(r"\breport\b.*?\b(?:on|about)\s+(?P<topic>.+)$", message, flags=re.IGNORECASE)
+        if match is None:
+            match = re.search(r"\breport\b(?:\s+(?:on|about))?\s+(?P<topic>.+)$", message, flags=re.IGNORECASE)
+        if match is None:
+            return None
+        topic = match.group("topic").strip()
+        splitters = [
+            r"\s+at\s+.+$",
+            r"\s+every\s+.+$",
+            r"\s+save\s+to\s+.+$",
+            r"\s+and\s+(?:send|notify|message).+$",
+            r"\s+save\s+in\s+.+$",
+        ]
+        for splitter in splitters:
+            topic = re.sub(splitter, "", topic, flags=re.IGNORECASE).strip()
+        return topic.strip(" .") or None
+
+    def _extract_report_time_expression(self, lowered: str) -> str | None:
+        match = re.search(
+            r"\bat\s+(?P<time>\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}(?::\d{2})?|morning|afternoon|evening|night)\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        return str(match.group("time")).strip() if match is not None else None
+
+    def _extract_report_frequency(self, lowered: str) -> str | None:
+        match = re.search(
+            rf"\bevery\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})(?:s)?\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        return str(match.group("frequency")).strip().lower() if match is not None else None
+
+    def _extract_report_save_path(self, message: str) -> str | None:
+        save_match = re.search(
+            r"\bsave\s+to\s+(?P<path>.+?)(?=\s+(?:and\s+(?:send|notify|message)|every|at)\b|$)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if save_match is not None:
+            return save_match.group("path").strip().strip("\"'")
+        folder_match = re.search(
+            r"\bsave\s+in\s+(?P<path>.+?)(?:\s+folder)?(?=\s+(?:and\s+(?:send|notify|message)|every|at)\b|$)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if folder_match is not None:
+            return folder_match.group("path").strip().strip("\"'")
+        return None
+
+    def _extract_report_source_path(self, message: str) -> str | None:
+        path_match = re.search(r"(?P<path>[A-Za-z]:[\\/][^\"']+)", message)
+        if path_match is not None:
+            return path_match.group("path").strip()
+        folder_match = re.search(r"\b(6_semester(?:\s+folder)?|6 semester(?:\s+folder)?)\b", message, flags=re.IGNORECASE)
+        if folder_match is not None:
+            return folder_match.group(1).strip()
+        return None
+
+    def _infer_report_source_type(self, lowered: str, topic: str, source_path: str | None) -> str:
+        if source_path or "folder" in lowered or "6_semester" in lowered or "6 semester" in lowered:
+            return ReportSource.folder.value
+        if "my notes" in lowered or "memory" in lowered:
+            return ReportSource.memory.value
+        if "search" in lowered or "latest" in lowered:
+            return ReportSource.web_search.value
+        return ReportSource.mixed.value
+
+    def _extract_report_delivery(self, lowered: str) -> str:
+        wants_telegram = any(token in lowered for token in ("send", "notify", "message"))
+        wants_memory = "save to memory" in lowered or "memory" in lowered and "report" in lowered and "save" in lowered
+        if wants_telegram and wants_memory:
+            return "all"
+        if wants_memory:
+            return "memory"
+        if wants_telegram:
+            return "telegram"
+        return "file"
 
     def _build_one_time_reminder_datetime(self, day_text: str, time_text: str) -> datetime | None:
         parsed_time = self._parse_reminder_time(time_text)

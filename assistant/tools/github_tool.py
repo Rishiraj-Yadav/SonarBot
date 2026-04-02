@@ -145,6 +145,135 @@ def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
             ],
         }
 
+    async def github_get_repo_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        owner = str(payload["owner"]).strip()
+        repo = str(payload["repo"]).strip()
+        issue_limit = max(1, min(int(payload.get("issue_limit", 10)), 25))
+        pr_limit = max(1, min(int(payload.get("pr_limit", 10)), 25))
+        commit_limit = max(1, min(int(payload.get("commit_limit", 5)), 10))
+        token = await _require_github_token(oauth_token_manager)
+
+        repo_data = await _github_request(token, "GET", f"{GITHUB_API_ROOT}/repos/{owner}/{repo}")
+        issues = await _github_request(
+            token,
+            "GET",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/issues",
+            params={"state": "open", "per_page": issue_limit},
+        )
+        pulls = await _github_request(
+            token,
+            "GET",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/pulls",
+            params={"state": "open", "per_page": pr_limit},
+        )
+        commits = await _github_request(
+            token,
+            "GET",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/commits",
+            params={"per_page": commit_limit},
+        )
+
+        filtered_issues = [issue for issue in issues if "pull_request" not in issue]
+        blocker_labels = {"blocker", "critical", "urgent", "high", "high-priority", "bug"}
+        likely_blockers = [
+            {
+                "number": issue.get("number"),
+                "title": issue.get("title"),
+                "labels": [label.get("name") for label in issue.get("labels", [])],
+                "html_url": issue.get("html_url"),
+            }
+            for issue in filtered_issues
+            if blocker_labels.intersection(
+                {
+                    str(label.get("name", "")).strip().lower()
+                    for label in issue.get("labels", [])
+                    if str(label.get("name", "")).strip()
+                }
+            )
+        ]
+        draft_prs = [pull for pull in pulls if bool(pull.get("draft"))]
+        ready_prs = [pull for pull in pulls if not bool(pull.get("draft"))]
+
+        summary_parts = [
+            f"{owner}/{repo} has {len(ready_prs)} ready pull request(s), {len(draft_prs)} draft pull request(s), and {len(filtered_issues)} open issue(s)."
+        ]
+        if likely_blockers:
+            blocker_titles = ", ".join(str(item.get("title", "")).strip() for item in likely_blockers[:3] if item.get("title"))
+            if blocker_titles:
+                summary_parts.append(f"Likely blockers: {blocker_titles}.")
+        latest_commit = commits[0] if commits else None
+        if latest_commit:
+            commit_info = latest_commit.get("commit") or {}
+            commit_author = (commit_info.get("author") or {}).get("name") or "unknown"
+            commit_date = (commit_info.get("author") or {}).get("date") or "unknown date"
+            commit_message = str(commit_info.get("message", "")).splitlines()[0].strip()
+            if commit_message:
+                summary_parts.append(
+                    f"Latest commit: '{commit_message}' by {commit_author} on {commit_date}."
+                )
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "repository": {
+                "full_name": repo_data.get("full_name"),
+                "description": repo_data.get("description"),
+                "html_url": repo_data.get("html_url"),
+                "private": repo_data.get("private"),
+                "default_branch": repo_data.get("default_branch"),
+                "language": repo_data.get("language"),
+                "topics": repo_data.get("topics", []),
+                "open_issues_count": repo_data.get("open_issues_count"),
+                "stargazers_count": repo_data.get("stargazers_count"),
+                "forks_count": repo_data.get("forks_count"),
+                "watchers_count": repo_data.get("watchers_count"),
+                "updated_at": repo_data.get("updated_at"),
+                "pushed_at": repo_data.get("pushed_at"),
+            },
+            "counts": {
+                "open_pull_requests": len(pulls),
+                "ready_pull_requests": len(ready_prs),
+                "draft_pull_requests": len(draft_prs),
+                "open_issues": len(filtered_issues),
+                "likely_blockers": len(likely_blockers),
+                "recent_commits": len(commits),
+            },
+            "open_pull_requests": [
+                {
+                    "number": pull.get("number"),
+                    "title": pull.get("title"),
+                    "user": (pull.get("user") or {}).get("login"),
+                    "draft": pull.get("draft"),
+                    "html_url": pull.get("html_url"),
+                    "head": ((pull.get("head") or {}).get("ref")),
+                    "base": ((pull.get("base") or {}).get("ref")),
+                }
+                for pull in pulls
+            ],
+            "open_issues": [
+                {
+                    "number": issue.get("number"),
+                    "title": issue.get("title"),
+                    "user": (issue.get("user") or {}).get("login"),
+                    "labels": [label.get("name") for label in issue.get("labels", [])],
+                    "html_url": issue.get("html_url"),
+                }
+                for issue in filtered_issues
+            ],
+            "recent_commits": [
+                {
+                    "sha": commit.get("sha"),
+                    "message": str((commit.get("commit") or {}).get("message", "")).splitlines()[0].strip(),
+                    "author": (((commit.get("commit") or {}).get("author") or {}).get("name")),
+                    "date": (((commit.get("commit") or {}).get("author") or {}).get("date")),
+                    "html_url": commit.get("html_url"),
+                }
+                for commit in commits
+            ],
+            "likely_blockers": likely_blockers,
+            "summary_markdown": " ".join(part for part in summary_parts if part).strip(),
+        }
+
     return [
         ToolDefinition(
             name="github_list_repos",
@@ -201,6 +330,22 @@ def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
                 "required": ["owner", "repo", "number"],
             },
             handler=github_get_pull_request,
+        ),
+        ToolDefinition(
+            name="github_get_repo_summary",
+            description="Get a high-level GitHub repository summary including metadata, open pull requests, issues, blockers, and recent commits.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "issue_limit": {"type": "integer", "minimum": 1, "default": 10},
+                    "pr_limit": {"type": "integer", "minimum": 1, "default": 10},
+                    "commit_limit": {"type": "integer", "minimum": 1, "default": 5},
+                },
+                "required": ["owner", "repo"],
+            },
+            handler=github_get_repo_summary,
         ),
     ]
 

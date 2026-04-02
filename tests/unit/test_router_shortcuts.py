@@ -189,6 +189,7 @@ class DummyToolRegistry:
             "system_brightness_status",
             "system_brightness_set",
             "system_bluetooth_status",
+            "system_bluetooth_set",
             "system_snapshot",
             "task_manager_open",
             "task_manager_summary",
@@ -612,7 +613,13 @@ class DummyToolRegistry:
         if tool_name == "system_brightness_set":
             return {"supported": True, "brightness_percent": int(payload.get("percent", 0)), "status": "completed", "approval_category": "always_ask", "approval_mode": "approval"}
         if tool_name == "system_bluetooth_status":
-            return {"available": True, "service_status": "Running", "device_count": 2}
+            return {"available": True, "service_status": "Running", "device_count": 2, "radio_state": "On"}
+        if tool_name == "system_bluetooth_set":
+            return {
+                "status": "completed",
+                "requested_state": str(payload.get("mode", "off")).capitalize(),
+                "radio_state_after": str(payload.get("mode", "off")).capitalize(),
+            }
         if tool_name == "system_snapshot":
             return {
                 "cpu_percent": 18.5,
@@ -842,6 +849,29 @@ class DummyCoworkerService:
         self.planned: list[str] = []
         self.ran: list[str] = []
 
+    async def analyze_request(self, *, session_key: str, request_text: str) -> dict[str, object]:  # noqa: ARG002
+        lowered = request_text.lower()
+        desktop_ui_task = (
+            "task manager" in lowered
+            or "copy selected text and summarize it" in lowered
+            or "turn off the bluetooth" in lowered
+            or "turn on the bluetooth" in lowered
+            or "disable bluetooth" in lowered
+            or "enable bluetooth" in lowered
+            or "see on screen" in lowered
+            or "on screen now" in lowered
+            or "visible file" in lowered
+            or bool(re.match(r"^(?:click(?:\s+on)?|select|double click|double-click)\s+(?!at\b)(?:the\s+)?[a-z0-9][\w\s._()&-]*$", lowered))
+        )
+        return {
+            "desktop_ui_task": desktop_ui_task,
+            "task_kind": "structured" if "task manager" in lowered or "bluetooth" in lowered else ("visual" if desktop_ui_task else "non_desktop"),
+            "summary": request_text.strip(),
+            "normalized_request": request_text.strip(),
+            "requires_visual_context": False,
+            "route_kind": "structured" if "task manager" in lowered or "bluetooth" in lowered else ("visual" if desktop_ui_task else "none"),
+        }
+
     async def can_handle_request(self, request_text: str) -> bool:
         lowered = request_text.lower()
         return (
@@ -876,7 +906,7 @@ class DummyCoworkerService:
             "transcript": [],
         }
 
-    async def run_task_request(self, *, user_id: str, session_key: str, request_text: str, connection_id: str = "", channel_name: str = "") -> dict[str, object]:
+    async def run_task_request(self, *, user_id: str, session_key: str, request_text: str, request_analysis: dict[str, object] | None = None, connection_id: str = "", channel_name: str = "") -> dict[str, object]:  # noqa: ARG002
         self.ran.append(request_text)
         return {
             "task_id": "coworker-1",
@@ -4207,3 +4237,40 @@ async def test_router_telegram_bluetooth_toggle_phrase_routes_to_coworker(app_co
     assert response.ok is True
     assert "Status: completed" in response.payload["command_response"]
     assert coworker_service.ran == ["open bluetooth settings and turn off the bluetooth"]
+
+
+@pytest.mark.asyncio
+async def test_router_system_bluetooth_off_command_dispatches_direct_toggle(app_config) -> None:
+    app_config.app_skills.enabled = True
+    app_config.app_skills.system_enabled = True
+    tool_registry = DummyToolRegistry(app_skill_tools_enabled=True)
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-system-bt-off",
+        request_id="req-system-bt-off",
+        session_key="webchat_main",
+        message="/system bluetooth off",
+        metadata={"user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Bluetooth is now Off." in response.payload["command_response"]
+    name, payload = tool_registry.calls[-1]
+    assert name == "system_bluetooth_set"
+    assert payload["mode"] == "off"

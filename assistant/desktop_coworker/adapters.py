@@ -104,6 +104,15 @@ def keyboard_fallback_recipe(
             "goal_completed_if_verified": True,
         }
     if surface == "settings" and normalized_label in {"on", "off", "bluetooth"}:
+        if attempts_used >= 1:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "space" if attempts_used == 1 else "enter",
+                "reason": f"Use keyboard activation for the visible Bluetooth control near '{target_label or 'Bluetooth'}'.",
+                "target_label": target_label or "Bluetooth",
+                "confidence": 0.66,
+                "goal_completed_if_verified": True,
+            }
         return {
             "type": "press_hotkey",
             "hotkey": "tab",

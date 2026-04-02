@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -15,6 +16,8 @@ class CoworkerToolRegistry:
         self.visual_screen = "excel_recent"
         self.mouse_click_opens_target = True
         self.search_returns_excel_file_match = False
+        self.bluetooth_direct_supported = True
+        self.bluetooth_direct_succeeds = True
 
     def has(self, tool_name: str) -> bool:
         return tool_name in {
@@ -22,6 +25,9 @@ class CoworkerToolRegistry:
             "task_manager_summary",
             "system_open_settings",
             "system_bluetooth_status",
+            "system_bluetooth_set",
+            "system_volume_set",
+            "system_brightness_set",
             "vscode_open_target",
             "document_read",
             "document_replace_text",
@@ -35,6 +41,7 @@ class CoworkerToolRegistry:
             "desktop_mouse_click",
             "desktop_mouse_scroll",
             "apps_open",
+            "apps_focus",
             "search_host_files",
             "apps_list_windows",
             "llm_task",
@@ -172,10 +179,44 @@ class CoworkerToolRegistry:
             if target == "excel" and args and "hindi_english_parallel" in args[0].lower():
                 self.visual_screen = "excel_opened"
             return {"status": "completed", "alias": target, "path": args[0] if args else target, "launched": True}
+        if tool_name == "apps_focus":
+            return {"status": "completed", "target": str(payload.get("target", ""))}
         if tool_name == "system_open_settings":
             if str(payload.get("page", "")).strip().lower() == "bluetooth":
                 self.visual_screen = "settings_bluetooth_on"
             return {"page": str(payload.get("page", "")), "status": "completed"}
+        if tool_name == "system_bluetooth_set":
+            requested = str(payload.get("mode", "off")).strip().lower()
+            if not self.bluetooth_direct_supported:
+                return {
+                    "status": "unsupported",
+                    "supported": False,
+                    "requested_state": requested,
+                    "radio_state_before": "On",
+                    "radio_state_after": "On",
+                    "message": "Direct Bluetooth control is unavailable on this device.",
+                }
+            if self.bluetooth_direct_succeeds:
+                self.visual_screen = "settings_bluetooth_off" if requested == "off" else "settings_bluetooth_on"
+                return {
+                    "status": "completed",
+                    "supported": True,
+                    "requested_state": requested,
+                    "radio_state_before": "On" if requested == "off" else "Off",
+                    "radio_state_after": requested,
+                }
+            return {
+                "status": "failed",
+                "supported": True,
+                "requested_state": requested,
+                "radio_state_before": "On",
+                "radio_state_after": "On",
+                "message": "Bluetooth state did not change.",
+            }
+        if tool_name == "system_volume_set":
+            return {"status": "completed", "volume_percent": int(payload.get("percent", 0))}
+        if tool_name == "system_brightness_set":
+            return {"status": "completed", "supported": True, "brightness_percent": int(payload.get("percent", 0))}
         if tool_name == "search_host_files":
             name_query = str(payload.get("name_query", "")).strip().lower()
             if re.sub(r"[^a-z0-9]+", "", name_query) == "desktop":
@@ -576,6 +617,7 @@ async def test_coworker_service_runs_bluetooth_toggle_visual_flow(monkeypatch, a
     app_config.app_skills.enabled = True
     app_config.app_skills.system_enabled = True
     registry = CoworkerToolRegistry()
+    registry.bluetooth_direct_supported = False
     service = DesktopCoworkerService(app_config, registry)
     await service.initialize()
     capture_dir = app_config.agent.workspace_dir / "desktop"
@@ -593,12 +635,100 @@ async def test_coworker_service_runs_bluetooth_toggle_visual_flow(monkeypatch, a
     assert task["status"] == "completed"
     assert len(task["transcript"]) == 2
     assert task["transcript"][0]["step_type"] == "system_open_settings"
-    assert task["transcript"][1]["step_type"] == "visual_task"
+    assert task["transcript"][1]["step_type"] == "system_bluetooth_set"
     assert "off" in task["latest_state"]["screen_text"].lower()
     assert [name for name, _payload in registry.calls if name == "system_open_settings"] == ["system_open_settings"]
     assert [name for name, _payload in registry.calls if name == "desktop_mouse_click"] == ["desktop_mouse_click"]
+    assert [name for name, _payload in registry.calls if name == "system_bluetooth_set"] == ["system_bluetooth_set"]
     assert [name for name, _payload in registry.calls if name == "system_bluetooth_status"] == []
     assert [name for name, _payload in registry.calls if name == "desktop_read_screen"] == []
+
+
+@pytest.mark.asyncio
+async def test_coworker_service_prefers_direct_bluetooth_toggle_when_supported(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    app_config.app_skills.enabled = True
+    app_config.app_skills.system_enabled = True
+    registry = CoworkerToolRegistry()
+    service = DesktopCoworkerService(app_config, registry)
+    await service.initialize()
+
+    task = await service.run_task_request(
+        user_id=app_config.users.default_user_id,
+        session_key="telegram:123",
+        request_text="turn off bluetooth",
+        channel_name="telegram",
+    )
+
+    assert task["status"] == "completed"
+    assert [name for name, _payload in registry.calls if name == "system_bluetooth_set"] == ["system_bluetooth_set"]
+    assert [name for name, _payload in registry.calls if name == "desktop_mouse_click"] == []
+
+
+@pytest.mark.asyncio
+async def test_coworker_service_routes_visual_followup_against_active_context(app_config) -> None:
+    from assistant.desktop_coworker.models import DesktopInteractionContext
+
+    app_config.desktop_coworker.enabled = True
+    registry = CoworkerToolRegistry()
+    service = DesktopCoworkerService(app_config, registry)
+    await service.initialize()
+    service._desktop_contexts["webchat_main"] = DesktopInteractionContext(
+        session_key="webchat_main",
+        route_kind="visual",
+        active_window={"title": "Excel", "process_name": "EXCEL"},
+        last_candidates=[
+            {"label": "Social_Network_Ads", "kind": "file", "confidence": 0.94},
+            {"label": "hindi_english_parallel", "kind": "file", "confidence": 0.82},
+        ],
+    )
+
+    analysis = await service.analyze_request(session_key="webchat_main", request_text="open social network ads file")
+    assert analysis["desktop_ui_task"] is True
+    assert analysis["route_kind"] == "followup_visual"
+    assert "socialnetworkads" in re.sub(r"[^a-z0-9]+", "", analysis["normalized_request"].lower())
+
+
+@pytest.mark.asyncio
+async def test_coworker_service_uses_structured_planner_for_general_desktop_request(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    app_config.desktop_coworker.structured_planner_enabled = True
+    registry = CoworkerToolRegistry()
+    registry.summary_result = json.dumps(
+        {
+            "summary": "Launch Chrome and open Google.",
+            "steps": [
+                {
+                    "type": "apps_open",
+                    "title": "Open Chrome",
+                    "payload": {"target": "chrome", "args": ["https://google.com"]},
+                    "verification": {"kind": "active_window_contains", "matches": ["chrome"]},
+                    "retryable": True,
+                    "risky": False,
+                }
+            ],
+        }
+    )
+    service = DesktopCoworkerService(app_config, registry)
+    await service.initialize()
+
+    task = await service.plan_task(
+        user_id=app_config.users.default_user_id,
+        session_key="webchat_main",
+        request_text="please launch chrome and go to google.com",
+        request_analysis={
+            "desktop_ui_task": True,
+            "task_kind": "structured",
+            "summary": "Launch Chrome and open Google.",
+            "normalized_request": "launch chrome and go to google.com",
+            "requires_visual_context": False,
+            "route_kind": "structured",
+        },
+    )
+
+    assert task["summary"] == "Launch Chrome and open Google."
+    assert task["steps"][0]["type"] == "apps_open"
+    assert task["steps"][0]["payload"]["target"] == "chrome"
 
 
 def test_visual_reasoner_normalizes_type_text_and_scroll_actions(app_config) -> None:

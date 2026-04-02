@@ -212,6 +212,40 @@ class DesktopCoworkerConfig(BaseModel):
     reopen_missing_apps: bool = True
     approval_preview_screenshots: bool = True
     artifact_retention_count: int = 20
+    context_retention_seconds: int = 300
+    followup_visual_affinity_enabled: bool = True
+    structured_planner_enabled: bool = True
+    settings_adapter_enabled: bool = True
+    prefer_direct_system_actions: bool = True
+
+
+class ReportsConfig(BaseModel):
+    enabled: bool = True
+    default_format: str = "markdown"
+    default_deliver_via: str = "file"
+    max_source_files: int = 20
+    max_source_chars_per_file: int = 3000
+    reports_subdir: str = "reports"
+    daily_digest_enabled: bool = False
+    daily_digest_hour: int = 8
+    daily_digest_minute: int = 0
+    daily_digest_deliver_via: str = "memory"
+
+
+class VoiceConfig(BaseModel):
+    enabled: bool = True
+    stt_model: str = "gemini-2.5-flash"
+    tts_model: str = "gemini-2.5-flash-tts"
+    tts_voice_name: str = "Kore"
+    webchat_enabled: bool = True
+    telegram_enabled: bool = True
+    webchat_tts_enabled: bool = True
+    telegram_tts_enabled: bool = False
+    auto_send_transcript: bool = True
+    clarify_below_confidence: float = 0.75
+    max_record_seconds: int = 60
+    max_upload_bytes: int = 10 * 1024 * 1024
+    retain_audio: bool = False
 
 
 def _default_desktop_known_apps() -> dict[str, Path]:
@@ -441,6 +475,8 @@ class AppConfig(BaseModel):
     desktop_input: DesktopInputConfig = Field(default_factory=DesktopInputConfig)
     app_skills: AppSkillsConfig = Field(default_factory=AppSkillsConfig)
     desktop_coworker: DesktopCoworkerConfig = Field(default_factory=DesktopCoworkerConfig)
+    reports: ReportsConfig = Field(default_factory=ReportsConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     oauth: OAuthConfig = Field(default_factory=OAuthConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     system_access: SystemAccessConfig = Field(default_factory=SystemAccessConfig)
@@ -492,6 +528,10 @@ class AppConfig(BaseModel):
         return self.assistant_home / "assistant.db"
 
     @property
+    def voice_dir(self) -> Path:
+        return self.agent.workspace_dir / "voice"
+
+    @property
     def systemd_user_dir(self) -> Path:
         return Path.home() / ".config" / "systemd" / "user"
 
@@ -515,6 +555,8 @@ class AppConfig(BaseModel):
         self.agent.workspace_dir.mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "memory").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "inbox").mkdir(parents=True, exist_ok=True)
+        (self.agent.workspace_dir / self.reports.reports_subdir).mkdir(parents=True, exist_ok=True)
+        self.voice_dir.mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "skills").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / "hooks").mkdir(parents=True, exist_ok=True)
         (self.agent.workspace_dir / self.context_engine.snapshot_subdir).mkdir(parents=True, exist_ok=True)

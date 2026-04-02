@@ -25,7 +25,7 @@ When the user invokes this skill, give a practical repository status summary.
 
 Preferred workflow:
 1. Determine the target repository from the user message or the recent chat context.
-2. Use GitHub repo, issue, and pull request tools to gather open work, recent changes, and active review threads.
+2. Prefer `github_get_repo_summary` first for a high-level repository snapshot. If needed, fall back to GitHub repo, issue, and pull request tools to gather extra open work, recent changes, and active review threads.
 3. Summarize:
    - open pull requests and review status
    - notable open issues

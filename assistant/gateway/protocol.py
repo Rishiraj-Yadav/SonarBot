@@ -45,3 +45,4 @@ class EventFrame(BaseModel):
 class AgentSendParams(BaseModel):
     message: str
     session_key: str = "main"
+    metadata: dict[str, Any] = Field(default_factory=dict)

@@ -51,6 +51,29 @@ default_action = "deny"
 inbox_retention_days = 30
 default_severity = "info"
 
+[reports]
+enabled = true
+default_format = "markdown"
+default_deliver_via = "file"
+daily_digest_enabled = false
+daily_digest_hour = 8
+daily_digest_minute = 0
+
+[voice]
+enabled = true
+stt_model = "gemini-2.5-flash"
+tts_model = "gemini-2.5-flash-tts"
+tts_voice_name = "Kore"
+webchat_enabled = true
+telegram_enabled = true
+webchat_tts_enabled = true
+telegram_tts_enabled = false
+auto_send_transcript = true
+clarify_below_confidence = 0.75
+max_record_seconds = 60
+max_upload_bytes = 10485760
+retain_audio = false
+
 [automation.desktop]
 # Enables desktop file-watch automations and Phase 4 desktop routines.
 enabled = false

@@ -26,6 +26,9 @@ from assistant.automation.models import (
     DynamicCronJob,
     Notification,
     OneTimeReminder,
+    ReportFormat,
+    ReportJob,
+    ReportResult,
     utc_now_iso,
 )
 
@@ -57,6 +60,8 @@ class AutomationEngine:
         self.desktop_routine_executor = (
             DesktopRoutineExecutor(tool_registry, config) if tool_registry is not None else None
         )
+        self.report_generator = None
+        self.digest_runner = None
 
     async def initialize(self) -> None:
         await self.store.initialize()
@@ -64,6 +69,16 @@ class AutomationEngine:
 
     def set_scheduler(self, scheduler) -> None:
         self.scheduler = scheduler
+        if self.digest_runner is not None and hasattr(self.digest_runner, "bind_runtime"):
+            self.digest_runner.bind_runtime(automation_scheduler=scheduler)
+
+    def set_report_generator(self, report_generator) -> None:
+        self.report_generator = report_generator
+
+    def set_digest_runner(self, digest_runner) -> None:
+        self.digest_runner = digest_runner
+        if self.scheduler is not None and hasattr(digest_runner, "bind_runtime"):
+            digest_runner.bind_runtime(automation_scheduler=self.scheduler)
 
     async def handle_cron_job(self, rule_name: str, message: str, user_id: str | None = None) -> dict[str, Any]:
         target_user = user_id or self.config.users.default_user_id
@@ -300,6 +315,96 @@ class AutomationEngine:
             "created_at": reminder.created_at,
             "updated_at": reminder.updated_at,
         }
+
+    async def create_report_job(self, job: ReportJob) -> ReportJob:
+        normalized_job = ReportJob.model_validate(job.model_dump())
+        if not normalized_job.topic.strip():
+            raise ValueError("Report topic cannot be empty.")
+        if normalized_job.schedule:
+            normalized_job.schedule = self._validate_cron_schedule(normalized_job.schedule)
+        if normalized_job.run_once_at:
+            run_once_at = datetime.fromisoformat(normalized_job.run_once_at)
+            if run_once_at.tzinfo is None:
+                run_once_at = run_once_at.replace(tzinfo=timezone.utc)
+            normalized_job.run_once_at = run_once_at.astimezone(timezone.utc).isoformat()
+        if not normalized_job.output_format:
+            normalized_job.output_format = ReportFormat(self.config.reports.default_format)
+        if not normalized_job.deliver_via:
+            normalized_job.deliver_via = self.config.reports.default_deliver_via
+        await self.store.create_report_job(normalized_job)
+        if self.scheduler is not None and not normalized_job.paused:
+            await self.scheduler.register_report_job(normalized_job)
+        return normalized_job
+
+    async def list_report_jobs(self, user_id: str | None = None) -> list[dict]:
+        if user_id is not None:
+            return await self.store.list_report_jobs(user_id)
+        return await self.store.list_all_report_jobs(include_paused=True)
+
+    async def list_all_report_jobs(self) -> list[dict[str, Any]]:
+        return await self.store.list_all_report_jobs(include_paused=False)
+
+    async def pause_report_job(self, user_id: str, job_id: str) -> dict[str, Any]:
+        job = await self.store.set_report_job_paused(user_id, job_id, True)
+        if job is None:
+            raise KeyError(f"Unknown report job '{job_id}'.")
+        if self.scheduler is not None:
+            await self.scheduler.remove_report_job(job_id)
+        return job
+
+    async def resume_report_job(self, user_id: str, job_id: str) -> dict[str, Any]:
+        job = await self.store.set_report_job_paused(user_id, job_id, False)
+        if job is None:
+            raise KeyError(f"Unknown report job '{job_id}'.")
+        if self.scheduler is not None:
+            await self.scheduler.register_report_job(ReportJob.model_validate(job))
+        return job
+
+    async def delete_report_job(self, job_id: str, user_id: str | None = None) -> bool:
+        job = await self.store.get_report_job(job_id, user_id)
+        if job is None:
+            return False
+        deleted = await self.store.delete_report_job(str(job["user_id"]), job_id)
+        if deleted and self.scheduler is not None:
+            await self.scheduler.remove_report_job(job_id)
+        return deleted
+
+    async def run_report_job_now(self, job_id: str) -> ReportResult:
+        if self.report_generator is None:
+            raise RuntimeError("Report generator is not configured.")
+        job_payload = await self.store.get_report_job(job_id)
+        if job_payload is None:
+            raise KeyError(f"Unknown report job '{job_id}'.")
+        job = ReportJob.model_validate(job_payload)
+        return await self.generate_report_now(job, notify_channel=True)
+
+    async def generate_report_now(self, job: ReportJob, *, notify_channel: bool = False) -> ReportResult:
+        if self.report_generator is None:
+            raise RuntimeError("Report generator is not configured.")
+        result = await self.report_generator.generate(job)
+        await self.store.create_report_result(job.user_id, result)
+        deliver_via = str(job.deliver_via or self.config.reports.default_deliver_via).lower()
+        if notify_channel:
+            await self.report_generator._deliver(result, job)
+        elif deliver_via in {"memory", "all"}:
+            delivery_job = job
+            if deliver_via == "all":
+                delivery_job = job.model_copy(update={"deliver_via": "memory"})
+            await self.report_generator._deliver(result, delivery_job)
+        return result
+
+    async def handle_report_job(self, job_id: str) -> None:
+        if self.report_generator is None:
+            raise RuntimeError("Report generator is not configured.")
+        job_payload = await self.store.get_report_job(job_id)
+        if job_payload is None or bool(job_payload.get("paused")):
+            return
+        job = ReportJob.model_validate(job_payload)
+        result = await self.generate_report_now(job, notify_channel=True)
+        if job.run_once_at and not job.schedule:
+            await self.store.set_report_job_paused(job.user_id, job.job_id, True)
+            if self.scheduler is not None:
+                await self.scheduler.remove_report_job(job.job_id)
 
     async def create_desktop_automation_rule(
         self,

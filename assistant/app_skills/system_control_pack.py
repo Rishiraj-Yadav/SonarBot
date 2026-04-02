@@ -137,6 +137,7 @@ class SystemControlPack:
 
     def bluetooth_status(self) -> dict[str, Any]:
         self.ensure_enabled()
+        radio = self._bluetooth_radio_snapshot()
         payload = self._powershell_json(
             "$service = Get-Service bthserv -ErrorAction SilentlyContinue; "
             "$devices = @(Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' }); "
@@ -151,9 +152,62 @@ class SystemControlPack:
             device_count=int(payload.get("device_count", 0)),
         )
         return {
-            "available": summary.available,
+            "available": bool(summary.available or radio.get("present", False)),
             "service_status": summary.service_status,
             "device_count": summary.device_count,
+            "radio_state": str(radio.get("state", "Unknown")),
+            "direct_control_supported": bool(radio.get("supported", False)),
+            "direct_control_error": str(radio.get("error", "")).strip(),
+        }
+
+    def set_bluetooth(self, mode: str) -> dict[str, Any]:
+        self.ensure_enabled()
+        normalized = str(mode).strip().lower()
+        if normalized not in {"on", "off", "toggle"}:
+            raise RuntimeError("Bluetooth mode must be on, off, or toggle.")
+        before = self._bluetooth_radio_snapshot()
+        if not before.get("supported") or not before.get("present"):
+            return {
+                "status": "unsupported",
+                "supported": False,
+                "requested_state": normalized,
+                "radio_state_before": str(before.get("state", "Unknown")),
+                "radio_state_after": str(before.get("state", "Unknown")),
+                "message": str(before.get("error") or "Direct Bluetooth control is unavailable on this device."),
+            }
+
+        before_state = str(before.get("state", "Unknown")).strip().lower()
+        desired_state = normalized
+        if normalized == "toggle":
+            if before_state == "on":
+                desired_state = "off"
+            elif before_state == "off":
+                desired_state = "on"
+            else:
+                return {
+                    "status": "unsupported",
+                    "supported": False,
+                    "requested_state": normalized,
+                    "radio_state_before": str(before.get("state", "Unknown")),
+                    "radio_state_after": str(before.get("state", "Unknown")),
+                    "message": "Direct Bluetooth toggle is unavailable because the current Bluetooth radio state is unknown.",
+                }
+
+        payload = self._powershell_json(self._bluetooth_set_script(desired_state))
+        after_state = str(payload.get("after_state", before.get("state", "Unknown")))
+        access_status = str(payload.get("access_status", "")).strip()
+        success = (
+            bool(payload.get("supported", False))
+            and after_state.strip().lower() == desired_state
+        )
+        return {
+            "status": "completed" if success else ("unsupported" if not payload.get("supported", False) else "failed"),
+            "supported": bool(payload.get("supported", False)),
+            "requested_state": desired_state,
+            "radio_state_before": str(payload.get("before_state", before.get("state", "Unknown"))),
+            "radio_state_after": after_state,
+            "access_status": access_status,
+            "message": "" if success else str(payload.get("error") or payload.get("message") or "Bluetooth state did not change."),
         }
 
     def system_snapshot(self) -> dict[str, Any]:
@@ -185,6 +239,78 @@ class SystemControlPack:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _bluetooth_radio_snapshot(self) -> dict[str, Any]:
+        self.ensure_enabled()
+        payload = self._powershell_json(self._bluetooth_snapshot_script())
+        if payload:
+            return payload
+        return {"supported": False, "present": False, "state": "Unknown", "error": "Unable to query the Bluetooth radio."}
+
+    def _bluetooth_snapshot_script(self) -> str:
+        return (
+            "$ErrorActionPreference = 'Stop'; "
+            "try { "
+            "Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null; "
+            "$asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | "
+            "Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } | "
+            "Select-Object -First 1; "
+            "if ($null -eq $asTask) { throw 'AsTask helper unavailable.' }; "
+            "function Await-WinRT($Operation, [string]$TypeName) { "
+            "$type = [Type]::GetType($TypeName, $false); "
+            "if ($null -eq $type) { throw ('Missing type ' + $TypeName) }; "
+            "$method = $asTask.MakeGenericMethod($type); "
+            "$task = $method.Invoke($null, @($Operation)); "
+            "$task.Wait(-1) | Out-Null; "
+            "return $task.Result; "
+            "}; "
+            "$radioType = [Type]::GetType('Windows.Devices.Radios.Radio, Windows, ContentType=WindowsRuntime', $false); "
+            "if ($null -eq $radioType) { throw 'Bluetooth radio type unavailable.' }; "
+            "$radios = Await-WinRT ($radioType::GetRadiosAsync()) 'System.Collections.Generic.IReadOnlyList`1[[Windows.Devices.Radios.Radio, Windows, ContentType=WindowsRuntime]]'; "
+            "$radio = $radios | Where-Object { $_.Kind.ToString() -eq 'Bluetooth' } | Select-Object -First 1; "
+            "if ($null -eq $radio) { @{supported=$false; present=$false; state='Unknown'} | ConvertTo-Json -Compress; exit 0 }; "
+            "@{supported=$true; present=$true; state=$radio.State.ToString()} | ConvertTo-Json -Compress "
+            "} catch { "
+            "@{supported=$false; present=$false; state='Unknown'; error=$_.Exception.Message} | ConvertTo-Json -Compress "
+            "}"
+        )
+
+    def _bluetooth_set_script(self, desired_state: str) -> str:
+        normalized = "On" if desired_state.strip().lower() == "on" else "Off"
+        return (
+            "$ErrorActionPreference = 'Stop'; "
+            "try { "
+            "Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null; "
+            "$asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | "
+            "Where-Object { $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 } | "
+            "Select-Object -First 1; "
+            "if ($null -eq $asTask) { throw 'AsTask helper unavailable.' }; "
+            "function Await-WinRT($Operation, [string]$TypeName) { "
+            "$type = [Type]::GetType($TypeName, $false); "
+            "if ($null -eq $type) { throw ('Missing type ' + $TypeName) }; "
+            "$method = $asTask.MakeGenericMethod($type); "
+            "$task = $method.Invoke($null, @($Operation)); "
+            "$task.Wait(-1) | Out-Null; "
+            "return $task.Result; "
+            "}; "
+            "$radioType = [Type]::GetType('Windows.Devices.Radios.Radio, Windows, ContentType=WindowsRuntime', $false); "
+            "$stateType = [Type]::GetType('Windows.Devices.Radios.RadioState, Windows, ContentType=WindowsRuntime', $false); "
+            "if ($null -eq $radioType -or $null -eq $stateType) { throw 'Bluetooth radio types unavailable.' }; "
+            "$radios = Await-WinRT ($radioType::GetRadiosAsync()) 'System.Collections.Generic.IReadOnlyList`1[[Windows.Devices.Radios.Radio, Windows, ContentType=WindowsRuntime]]'; "
+            "$radio = $radios | Where-Object { $_.Kind.ToString() -eq 'Bluetooth' } | Select-Object -First 1; "
+            "if ($null -eq $radio) { @{supported=$false; present=$false; before_state='Unknown'; after_state='Unknown'; message='Bluetooth radio not found.'} | ConvertTo-Json -Compress; exit 0 }; "
+            "$before = $radio.State.ToString(); "
+            "$desired = [Enum]::Parse($stateType, '" + normalized + "'); "
+            "$access = Await-WinRT ($radio.SetStateAsync($desired)) 'Windows.Devices.Radios.RadioAccessStatus, Windows, ContentType=WindowsRuntime'; "
+            "Start-Sleep -Milliseconds 300; "
+            "$radiosAfter = Await-WinRT ($radioType::GetRadiosAsync()) 'System.Collections.Generic.IReadOnlyList`1[[Windows.Devices.Radios.Radio, Windows, ContentType=WindowsRuntime]]'; "
+            "$radioAfter = $radiosAfter | Where-Object { $_.Kind.ToString() -eq 'Bluetooth' } | Select-Object -First 1; "
+            "$after = if ($null -ne $radioAfter) { $radioAfter.State.ToString() } else { 'Unknown' }; "
+            "@{supported=$true; present=$true; before_state=$before; after_state=$after; access_status=$access.ToString()} | ConvertTo-Json -Compress "
+            "} catch { "
+            "@{supported=$false; present=$false; before_state='Unknown'; after_state='Unknown'; error=$_.Exception.Message} | ConvertTo-Json -Compress "
+            "}"
+        )
 
     def _cpu_percent(self) -> float:
         if self._kernel32 is None:

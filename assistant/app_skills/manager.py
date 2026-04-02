@@ -152,6 +152,36 @@ class AppSkillsManager:
             executor=lambda: self._sync_result(self.system.set_brightness(int(percent))),
         )
 
+    async def set_bluetooth(
+        self,
+        *,
+        mode: str,
+        session_key: str,
+        session_id: str,
+        user_id: str,
+        connection_id: str = "",
+        channel_name: str = "",
+    ) -> dict[str, Any]:
+        self.ensure_enabled()
+        normalized_mode = str(mode).strip().lower()
+        if self.system_access_manager is None:
+            result = self.system.set_bluetooth(normalized_mode)
+            return {**result, "approval_category": "auto_allow", "approval_mode": "auto"}
+        return await self.system_access_manager.execute_desktop_input_action(
+            tool="system_bluetooth_set",
+            action_kind="system_bluetooth_set",
+            target_summary=f"Turn Bluetooth {normalized_mode}",
+            approval_category="always_ask",
+            session_key=session_key,
+            session_id=session_id,
+            user_id=user_id,
+            connection_id=connection_id,
+            channel_name=channel_name,
+            approval_payload={"mode": normalized_mode},
+            audit_details={"mode": normalized_mode},
+            executor=lambda: self._sync_result(self.system.set_bluetooth(normalized_mode)),
+        )
+
     @staticmethod
     async def _sync_result(result: dict[str, Any]) -> dict[str, Any]:
         return result

@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineK
 
 from assistant.channels.base import Channel, ChannelMessage
 from assistant.channels.telegram.media import transcribe_voice
+from assistant.voice import GeminiVoiceService
 
 
 @dataclass(slots=True)
@@ -27,6 +28,7 @@ class TelegramStreamState:
 
 class TelegramChannel(Channel):
     name = "telegram"
+    _max_message_chars = 3800
 
     def __init__(
         self,
@@ -35,11 +37,13 @@ class TelegramChannel(Channel):
         bot: Bot | None = None,
         dispatcher: Dispatcher | None = None,
         host_approval_handler=None,
+        voice_service: GeminiVoiceService | None = None,
     ) -> None:
         super().__init__(config, inbound_handler)
         self.bot = bot or Bot(token=self.config.telegram.bot_token)
         self.dispatcher = dispatcher or Dispatcher()
         self.host_approval_handler = host_approval_handler
+        self.voice_service = voice_service
         self._polling_task: asyncio.Task[None] | None = None
         self._stream_states: dict[str, TelegramStreamState] = {}
         self._pending_route_events: dict[str, list[tuple[str, dict[str, Any]]]] = {}
@@ -70,7 +74,9 @@ class TelegramChannel(Channel):
         await self.bot.session.close()
 
     async def send_message(self, recipient_id: str, text: str) -> None:
-        await self._send_text(int(recipient_id), text or "(no response)")
+        message_text = text or "(no response)"
+        for chunk in self._chunk_text(message_text):
+            await self._send_text(int(recipient_id), chunk)
 
     async def send_typing(self, recipient_id: str) -> None:
         await self.bot.send_chat_action(chat_id=int(recipient_id), action=ChatAction.TYPING)
@@ -169,13 +175,26 @@ class TelegramChannel(Channel):
         text = message.text or message.caption or ""
         media_type: str | None = None
         media_path: str | None = None
+        voice_confidence: float | None = None
 
         if message.content_type == ContentType.TEXT:
             pass
         elif message.content_type == ContentType.VOICE and message.voice is not None:
             media_type = "voice"
             media_path = await self._download_voice(message.voice)
-            text = await transcribe_voice(media_path, self.config)
+            if self.voice_service is not None:
+                transcription = await self.voice_service.transcribe_file(
+                    media_path,
+                    duration_ms=(getattr(message.voice, "duration", 0) or 0) * 1000,
+                    source="telegram",
+                )
+                text = str(transcription.get("text", "")).strip()
+                voice_confidence = float(transcription.get("confidence", 0.0))
+            else:
+                text = await transcribe_voice(
+                    media_path,
+                    self.config,
+                )
         elif message.content_type == ContentType.PHOTO and message.photo:
             media_type = "image"
             media_path = await self._download_photo(message.photo[-1])
@@ -192,7 +211,12 @@ class TelegramChannel(Channel):
             media_type=media_type,
             media_path=media_path,
             raw_message=message,
-            metadata={"chat_id": str(message.chat.id)},
+            metadata={
+                "chat_id": str(message.chat.id),
+                "input_mode": "voice" if media_type == "voice" else "text",
+                "voice_source": "telegram" if media_type == "voice" else "",
+                "voice_confidence": voice_confidence,
+            },
         )
 
     async def _download_voice(self, voice: Voice) -> str:
@@ -272,3 +296,22 @@ class TelegramChannel(Channel):
                 if "message is not modified" in str(exc).lower():
                     return message
                 raise
+
+    def _chunk_text(self, text: str) -> list[str]:
+        normalized = text.strip() or "(no response)"
+        if len(normalized) <= self._max_message_chars:
+            return [normalized]
+        chunks: list[str] = []
+        remaining = normalized
+        while remaining:
+            if len(remaining) <= self._max_message_chars:
+                chunks.append(remaining)
+                break
+            split_at = remaining.rfind("\n", 0, self._max_message_chars)
+            if split_at < max(remaining.rfind(" ", 0, self._max_message_chars), 0):
+                split_at = remaining.rfind(" ", 0, self._max_message_chars)
+            if split_at <= 0:
+                split_at = self._max_message_chars
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip()
+        return [chunk for chunk in chunks if chunk]

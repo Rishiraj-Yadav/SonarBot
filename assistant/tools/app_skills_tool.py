@@ -131,6 +131,16 @@ def build_app_skills_tools(config, tool_registry, system_access_manager=None) ->
     async def system_bluetooth_status(_payload: dict[str, Any]) -> dict[str, Any]:
         return manager.system.bluetooth_status()
 
+    async def system_bluetooth_set(payload: dict[str, Any]) -> dict[str, Any]:
+        return await manager.set_bluetooth(
+            mode=str(payload["mode"]),
+            session_key=str(payload.get("session_key", "main")),
+            session_id=str(payload.get("session_id", "app-skills")),
+            user_id=str(payload.get("user_id", "default")),
+            connection_id=str(payload.get("connection_id", "")),
+            channel_name=str(payload.get("channel_name", "")),
+        )
+
     async def system_snapshot(_payload: dict[str, Any]) -> dict[str, Any]:
         return manager.system.system_snapshot()
 
@@ -297,6 +307,16 @@ def build_app_skills_tools(config, tool_registry, system_access_manager=None) ->
             description="Return a simple Bluetooth availability summary.",
             parameters={"type": "object", "properties": {}},
             handler=system_bluetooth_status,
+        ),
+        ToolDefinition(
+            name="system_bluetooth_set",
+            description="Turn Bluetooth on, off, or toggle it when the host supports direct Bluetooth control.",
+            parameters={
+                "type": "object",
+                "properties": {"mode": {"type": "string", "enum": ["on", "off", "toggle"]}},
+                "required": ["mode"],
+            },
+            handler=system_bluetooth_set,
         ),
         ToolDefinition(
             name="system_snapshot",

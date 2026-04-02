@@ -69,6 +69,76 @@
       "sent_at": "2026-04-01T18:34:00.532405+00:00",
       "confidence": 1.0,
       "urgency": 1.0
+    },
+    {
+      "fingerprint": "system_failure_google_ai_account_20260401",
+      "title": "CRITICAL: Sonar is still offline due to a Google AI account issue.",
+      "sent_at": "2026-04-01T20:34:49.914301+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "system-failure-google-ai-account-2026-04-01",
+      "title": "Critical: All Sonar Functions Failing Due to Google AI Account Issue",
+      "sent_at": "2026-04-01T20:51:18.998482+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "google-ai-action-required-2026-04-01",
+      "title": "Critical: All AI Functions Failing Due to Google AI Account Issue",
+      "sent_at": "2026-04-01T22:03:43.669576+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "google-ai-tier-action-required-2026-04-01",
+      "title": "AI Functions Blocked by Google Account Issue",
+      "sent_at": "2026-04-01T22:11:12.907971+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "ai-failure:google-account-2026-03-31:task-ai-trends-report",
+      "title": "Your 'AI trends report' was not created due to an account issue.",
+      "sent_at": "2026-04-01T22:14:29.487127+00:00",
+      "confidence": 1.0,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "google-ai-studio-action-required-email-2026-03-31",
+      "title": "Ongoing Critical Failure: AI Functions Disabled",
+      "sent_at": "2026-04-01T22:27:17.039170+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "ai_failure_google_account_tier_20260402",
+      "title": "Critical: AI Functions Disabled Due to Google Account Issue",
+      "sent_at": "2026-04-02T01:11:48.417310+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "system_failure_google_ai_studio_19d462c5f7032be3",
+      "title": "Critical System Failure: All AI Functions Blocked",
+      "sent_at": "2026-04-02T01:23:03.747880+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "persistent-ai-failure-google-account-2026-03-31",
+      "title": "Persistent Critical Failure: All AI Functions Remain Blocked",
+      "sent_at": "2026-04-02T01:28:53.624949+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
+    },
+    {
+      "fingerprint": "system-failure-google-ai-studio-tier-19d462c5f7032be3",
+      "title": "Persistent Critical Failure: All AI Functions Remain Blocked",
+      "sent_at": "2026-04-02T01:34:49.425988+00:00",
+      "confidence": 1.0,
+      "urgency": 1.0
     }
   ]
 }

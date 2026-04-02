@@ -6,6 +6,7 @@ import json
 from fastapi.testclient import TestClient
 
 from assistant.gateway.server import create_app
+from assistant.automation.models import Notification
 from assistant.models.base import ModelResponse
 from assistant.tools.browser_runtime import BrowserTabState, profile_key_for
 from tests.helpers import FakeProvider
@@ -352,3 +353,33 @@ def test_settings_api_exposes_coworker_backend_health(app_config) -> None:
         payload = response.json()
         assert payload["desktop_coworker"]["enabled"] is True
         assert payload["desktop_coworker"]["backend_health"]["ocr_boxes"]["available"] is True
+
+
+def test_webchat_receives_automation_notification_events(app_config) -> None:
+    provider = FakeProvider([[ModelResponse(done=True)]])
+    app = create_app(config=app_config, model_provider=provider)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/webchat/ws") as websocket:
+            services = app.state.services
+            asyncio.run(
+                services.automation_engine.dispatcher.dispatch(
+                    Notification(
+                        notification_id="notif-webchat-1",
+                        user_id=app_config.users.default_user_id,
+                        title="Cron summary",
+                        body="Cron summary body",
+                        source="cron:0",
+                        severity="info",
+                        delivery_mode="primary",
+                        status="queued",
+                        target_channels=[],
+                    )
+                )
+            )
+
+            frame = json.loads(websocket.receive_text())
+            assert frame["type"] == "event"
+            assert frame["event"] == "notification.created"
+            assert frame["payload"]["title"] == "Cron summary"
+            assert frame["payload"]["body"] == "Cron summary body"

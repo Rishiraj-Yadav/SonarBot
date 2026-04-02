@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from assistant.agent.loop import AgentLoop
 from assistant.agent.queue import QueueMode
@@ -21,9 +22,11 @@ from assistant.automation import (
     AutomationEngine,
     AutomationScheduler,
     AutomationStore,
+    DailyDigestRunner,
     DesktopAutomationWatcher,
     HeartbeatService,
     NotificationDispatcher,
+    ReportGenerator,
     StandingOrdersManager,
     render_webhook_message,
     verify_webhook_signature,
@@ -53,6 +56,7 @@ from assistant.tools import create_default_tool_registry
 from assistant.utils import configure_logging, get_logger
 from assistant.utils.user_facing_errors import sanitize_error_text
 from assistant.users import UserProfileStore
+from assistant.voice import GeminiVoiceService
 
 
 @dataclass(slots=True)
@@ -90,6 +94,7 @@ class GatewayServices:
     system_access_manager: SystemAccessManager
     browser_runtime: Any
     coworker_service: DesktopCoworkerService | None = None
+    voice_service: GeminiVoiceService | None = None
 
 
 def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
@@ -146,6 +151,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_viewer_checker=lambda user_id: bool(connection_manager.active_user_connections(user_id, "webchat")),
         )
         browser_runtime = getattr(tool_registry, "browser_runtime", None)
+        voice_service = GeminiVoiceService(runtime_config)
         memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
         coworker_service = DesktopCoworkerService(runtime_config, tool_registry)
         await coworker_service.initialize()
@@ -187,7 +193,14 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             user_profiles=user_profiles,
             started_at=started_at,
         )
-        channels = _build_channels(runtime_config, connection_manager, router, user_profiles, system_access_manager)
+        channels = _build_channels(
+            runtime_config,
+            connection_manager,
+            router,
+            user_profiles,
+            system_access_manager,
+            voice_service=voice_service,
+        )
         standing_orders = StandingOrdersManager(runtime_config.agent.workspace_dir)
         automation_store = AutomationStore(runtime_config)
         await automation_store.initialize()
@@ -203,6 +216,12 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             system_access_manager=system_access_manager,
             tool_registry=tool_registry,
         )
+        report_generator = ReportGenerator(runtime_config, provider, tool_registry)
+        report_generator.bind_runtime(memory_manager=memory_manager, delivery=notification_dispatcher)
+        digest_runner = DailyDigestRunner(runtime_config, provider, memory_manager, notification_dispatcher)
+        digest_runner.bind_runtime(session_manager=session_manager)
+        automation_engine.set_report_generator(report_generator)
+        automation_engine.set_digest_runner(digest_runner)
         await automation_engine.initialize()
         desktop_watcher = DesktopAutomationWatcher(runtime_config, automation_engine)
         context_engine = ContextEngine(
@@ -253,6 +272,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             system_access_manager=system_access_manager,
             browser_runtime=browser_runtime,
             coworker_service=coworker_service,
+            voice_service=voice_service,
         )
         await session_manager.start_pruning_task()
         await prompt_builder.start()
@@ -260,6 +280,11 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         await agent_loop.start()
         if automation_scheduler is not None:
             await automation_scheduler.start()
+        if runtime_config.reports.daily_digest_enabled:
+            await digest_runner.schedule_daily(
+                hour=runtime_config.reports.daily_digest_hour,
+                minute=runtime_config.reports.daily_digest_minute,
+            )
         await desktop_watcher.start()
         await heartbeat_service.start()
         for channel in channels:
@@ -286,6 +311,18 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             await session_manager.stop_pruning_task()
 
     app = FastAPI(title="SonarBot Gateway", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/__health")
     async def health() -> dict[str, object]:
@@ -327,6 +364,68 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         resolved = _resolve_webchat_session_key(session_key)
         history = await services.session_manager.session_history(resolved, limit=min(max(limit, 1), 200))
         return {"session_key": resolved, "messages": _format_webchat_history(history)}
+
+    @app.post("/webchat/voice/transcribe")
+    async def webchat_voice_transcribe(request: Request) -> dict[str, Any]:
+        services: GatewayServices = app.state.services
+        if services.voice_service is None or not services.config.voice.enabled or not services.config.voice.webchat_enabled:
+            raise HTTPException(status_code=404, detail="Voice input is not enabled.")
+        payload = await request.body()
+        if not payload:
+            raise HTTPException(status_code=400, detail="No audio was uploaded.")
+        if len(payload) > services.config.voice.max_upload_bytes:
+            raise HTTPException(status_code=413, detail="Audio upload is too large.")
+        duration_header = request.headers.get("x-audio-duration-ms", "").strip()
+        try:
+            duration_ms = int(duration_header) if duration_header else None
+        except ValueError:
+            duration_ms = None
+        try:
+            result = await services.voice_service.transcribe_audio(
+                payload,
+                request.headers.get("content-type", "audio/webm"),
+                duration_ms=duration_ms,
+                source="webchat",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        device_id = request.cookies.get("sonarbot_webchat") or request.query_params.get("device_id") or "webchat-default"
+        user_id = await services.user_profiles.resolve_user_id("webchat", device_id, {"channel": "webchat"})
+        return {
+            "ok": True,
+            "text": result["text"],
+            "confidence": result["confidence"],
+            "duration_ms": result["duration_ms"],
+            "input_mime": result["input_mime"],
+            "detected_language": result["detected_language"],
+            "metadata": {
+                "user_id": user_id,
+                "channel": "webchat",
+                "input_mode": "voice",
+                "voice_confidence": result["confidence"],
+                "voice_source": "webchat",
+            },
+        }
+
+    @app.post("/webchat/voice/synthesize")
+    async def webchat_voice_synthesize(request: Request) -> Response:
+        services: GatewayServices = app.state.services
+        if (
+            services.voice_service is None
+            or not services.config.voice.enabled
+            or not services.config.voice.webchat_enabled
+            or not services.config.voice.webchat_tts_enabled
+        ):
+            raise HTTPException(status_code=404, detail="Voice replies are not enabled.")
+        payload = await request.json()
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Missing text to synthesize.")
+        try:
+            audio_bytes = await services.voice_service.synthesize_speech(text)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(content=audio_bytes, media_type="audio/wav")
 
     @app.get("/api/dashboard")
     async def dashboard(session_key: str = "webchat_main") -> dict[str, Any]:
@@ -582,6 +681,15 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                 "targeting_backend": services.config.desktop_coworker.targeting_backend,
                 "backend_health": services.coworker_service.backend_health() if services.coworker_service is not None else {},
             },
+            "voice": {
+                "enabled": services.config.voice.enabled,
+                "webchat_enabled": services.config.voice.webchat_enabled,
+                "telegram_enabled": services.config.voice.telegram_enabled,
+                "webchat_tts_enabled": services.config.voice.webchat_tts_enabled,
+                "auto_send_transcript": services.config.voice.auto_send_transcript,
+                "clarify_below_confidence": services.config.voice.clarify_below_confidence,
+                "max_record_seconds": services.config.voice.max_record_seconds,
+            },
         }
 
     @app.get("/api/context-engine/state")
@@ -798,6 +906,8 @@ def _build_channels(
     router: GatewayRouter,
     user_profiles: UserProfileStore,
     system_access_manager: SystemAccessManager,
+    *,
+    voice_service: GeminiVoiceService | None = None,
 ) -> list[Any]:
     async def handle_channel_message(message: ChannelMessage) -> str:
         user_id = await user_profiles.resolve_user_id(
@@ -823,6 +933,7 @@ def _build_channels(
             session_key=session_key,
             message=content,
             metadata={
+                **dict(message.metadata or {}),
                 "channel": message.channel,
                 "sender_id": message.sender_id,
                 "media_type": message.media_type,
@@ -856,6 +967,7 @@ def _build_channels(
                 config=config,
                 inbound_handler=handle_channel_message,
                 host_approval_handler=system_access_manager.decide_approval,
+                voice_service=voice_service,
             )
         )
     return channels

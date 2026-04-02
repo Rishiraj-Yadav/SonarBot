@@ -1,5 +1,6 @@
 """Automation services for cron, heartbeat, standing orders, and webhooks."""
 
+from assistant.automation.daily_digest import DailyDigestRunner
 from assistant.automation.delivery import NotificationDispatcher
 from assistant.automation.desktop_watcher import DesktopAutomationWatcher
 from assistant.automation.engine import AutomationEngine
@@ -12,7 +13,12 @@ from assistant.automation.models import (
     DesktopRoutineRule,
     Notification,
     OneTimeReminder,
+    ReportFormat,
+    ReportJob,
+    ReportResult,
+    ReportSource,
 )
+from assistant.automation.report_generator import ReportGenerator
 from assistant.automation.heartbeat import HeartbeatService
 from assistant.automation.scheduler import AutomationScheduler
 from assistant.automation.standing_orders import StandingOrdersManager
@@ -33,8 +39,14 @@ __all__ = [
     "Notification",
     "NotificationDispatcher",
     "OneTimeReminder",
+    "ReportFormat",
+    "ReportGenerator",
+    "ReportJob",
+    "ReportResult",
+    "ReportSource",
     "StandingOrdersManager",
     "AutomationStore",
+    "DailyDigestRunner",
     "render_webhook_message",
     "verify_webhook_signature",
 ]

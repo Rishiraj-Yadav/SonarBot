@@ -17,6 +17,8 @@ from assistant.automation.models import (
     DynamicCronJob,
     Notification,
     OneTimeReminder,
+    ReportJob,
+    ReportResult,
     utc_now_iso,
 )
 
@@ -197,6 +199,40 @@ class AutomationStore:
                     last_event_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS report_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    output_format TEXT NOT NULL,
+                    save_path TEXT NOT NULL,
+                    deliver_via TEXT NOT NULL,
+                    schedule TEXT NOT NULL,
+                    run_once_at TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS report_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    save_path TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    summary_preview TEXT NOT NULL
                 )
                 """
             )
@@ -916,6 +952,155 @@ class AutomationStore:
             )
             await db.commit()
         return bool(cursor.rowcount)
+
+    async def create_report_job(self, job: ReportJob) -> None:
+        await self.initialize()
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO report_jobs (
+                    job_id, user_id, topic, source_type, source_path, output_format, save_path,
+                    deliver_via, schedule, run_once_at, paused, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    job.user_id,
+                    job.topic,
+                    job.source_type.value,
+                    job.source_path or "",
+                    job.output_format.value,
+                    job.save_path or "",
+                    job.deliver_via,
+                    job.schedule or "",
+                    job.run_once_at or "",
+                    int(job.paused),
+                    job.created_at,
+                    updated_at,
+                ),
+            )
+            await db.commit()
+
+    async def list_report_jobs(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT job_id, user_id, topic, source_type, source_path, output_format, save_path,
+                       deliver_via, schedule, run_once_at, paused, created_at, updated_at
+                FROM report_jobs
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ) as cursor:
+                async for row in cursor:
+                    rows.append(self._report_job_row_to_dict(row))
+        return rows
+
+    async def list_all_report_jobs(self, *, include_paused: bool = False, limit: int = 500) -> list[dict[str, Any]]:
+        await self.initialize()
+        rows: list[dict[str, Any]] = []
+        query = (
+            """
+            SELECT job_id, user_id, topic, source_type, source_path, output_format, save_path,
+                   deliver_via, schedule, run_once_at, paused, created_at, updated_at
+            FROM report_jobs
+            """
+            + ("" if include_paused else " WHERE paused = 0")
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, (limit,)) as cursor:
+                async for row in cursor:
+                    rows.append(self._report_job_row_to_dict(row))
+        return rows
+
+    async def get_report_job(self, job_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        await self.initialize()
+        query = (
+            """
+            SELECT job_id, user_id, topic, source_type, source_path, output_format, save_path,
+                   deliver_via, schedule, run_once_at, paused, created_at, updated_at
+            FROM report_jobs
+            WHERE job_id = ?
+            """
+        )
+        params: tuple[Any, ...] = (job_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params = (job_id, user_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, params) as cursor:
+                row = await cursor.fetchone()
+        return self._report_job_row_to_dict(row) if row is not None else None
+
+    async def set_report_job_paused(self, user_id: str, job_id: str, paused: bool) -> dict[str, Any] | None:
+        await self.initialize()
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE report_jobs
+                SET paused = ?, updated_at = ?
+                WHERE user_id = ? AND job_id = ?
+                """,
+                (int(paused), updated_at, user_id, job_id),
+            )
+            await db.commit()
+        return await self.get_report_job(job_id, user_id)
+
+    async def delete_report_job(self, user_id: str, job_id: str) -> bool:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM report_jobs WHERE user_id = ? AND job_id = ?",
+                (user_id, job_id),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    async def create_report_result(self, user_id: str, result: ReportResult) -> None:
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO report_results (
+                    job_id, user_id, topic, save_path, format, byte_size, generated_at, summary_preview
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.job_id,
+                    user_id,
+                    result.topic,
+                    result.save_path,
+                    result.format,
+                    result.byte_size,
+                    result.generated_at,
+                    result.summary_preview,
+                ),
+            )
+            await db.commit()
+
+    def _report_job_row_to_dict(self, row: Any) -> dict[str, Any]:
+        return {
+            "job_id": row[0],
+            "user_id": row[1],
+            "topic": row[2],
+            "source_type": row[3],
+            "source_path": row[4],
+            "output_format": row[5],
+            "save_path": row[6],
+            "deliver_via": row[7],
+            "schedule": row[8],
+            "run_once_at": row[9],
+            "paused": bool(row[10]),
+            "created_at": row[11],
+            "updated_at": row[12],
+        }
 
     async def create_desktop_rule(self, rule: DesktopAutomationRule) -> None:
         await self.initialize()

@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import aiosqlite
 
 from assistant.agent.session_manager import SessionManager
 from assistant.automation import AutomationEngine, AutomationStore, NotificationDispatcher, StandingOrdersManager
+from assistant.automation.models import Notification
 from assistant.config.schema import AutomationRuleConfig
 from assistant.users import UserProfileStore
 
@@ -147,6 +149,9 @@ class FakeToolRegistry:
 
 @pytest.mark.asyncio
 async def test_automation_engine_creates_notification_for_cron_run(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [8616242206]
+    app_config.users.primary_channel = "telegram"
+    app_config.users.fallback_channels = ["webchat"]
     session_manager = SessionManager(app_config)
     user_profiles = UserProfileStore(app_config)
     await user_profiles.initialize()
@@ -170,8 +175,51 @@ async def test_automation_engine_creates_notification_for_cron_run(app_config) -
     notifications = await store.list_notifications(app_config.users.default_user_id)
     assert len(notifications) == 1
     assert notifications[0]["title"] == "Automation summary ready."
+    assert notifications[0]["target_channels"] == ["telegram", "webchat"]
+    assert connection_manager.channel_messages == [("telegram", "8616242206", "Automation summary ready.")]
+    assert any(event_name == "notification.created" and channel_name == "webchat" for _, event_name, _, channel_name in connection_manager.user_events)
     runs = await store.list_runs(app_config.users.default_user_id)
     assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_dispatcher_uses_default_telegram_recipient_without_linked_identity(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [8616242206]
+    app_config.users.primary_channel = "telegram"
+    app_config.users.fallback_channels = ["webchat"]
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+
+    notification = Notification(
+        notification_id="notif-1",
+        user_id=app_config.users.default_user_id,
+        title="Cron summary",
+        body="Cron summary body",
+        source="cron:0",
+        severity="info",
+        delivery_mode="primary",
+        status="queued",
+        target_channels=[],
+    )
+
+    delivered = await dispatcher.dispatch(notification)
+
+    assert delivered.status == "delivered"
+    assert connection_manager.channel_messages == [("telegram", "8616242206", "Cron summary body")]
+    async with aiosqlite.connect(app_config.data_db_path) as db:
+        async with db.execute(
+            "SELECT channel, recipient, status FROM notification_deliveries WHERE notification_id = ? ORDER BY id",
+            ("notif-1",),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    assert rows == [
+        ("telegram", "8616242206", "delivered"),
+        ("webchat", "webchat-connection", "delivered"),
+    ]
 
 
 @pytest.mark.asyncio
