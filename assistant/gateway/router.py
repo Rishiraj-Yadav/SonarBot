@@ -79,6 +79,11 @@ NATURAL_LANGUAGE_CRON_PATTERNS = (
     rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+reminder\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
     rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+remind me to\s+(?P<message>.+)$",
 )
+NATURAL_LANGUAGE_INTERVAL_CRON_PATTERNS = (
+    r"^remind me (?:after\s+)?every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+    r"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me (?:after\s+)?every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+    r"^every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+remind me\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+)
 ONE_TIME_REMINDER_PATTERNS = (
     r"^remind me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
     r"^remind me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
@@ -716,6 +721,14 @@ class GatewayRouter:
                 )
             if subcommand in {"list", "ls"}:
                 dynamic_jobs = await self.automation_engine.list_dynamic_cron_jobs(user_id)
+                one_time_reminders: list[dict[str, Any]] = []
+                list_one_time_reminders = getattr(self.automation_engine, "list_one_time_reminders", None)
+                if callable(list_one_time_reminders):
+                    one_time_reminders = await list_one_time_reminders(user_id)
+                report_jobs: list[dict[str, Any]] = []
+                list_report_jobs = getattr(self.automation_engine, "list_report_jobs", None)
+                if callable(list_report_jobs):
+                    report_jobs = await list_report_jobs(user_id)
                 lines: list[str] = []
                 if dynamic_jobs:
                     lines.append("Chat-created cron jobs:")
@@ -732,6 +745,26 @@ class GatewayRouter:
                         f"- config:{index}: active | {job.schedule} | {job.message}"
                         for index, job in enumerate(self.config.automation.cron_jobs)
                     )
+                if one_time_reminders:
+                    lines.append("")
+                    lines.append("One-time reminders:")
+                    lines.extend(
+                        f"- {item['reminder_id']}: {'paused' if item.get('paused') else 'active'} | {item.get('run_at', '')} | {item.get('message', '')}"
+                        for item in one_time_reminders
+                    )
+                if report_jobs:
+                    scheduled_report_jobs = [
+                        item for item in report_jobs if item.get("schedule") or item.get("run_once_at")
+                    ]
+                    if scheduled_report_jobs:
+                        lines.append("")
+                        lines.append("Scheduled report jobs:")
+                        lines.extend(
+                            f"- report:{item['job_id']}: {'paused' if item.get('paused') else 'active'} | "
+                            + (str(item.get("schedule")) if item.get("schedule") else f"once at {item.get('run_once_at', '')}")
+                            + f" | {item.get('topic', '')}"
+                            for item in scheduled_report_jobs
+                        )
                 return ResponseFrame(
                     id=request_id,
                     ok=True,
@@ -740,6 +773,8 @@ class GatewayRouter:
                         "session_key": session_key,
                         "command_response": "\n".join(lines),
                         "cron_jobs": dynamic_jobs,
+                        "one_time_reminders": one_time_reminders,
+                        "report_jobs": report_jobs,
                     },
                 )
             if subcommand == "pause":
@@ -749,7 +784,23 @@ class GatewayRouter:
                 try:
                     job = await self.automation_engine.pause_dynamic_cron_job(user_id, cron_id)
                 except KeyError as exc:
-                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    pause_one_time_reminder = getattr(self.automation_engine, "pause_one_time_reminder", None)
+                    if not callable(pause_one_time_reminder):
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    try:
+                        reminder = await pause_one_time_reminder(user_id, cron_id)
+                    except KeyError:
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={
+                            "queued": False,
+                            "session_key": session_key,
+                            "command_response": f"Paused reminder '{cron_id}'.",
+                            "one_time_reminder": reminder,
+                        },
+                    )
                 return ResponseFrame(
                     id=request_id,
                     ok=True,
@@ -767,7 +818,23 @@ class GatewayRouter:
                 try:
                     job = await self.automation_engine.resume_dynamic_cron_job(user_id, cron_id)
                 except KeyError as exc:
-                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    resume_one_time_reminder = getattr(self.automation_engine, "resume_one_time_reminder", None)
+                    if not callable(resume_one_time_reminder):
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    try:
+                        reminder = await resume_one_time_reminder(user_id, cron_id)
+                    except KeyError:
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={
+                            "queued": False,
+                            "session_key": session_key,
+                            "command_response": f"Resumed reminder '{cron_id}'.",
+                            "one_time_reminder": reminder,
+                        },
+                    )
                 return ResponseFrame(
                     id=request_id,
                     ok=True,
@@ -785,7 +852,21 @@ class GatewayRouter:
                 try:
                     await self.automation_engine.delete_dynamic_cron_job(user_id, cron_id)
                 except KeyError as exc:
-                    return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    delete_one_time_reminder = getattr(self.automation_engine, "delete_one_time_reminder", None)
+                    if not callable(delete_one_time_reminder):
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    deleted = await delete_one_time_reminder(user_id, cron_id)
+                    if not deleted:
+                        return ResponseFrame(id=request_id, ok=False, error=str(exc))
+                    return ResponseFrame(
+                        id=request_id,
+                        ok=True,
+                        payload={
+                            "queued": False,
+                            "session_key": session_key,
+                            "command_response": f"Deleted reminder '{cron_id}'.",
+                        },
+                    )
                 return ResponseFrame(
                     id=request_id,
                     ok=True,
@@ -2053,6 +2134,16 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": response_text},
             )
 
+        pull_request_create_shortcut = await self._handle_pull_request_create_shortcut(
+            request_id,
+            session_key,
+            display_message,
+            lowered,
+            metadata,
+        )
+        if pull_request_create_shortcut is not None:
+            return pull_request_create_shortcut
+
         if self._looks_like_pull_request_check(lowered):
             repo_ref = await self._resolve_repo_reference(session_key, display_message)
             if repo_ref is None:
@@ -2083,6 +2174,137 @@ class GatewayRouter:
             )
 
         return None
+
+    async def _handle_pull_request_create_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        is_direct_request = self._looks_like_pull_request_create_request(lowered)
+        is_followup = False
+        if not is_direct_request and self._contains_pull_request_fields(original_message):
+            is_followup = await self._has_recent_pull_request_context(session_key)
+        if not is_direct_request and not is_followup:
+            return None
+
+        fields = await self._collect_pull_request_fields(session_key, original_message)
+        repo_ref = await self._resolve_repo_reference(session_key, original_message)
+        if repo_ref is None:
+            response_text = (
+                "I can create the pull request, but I need the repository first. "
+                "Tell me the repo as owner/name, for example Rishiraj-Yadav/Personal-AI-Assistant."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        owner, repo = repo_ref
+        missing: list[str] = []
+        if not fields.get("title"):
+            missing.append("title")
+        if not fields.get("head"):
+            missing.append("source branch")
+        if not fields.get("base"):
+            missing.append("base branch")
+        if missing:
+            response_text = (
+                "I can create the pull request, but I still need: "
+                + ", ".join(missing)
+                + ". Send them like `title: ...`, `branch: ...`, and `base branch: ...`."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        try:
+            branches_result = await self.tool_registry.dispatch(
+                "github_list_branches",
+                {"owner": owner, "repo": repo, "limit": 100, "session_key": session_key},
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        branches = branches_result.get("branches", []) if isinstance(branches_result, dict) else []
+        head_branch = self._resolve_branch_name(str(fields["head"]), branches)
+        base_branch = self._resolve_branch_name(str(fields["base"]), branches)
+        if head_branch is None or base_branch is None:
+            missing_branch = str(fields["head"] if head_branch is None else fields["base"])
+            suggestions = self._suggest_branch_names(missing_branch, branches)
+            suggestion_text = f" Available branches include: {', '.join(suggestions)}." if suggestions else ""
+            response_text = (
+                f"I couldn't find the branch `{missing_branch}` in {owner}/{repo}."
+                f"{suggestion_text}"
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        try:
+            comparison = await self.tool_registry.dispatch(
+                "github_compare_branches",
+                {
+                    "owner": owner,
+                    "repo": repo,
+                    "base": base_branch,
+                    "head": head_branch,
+                    "session_key": session_key,
+                },
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        ahead_by = int(comparison.get("ahead_by", 0)) if isinstance(comparison, dict) else 0
+        total_commits = int(comparison.get("total_commits", 0)) if isinstance(comparison, dict) else 0
+        status = str(comparison.get("status", "")) if isinstance(comparison, dict) else ""
+        if status == "identical" or (ahead_by <= 0 and total_commits <= 0):
+            response_text = (
+                f"I can't create a pull request from `{head_branch}` into `{base_branch}` in {owner}/{repo} "
+                "because there are no new commits to merge."
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        try:
+            created = await self.tool_registry.dispatch(
+                "github_create_pull_request",
+                {
+                    "owner": owner,
+                    "repo": repo,
+                    "title": str(fields["title"]),
+                    "head": head_branch,
+                    "base": base_branch,
+                    "body": str(fields.get("body", "")),
+                    "session_key": session_key,
+                },
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_pull_request_created_response(owner, repo, created)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={
+                "queued": False,
+                "session_key": session_key,
+                "command_response": response_text,
+                "pull_request": created,
+            },
+        )
 
     async def _handle_natural_language_cron_shortcut(
         self,
@@ -3924,9 +4146,20 @@ class GatewayRouter:
         report_request = self._parse_natural_language_report_request(message, lowered, one_time=False)
         if report_request is not None:
             return report_request
+        normalized_original = re.sub(r"\s+", " ", message).strip()
+        normalized_original = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized_original, flags=re.IGNORECASE)
+        normalized_original = re.sub(r"^(?:set up|setup)\s+", "set ", normalized_original, flags=re.IGNORECASE)
         normalized = re.sub(r"\s+", " ", lowered).strip()
         normalized = re.sub(r"^(?:please\s+|can you\s+|could you\s+|would you\s+)", "", normalized)
         normalized = re.sub(r"^(?:set up|setup)\s+", "set ", normalized)
+        for pattern in NATURAL_LANGUAGE_INTERVAL_CRON_PATTERNS:
+            match = re.match(pattern, normalized_original, flags=re.IGNORECASE)
+            if not match:
+                continue
+            schedule = self._build_interval_schedule(str(match.group("interval")), str(match.group("unit")))
+            reminder_message = self._normalize_reminder_message(match.group("message"))
+            if schedule and reminder_message:
+                return schedule, reminder_message
         for pattern in NATURAL_LANGUAGE_CRON_PATTERNS:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if not match:
@@ -4181,6 +4414,24 @@ class GatewayRouter:
             return None
         return f"{minute} {hour} * * {day_of_week}"
 
+    def _build_interval_schedule(self, interval_text: str, unit_text: str) -> str | None:
+        try:
+            interval = int(interval_text)
+        except (TypeError, ValueError):
+            return None
+        if interval <= 0:
+            return None
+        unit = unit_text.lower().rstrip("s")
+        if unit == "minute":
+            if interval > 59:
+                return None
+            return f"*/{interval} * * * *"
+        if unit == "hour":
+            if interval > 23:
+                return None
+            return f"0 */{interval} * * *"
+        return None
+
     def _parse_reminder_time(self, value: str) -> tuple[int, int] | None:
         normalized = re.sub(r"\s+", " ", value.strip().lower())
         named_times = {
@@ -4216,6 +4467,7 @@ class GatewayRouter:
 
     def _normalize_reminder_message(self, value: str) -> str | None:
         normalized = value.strip().strip("\"'")
+        normalized = re.sub(r"^(?:that|to)\s+", "", normalized, flags=re.IGNORECASE)
         normalized = re.sub(r"[.?!]+$", "", normalized).strip()
         if not normalized:
             return None
@@ -4974,6 +5226,93 @@ class GatewayRouter:
         status_hint = any(token in lowered for token in ("is there", "are there", "list", "show", "open"))
         repo_hint = "repo" in lowered or "repository" in lowered or self._extract_repo_from_text(lowered) is not None
         return bool(pr_hint and (status_hint or repo_hint))
+
+    def _looks_like_pull_request_create_request(self, lowered: str) -> bool:
+        pr_hint = "pull request" in lowered or re.search(r"\bpr\b", lowered) is not None
+        create_hint = any(token in lowered for token in ("create", "make", "raise", "submit")) or bool(
+            re.search(r"\bopen\s+(?:a\s+|the\s+)?(?:pull request|pr)\b", lowered)
+        )
+        return bool(pr_hint and create_hint)
+
+    def _contains_pull_request_fields(self, text: str) -> bool:
+        lowered = text.lower()
+        patterns = (
+            r"(^|\n)\s*title\s*:",
+            r"(^|\n)\s*(?:branch|head)\s*:",
+            r"(^|\n)\s*base\s+branch\s*:",
+            r"(^|\n)\s*description\s*:",
+            r"(^|\n)\s*body\s*:",
+        )
+        return any(re.search(pattern, lowered) is not None for pattern in patterns)
+
+    async def _has_recent_pull_request_context(self, session_key: str) -> bool:
+        history = await self.session_manager.session_history(session_key, limit=10)
+        for item in reversed(history):
+            content = str(item.get("content", "")).lower()
+            if "pull request" in content and any(
+                token in content for token in ("create", "title", "source branch", "base branch", "which branch")
+            ):
+                return True
+        return False
+
+    async def _collect_pull_request_fields(self, session_key: str, message: str) -> dict[str, str]:
+        merged = self._extract_pull_request_fields(message)
+        history = await self.session_manager.session_history(session_key, limit=10)
+        for item in reversed(history):
+            if str(item.get("role", "")).lower() != "user":
+                continue
+            extracted = self._extract_pull_request_fields(str(item.get("content", "")))
+            for key, value in extracted.items():
+                merged.setdefault(key, value)
+            if all(field in merged for field in ("title", "head", "base")):
+                break
+        return merged
+
+    def _extract_pull_request_fields(self, text: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            normalized = key.strip().lower()
+            cleaned_value = value.strip()
+            if not cleaned_value:
+                continue
+            if normalized == "title":
+                fields["title"] = cleaned_value
+            elif normalized in {"branch", "head", "source branch", "source"}:
+                fields["head"] = cleaned_value
+            elif normalized in {"base branch", "base", "target branch", "into"}:
+                fields["base"] = cleaned_value
+            elif normalized in {"description", "body"}:
+                fields["body"] = cleaned_value
+        return fields
+
+    def _resolve_branch_name(self, requested: str, branches: list[dict[str, Any]]) -> str | None:
+        requested_clean = requested.strip()
+        if not requested_clean:
+            return None
+        names = [str(branch.get("name", "")).strip() for branch in branches if str(branch.get("name", "")).strip()]
+        if requested_clean in names:
+            return requested_clean
+        lowered_lookup = {name.lower(): name for name in names}
+        return lowered_lookup.get(requested_clean.lower())
+
+    def _suggest_branch_names(self, requested: str, branches: list[dict[str, Any]]) -> list[str]:
+        requested_clean = requested.strip().lower()
+        if not requested_clean:
+            return []
+        names = [str(branch.get("name", "")).strip() for branch in branches if str(branch.get("name", "")).strip()]
+        scored = sorted(
+            names,
+            key=lambda name: (
+                0 if requested_clean in name.lower() or name.lower() in requested_clean else 1,
+                abs(len(name) - len(requested_clean)),
+                name.lower(),
+            ),
+        )
+        return scored[:6]
 
     def _has_host_tools(self) -> bool:
         has_tool = getattr(self.tool_registry, "has", None)
@@ -5986,10 +6325,30 @@ class GatewayRouter:
             lines.append(f"...and {len(pull_requests) - 5} more.")
         return "\n".join(lines)
 
+    def _format_pull_request_created_response(self, owner: str, repo: str, result: dict[str, Any]) -> str:
+        return (
+            f"Created pull request #{result.get('number', '?')} in {owner}/{repo}.\n"
+            f"Title: {result.get('title', '(no title)')}\n"
+            f"From: {result.get('head', 'unknown')} -> {result.get('base', 'unknown')}\n"
+            f"URL: {result.get('html_url', 'no url')}"
+        )
+
     async def _resolve_repo_reference(self, session_key: str, message: str) -> tuple[str, str] | None:
         direct = self._extract_repo_from_text(message)
         if direct is not None:
             return direct
+        browser_state = getattr(getattr(self.tool_registry, "browser_runtime", None), "current_state", None)
+        if callable(browser_state):
+            try:
+                state = browser_state()
+            except Exception:
+                state = None
+            if isinstance(state, dict):
+                active_tab = state.get("active_tab") or {}
+                url = str(active_tab.get("url", ""))
+                extracted = self._extract_repo_from_github_url(url)
+                if extracted is not None:
+                    return extracted
         history = await self.session_manager.session_history(session_key, limit=20)
         for item in reversed(history):
             content = str(item.get("content", ""))
@@ -6000,6 +6359,12 @@ class GatewayRouter:
 
     def _extract_repo_from_text(self, text: str) -> tuple[str, str] | None:
         match = re.search(r"\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\b", text)
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    def _extract_repo_from_github_url(self, url: str) -> tuple[str, str] | None:
+        match = re.search(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", url, re.IGNORECASE)
         if not match:
             return None
         return match.group(1), match.group(2)

@@ -158,6 +158,39 @@ def build_desktop_input_tools(config, system_access_manager=None) -> tuple[list[
             ),
         )
 
+    async def desktop_mouse_drag(payload: dict[str, Any]) -> dict[str, Any]:
+        x = int(payload["x"])
+        y = int(payload["y"])
+        end_x = int(payload["end_x"])
+        end_y = int(payload["end_y"])
+        low_risk_visual = bool(payload.get("coworker_low_risk_visual", False))
+        category = "auto_allow" if low_risk_visual else "always_ask"
+        return await _run_action(
+            tool_name="desktop_mouse_drag",
+            action_kind="desktop_drag",
+            target_summary=f"Drag from ({x}, {y}) to ({end_x}, {end_y}) [{payload.get('coordinate_space', 'screen')}]",
+            category=category,
+            payload=payload,
+            audit_details={
+                "x": x,
+                "y": y,
+                "end_x": end_x,
+                "end_y": end_y,
+                "coordinate_space": str(payload.get("coordinate_space", "screen")),
+            },
+            executor=lambda: _maybe_async(
+                runtime.drag_mouse(
+                    x=x,
+                    y=y,
+                    end_x=end_x,
+                    end_y=end_y,
+                    coordinate_space=str(payload.get("coordinate_space", "screen")),
+                    expected_window_title=str(payload.get("expected_window_title", "")),
+                    expected_process_name=str(payload.get("expected_process_name", "")),
+                )
+            ),
+        )
+
     async def desktop_keyboard_type(payload: dict[str, Any]) -> dict[str, Any]:
         text = _extract_text_input(payload)
         category = "always_ask" if bool(getattr(config.desktop_input, "confirm_typing", True)) else "auto_allow"
@@ -275,6 +308,24 @@ def build_desktop_input_tools(config, system_access_manager=None) -> tuple[list[
                 "required": ["direction"],
             },
             handler=desktop_mouse_scroll,
+        ),
+        ToolDefinition(
+            name="desktop_mouse_drag",
+            description="Drag from one coordinate to another on the screen or inside the active window.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                    "end_x": {"type": "integer"},
+                    "end_y": {"type": "integer"},
+                    "coordinate_space": {"type": "string", "enum": ["screen", "active_window"], "default": "screen"},
+                    "expected_window_title": {"type": "string"},
+                    "expected_process_name": {"type": "string"},
+                },
+                "required": ["x", "y", "end_x", "end_y"],
+            },
+            handler=desktop_mouse_drag,
         ),
         ToolDefinition(
             name="desktop_keyboard_type",

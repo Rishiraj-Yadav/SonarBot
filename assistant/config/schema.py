@@ -206,6 +206,8 @@ class DesktopCoworkerConfig(BaseModel):
     targeting_backend: Literal["legacy", "ocr_boxes", "uia", "hybrid"] = "hybrid"
     uia_enabled: bool = True
     ocr_boxes_enabled: bool = True
+    object_detection_enabled: bool = True
+    max_object_candidates: int = 6
     keyboard_fallback_enabled: bool = True
     max_recovery_attempts: int = 3
     max_visual_replans: int = 2

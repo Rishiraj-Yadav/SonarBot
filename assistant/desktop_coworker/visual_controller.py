@@ -13,6 +13,7 @@ from assistant.desktop_coworker.adapters import (
 )
 from assistant.desktop_coworker.candidate_fusion import fuse_target_candidates
 from assistant.desktop_coworker.models import build_artifact
+from assistant.desktop_coworker.object_candidates import extract_object_candidates, object_detection_backend_health
 from assistant.desktop_coworker.ocr_boxes import extract_ocr_box_candidates, extract_ocr_box_text
 from assistant.desktop_coworker.recovery import DesktopCoworkerRecovery
 from assistant.desktop_coworker.state import DesktopCoworkerStateCollector
@@ -53,6 +54,7 @@ class DesktopCoworkerVisualController:
             "targeting_backend": str(getattr(self.config.desktop_coworker, "targeting_backend", "hybrid")),
             "uia": self.uia.health(),
             "ocr_boxes": ocr_boxes_health,
+            "object_detection": object_detection_backend_health(),
             "legacy_visual": {"backend": "legacy", "available": True, "detail": "Gemini screenshot reasoning"},
         }
 
@@ -95,14 +97,28 @@ class DesktopCoworkerVisualController:
             )
             fused_candidates = self._collect_candidates(current_state)
             current_state["target_candidates"] = list(fused_candidates)
-            decision = await self.reasoner.decide(
-                goal=goal,
-                state=current_state,
-                latest_state=latest_state,
-                failed_targets=failed_targets,
-                fused_candidates=fused_candidates,
-                backend_health=backend_health,
-            )
+            retry_action = latest_state.pop("retry_action", None) if isinstance(latest_state.get("retry_action"), dict) else None
+            retry_hint = str(latest_state.pop("retry_hint", "")).strip() if "retry_hint" in latest_state else ""
+            recovery_action = retry_action if isinstance(retry_action, dict) else None
+            if recovery_action is not None:
+                decision = {
+                    "screen_summary": retry_hint or "Retrying the previous action with an adjusted recovery strategy.",
+                    "screen_text": str(current_state.get("screen_text", "")).strip(),
+                    "completion_state": "continue",
+                    "message": "",
+                    "goal_completed_if_verified": bool(recovery_action.get("goal_completed_if_verified", False)),
+                    "candidates": list(current_state.get("target_candidates", [])),
+                    "action": dict(recovery_action),
+                }
+            else:
+                decision = await self.reasoner.decide(
+                    goal=goal,
+                    state=current_state,
+                    latest_state=latest_state,
+                    failed_targets=failed_targets,
+                    fused_candidates=fused_candidates,
+                    backend_health=backend_health,
+                )
             if str(decision.get("screen_text", "")).strip():
                 current_state["screen_text"] = str(decision.get("screen_text", "")).strip()
             current_state["target_candidates"] = list(decision.get("candidates", []))
@@ -204,7 +220,7 @@ class DesktopCoworkerVisualController:
                 }
 
             confidence = float(action.get("confidence", 0.0))
-            if ask_on_low_confidence and confidence < confidence_threshold:
+            if recovery_action is None and ask_on_low_confidence and confidence < confidence_threshold:
                 message = (
                     f"I found a possible visible target, but confidence is only {confidence:.2f}. "
                     "Please be more specific or choose the item manually."
@@ -358,6 +374,10 @@ class DesktopCoworkerVisualController:
         prepared = dict(action)
         action_type = str(prepared.get("type", "")).strip().lower()
         normalized_goal = normalize_target_label(goal)
+        if action_type == "type_text":
+            text_value = str(prepared.get("text", "")).strip()
+            if text_value:
+                prepared.setdefault("expected_text_after", text_value)
         if str(prepared.get("target_kind", "")).strip().lower() == "toggle":
             if "turnoffbluetooth" in normalized_goal or "disablebluetooth" in normalized_goal:
                 prepared.setdefault("expected_text_after", "Off")
@@ -413,6 +433,9 @@ class DesktopCoworkerVisualController:
         expected_window_title = str(active_window.get("title", "")).strip()
         expected_process_name = str(active_window.get("process_name", "")).strip()
         execution_mode = str(action.get("execution_mode", "")).strip().lower()
+        uia_result = self._try_uia_action(action=action, state=state)
+        if uia_result is not None and str(uia_result.get("status", "")).strip().lower() == "completed":
+            return uia_result
         if execution_mode == "open_known_path":
             resolved_path = str(action.get("resolved_path", "")).strip()
             opener_alias = str(action.get("opener_alias", "")).strip().lower() or "explorer"
@@ -453,6 +476,28 @@ class DesktopCoworkerVisualController:
             )
             result = await self.tool_registry.dispatch("desktop_mouse_click", payload)
             return {**result, "execution_mode": "visual_click"}
+        if action_type == "focus_field":
+            label = normalize_target_label(str(action.get("target_label", "")))
+            payload = build_click_payload(
+                x_norm=action.get("x"),
+                y_norm=action.get("y"),
+                count=1,
+                state=state,
+                expected_window_title=expected_window_title,
+                expected_process_name=expected_process_name,
+            )
+            payload.update(
+                {
+                    "session_key": session_key,
+                    "session_id": str(session_key),
+                    "user_id": user_id,
+                    "connection_id": connection_id,
+                    "channel_name": channel_name,
+                    "visual_target_label": label,
+                }
+            )
+            result = await self.tool_registry.dispatch("desktop_mouse_click", payload)
+            return {**result, "execution_mode": "visual_focus"}
         if action_type == "press_hotkey":
             if not self.tool_registry.has("desktop_keyboard_hotkey"):
                 raise RuntimeError("Visual keyboard fallback requires desktop hotkey input tools.")
@@ -499,7 +544,46 @@ class DesktopCoworkerVisualController:
                 "channel_name": channel_name,
             }
             return await self.tool_registry.dispatch("desktop_mouse_scroll", payload)
+        if action_type == "drag":
+            if not self.tool_registry.has("desktop_mouse_drag"):
+                raise RuntimeError("Visual drag actions require desktop mouse drag input tools.")
+            payload = {
+                "x": max(0, int(action.get("x", 0))),
+                "y": max(0, int(action.get("y", 0))),
+                "end_x": max(0, int(action.get("x2", action.get("x", 0)))),
+                "end_y": max(0, int(action.get("y2", action.get("y", 0)))),
+                "coordinate_space": "active_window" if str(state.get("capture_target", "window")).lower() == "window" else "screen",
+                "expected_window_title": expected_window_title,
+                "expected_process_name": expected_process_name,
+                "session_key": session_key,
+                "session_id": str(session_key),
+                "user_id": user_id,
+                "connection_id": connection_id,
+                "channel_name": channel_name,
+            }
+            return await self.tool_registry.dispatch("desktop_mouse_drag", payload)
         raise RuntimeError(f"Unsupported visual coworker action '{action_type}'.")
+
+    def _try_uia_action(self, *, action: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        if not bool(getattr(self.config.desktop_coworker, "uia_enabled", True)):
+            return None
+        health = self.uia.health()
+        if not bool(health.get("available", False)):
+            return None
+        action_type = str(action.get("type", "")).strip().lower()
+        target_kind = str(action.get("target_kind", "")).strip().lower()
+        if action_type not in {"click", "double_click", "focus_field", "type_text"}:
+            return None
+        if action_type == "type_text" and not str(action.get("text", "")).strip():
+            return None
+        uia_friendly_kinds = {"button", "toggle", "menu", "tab", "field", "combobox", "row", "tree", "cell", "table", "dialog", "panel", "icon"}
+        backend = str(action.get("backend", "")).strip().lower()
+        if target_kind not in uia_friendly_kinds and action_type != "type_text":
+            return None
+        if backend != "uia" and target_kind not in uia_friendly_kinds:
+            return None
+        result = self.uia.perform_action(action=action, state=state)
+        return result if isinstance(result, dict) else None
 
     def _verify_action(
         self,
@@ -540,6 +624,33 @@ class DesktopCoworkerVisualController:
         screen_changed = before_text != after_text
         window_changed = before_window_text != after_window_text
         new_element_appeared = self._has_new_visible_element(before, after)
+        uia_before = tool_result.get("uia_state_before", {}) if isinstance(tool_result.get("uia_state_before"), dict) else {}
+        uia_after = tool_result.get("uia_state_after", {}) if isinstance(tool_result.get("uia_state_after"), dict) else {}
+        uia_before_value = normalize_target_label(str(uia_before.get("value", "")))
+        uia_after_value = normalize_target_label(str(uia_after.get("value", "")))
+        uia_after_toggle = normalize_target_label(str(uia_after.get("toggle_state", "")))
+        uia_after_label = normalize_target_label(str(uia_after.get("label", "")))
+        if execution_mode.startswith("uia_"):
+            if action_type == "focus_field" and bool(uia_after.get("focused", False)):
+                return {"ok": True, "kind": "uia_focus", "message": ""}
+            if action_type == "type_text":
+                expected_value = normalize_target_label(str(action.get("text", "")))
+                if expected_value and (expected_value in uia_after_value or expected_value in after_text):
+                    return {"ok": True, "kind": "uia_value", "message": ""}
+            if target_kind == "toggle":
+                if str(uia_before.get("toggle_state", "")) != str(uia_after.get("toggle_state", "")) and str(uia_after.get("toggle_state", "")):
+                    return {"ok": True, "kind": "uia_toggle", "message": ""}
+                if expected_text_after and (
+                    expected_text_after in uia_after_value
+                    or expected_text_after in uia_after_toggle
+                    or expected_text_after in uia_after_label
+                    or expected_text_after in after_text
+                ):
+                    return {"ok": True, "kind": "uia_toggle", "message": ""}
+            if target_kind in {"tab", "menu", "row", "tree", "cell", "table"} and (
+                bool(uia_after.get("selected", False)) or bool(uia_after.get("focused", False))
+            ):
+                return {"ok": True, "kind": "uia_select", "message": ""}
 
         adapter_verification = verify_surface_transition(
             action=action,
@@ -550,6 +661,12 @@ class DesktopCoworkerVisualController:
         if adapter_verification is not None:
             return adapter_verification
 
+        if action_type in {"click", "double_click", "focus_field"} and self._target_became_selected(
+            before=before,
+            after=after,
+            target_label=target_label,
+        ):
+            return {"ok": True, "kind": "selection_state", "message": ""}
         if expected_window_title and expected_window_title in after_window_text:
             if execution_mode != "open_known_path" or expected_window_title in after_title:
                 return {"ok": True, "kind": "visual_task", "message": ""}
@@ -594,6 +711,14 @@ class DesktopCoworkerVisualController:
                 return {"ok": True, "kind": "visual_task", "message": ""}
             if new_element_appeared:
                 return {"ok": True, "kind": "visual_task", "message": ""}
+        if action_type == "focus_field":
+            if self._target_became_selected(before=before, after=after, target_label=target_label):
+                return {"ok": True, "kind": "focus_field", "message": ""}
+            if before_text != after_text or new_element_appeared:
+                return {"ok": True, "kind": "focus_field", "message": ""}
+        if action_type == "drag":
+            if window_changed or screen_changed or new_element_appeared:
+                return {"ok": True, "kind": "drag", "message": ""}
         if execution_mode != "open_known_path" and target_kind not in {"file", "row"} and action_confidence > 0.85:
             return {"ok": True, "kind": "visual_task", "message": ""}
         return {
@@ -678,11 +803,18 @@ class DesktopCoworkerVisualController:
         targeting_backend = str(getattr(self.config.desktop_coworker, "targeting_backend", "hybrid")).strip().lower() or "hybrid"
         uia_candidates: list[dict[str, Any]] = []
         ocr_candidates: list[dict[str, Any]] = []
+        object_candidates: list[dict[str, Any]] = []
         if targeting_backend in {"uia", "hybrid"} and bool(getattr(self.config.desktop_coworker, "uia_enabled", True)):
             uia_candidates = self.uia.collect_candidates(state, limit=max_candidates)
         if targeting_backend in {"ocr_boxes", "hybrid"} and bool(getattr(self.config.desktop_coworker, "ocr_boxes_enabled", True)):
             ocr_candidates = extract_ocr_box_candidates(state, limit=max_candidates, config=self.config)
-        return fuse_target_candidates(uia_candidates, ocr_candidates, limit=max_candidates)
+        if targeting_backend == "hybrid" and bool(getattr(self.config.desktop_coworker, "object_detection_enabled", True)):
+            object_candidates = extract_object_candidates(
+                state,
+                limit=max(1, int(getattr(self.config.desktop_coworker, "max_object_candidates", 6))),
+                config=self.config,
+            )
+        return fuse_target_candidates(uia_candidates, ocr_candidates, object_candidates, limit=max_candidates)
 
     def _populate_local_observation(self, state: dict[str, Any]) -> None:
         if not str(state.get("screen_text", "")).strip():
@@ -835,3 +967,23 @@ class DesktopCoworkerVisualController:
             if normalized:
                 labels.add(normalized)
         return labels
+
+    def _target_became_selected(self, *, before: dict[str, Any], after: dict[str, Any], target_label: str) -> bool:
+        if not target_label:
+            return False
+        before_selected = self._candidate_selected(before, target_label)
+        after_selected = self._candidate_selected(after, target_label)
+        return not before_selected and after_selected
+
+    def _candidate_selected(self, state: dict[str, Any], target_label: str) -> bool:
+        candidates = state.get("target_candidates", [])
+        if not isinstance(candidates, list):
+            return False
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            normalized = normalize_target_label(str(candidate.get("normalized_label") or candidate.get("label") or ""))
+            if normalized != target_label:
+                continue
+            return bool(candidate.get("selected", False))
+        return False

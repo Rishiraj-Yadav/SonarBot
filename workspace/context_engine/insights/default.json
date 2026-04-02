@@ -139,6 +139,13 @@
       "sent_at": "2026-04-02T01:34:49.425988+00:00",
       "confidence": 1.0,
       "urgency": 1.0
+    },
+    {
+      "fingerprint": "gmail-thread-19d462c5f7032be3-action-required-2026-04",
+      "title": "Action Required for Google AI Studio",
+      "sent_at": "2026-04-02T02:37:35.162261+00:00",
+      "confidence": 0.95,
+      "urgency": 0.7
     }
   ]
 }

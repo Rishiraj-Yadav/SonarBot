@@ -53,6 +53,10 @@ def sanitize_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
         }
     if "selected" in candidate:
         sanitized["selected"] = bool(candidate.get("selected"))
+    if "enabled" in candidate:
+        sanitized["enabled"] = bool(candidate.get("enabled"))
+    if "control_type" in candidate:
+        sanitized["control_type"] = str(candidate.get("control_type", "")).strip().lower()
     return sanitized
 
 

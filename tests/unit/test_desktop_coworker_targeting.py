@@ -4,7 +4,10 @@ import sys
 import types
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 from assistant.desktop_coworker.candidate_fusion import fuse_target_candidates
+from assistant.desktop_coworker.object_candidates import extract_object_candidates
 from assistant.desktop_coworker.ocr_boxes import extract_ocr_box_candidates
 from assistant.desktop_coworker.targeting import build_click_payload, sanitize_candidates
 from assistant.desktop_coworker.uia_backend import DesktopCoworkerUIABackend
@@ -29,6 +32,8 @@ class _FakeControl:
         offscreen: bool = False,
         enabled: bool = True,
         selected: bool = False,
+        value: str = "",
+        toggle_state: str = "",
     ) -> None:
         self.Name = name
         self.ControlTypeName = control_type
@@ -37,10 +42,57 @@ class _FakeControl:
         self.IsOffscreen = offscreen
         self.IsEnabled = enabled
         self.IsSelected = selected
+        self.HasKeyboardFocus = selected
         self.RuntimeId = (name, control_type, rect[0], rect[1])
+        self._value = value
+        self._toggle_state = toggle_state
+        self.invoked = False
 
     def GetChildren(self) -> list["_FakeControl"]:
         return list(self._children)
+
+    def SetFocus(self) -> None:
+        self.HasKeyboardFocus = True
+
+    def Select(self) -> None:
+        self.IsSelected = True
+        self.HasKeyboardFocus = True
+
+    def Toggle(self) -> None:
+        self._toggle_state = "Off" if str(self._toggle_state).lower() == "on" else "On"
+
+    def Invoke(self) -> None:
+        self.invoked = True
+
+    def Click(self) -> None:
+        self.invoked = True
+        self.IsSelected = True
+        self.HasKeyboardFocus = True
+
+    def DoubleClick(self) -> None:
+        self.invoked = True
+        self.IsSelected = True
+        self.HasKeyboardFocus = True
+
+    def GetValuePattern(self):
+        return types.SimpleNamespace(
+            SetValue=self._set_value,
+            Value=self._value,
+            CurrentValue=self._value,
+        )
+
+    def GetTogglePattern(self):
+        return types.SimpleNamespace(
+            Toggle=self.Toggle,
+            ToggleState=self._toggle_state,
+            CurrentToggleState=self._toggle_state,
+        )
+
+    def GetSelectionItemPattern(self):
+        return types.SimpleNamespace(Select=self.Select)
+
+    def _set_value(self, value: str) -> None:
+        self._value = value
 
 
 def test_visual_targeting_sanitizes_and_dedupes_candidates() -> None:
@@ -139,6 +191,112 @@ def test_uia_backend_collects_real_candidates_from_accessibility_tree(monkeypatc
     assert labels["Desktop"]["y"] == 175
 
 
+def test_uia_backend_classifies_tabs_fields_and_tree_items(monkeypatch, app_config) -> None:
+    fake_tree = _FakeControl(
+        name="WhatsApp",
+        control_type="WindowControl",
+        rect=(100, 100, 900, 700),
+        children=[
+            _FakeControl(name="Chats", control_type="TabItemControl", rect=(120, 150, 220, 200), selected=True),
+            _FakeControl(name="Type a message", control_type="EditControl", rect=(300, 620, 820, 670)),
+            _FakeControl(name="Nikhil VCET", control_type="TreeItemControl", rect=(120, 220, 340, 270)),
+        ],
+    )
+    fake_uia_module = types.SimpleNamespace(ControlFromHandle=lambda _hwnd: fake_tree)
+    monkeypatch.setitem(sys.modules, "uiautomation", fake_uia_module)
+    monkeypatch.setattr(
+        "assistant.desktop_coworker.uia_backend.load_desktop_libraries",
+        lambda: (object(), object(), ""),
+    )
+    monkeypatch.setattr(
+        "assistant.desktop_coworker.uia_backend.get_window_rect",
+        lambda _user32, _hwnd: (100, 100, 900, 700),
+    )
+
+    backend = DesktopCoworkerUIABackend(app_config)
+    candidates = backend.collect_candidates(
+        {
+            "active_window": {
+                "window_id": "777",
+                "title": "WhatsApp",
+                "process_name": "WhatsApp",
+            }
+        },
+        limit=8,
+    )
+
+    labels = {item["label"]: item for item in candidates}
+    assert labels["Chats"]["kind"] == "tab"
+    assert labels["Type a message"]["kind"] == "field"
+    assert labels["Nikhil VCET"]["kind"] == "tree"
+    assert labels["Chats"]["selected"] is True
+
+
+def test_uia_backend_performs_direct_toggle_and_set_value(monkeypatch, app_config) -> None:
+    toggle = _FakeControl(name="On", control_type="ToggleButtonControl", rect=(740, 120, 820, 170), toggle_state="On")
+    field = _FakeControl(name="File name", control_type="EditControl", rect=(220, 620, 760, 670), value="")
+    fake_tree = _FakeControl(
+        name="Save As",
+        control_type="WindowControl",
+        rect=(100, 100, 900, 760),
+        children=[toggle, field],
+    )
+    fake_uia_module = types.SimpleNamespace(ControlFromHandle=lambda _hwnd: fake_tree)
+    monkeypatch.setitem(sys.modules, "uiautomation", fake_uia_module)
+    monkeypatch.setattr(
+        "assistant.desktop_coworker.uia_backend.load_desktop_libraries",
+        lambda: (object(), object(), ""),
+    )
+    monkeypatch.setattr(
+        "assistant.desktop_coworker.uia_backend.get_window_rect",
+        lambda _user32, _hwnd: (100, 100, 900, 760),
+    )
+
+    backend = DesktopCoworkerUIABackend(app_config)
+    state = {
+        "active_window": {
+            "window_id": "909",
+            "title": "Bluetooth & devices > Devices - Settings",
+            "process_name": "SystemSettings",
+        }
+    }
+
+    toggle_result = backend.perform_action(
+        action={
+            "type": "click",
+            "target_label": "On",
+            "target_kind": "toggle",
+            "x": 900,
+            "y": 180,
+        },
+        state=state,
+    )
+    assert toggle_result["status"] == "completed"
+    assert toggle_result["execution_mode"] == "uia_toggle"
+    assert str(toggle_result["uia_state_after"]["toggle_state"]).lower() == "off"
+
+    value_result = backend.perform_action(
+        action={
+            "type": "type_text",
+            "target_label": "File name",
+            "target_kind": "field",
+            "text": "notes.txt",
+            "x": 420,
+            "y": 650,
+        },
+        state={
+            "active_window": {
+                "window_id": "910",
+                "title": "Save As",
+                "process_name": "explorer",
+            }
+        },
+    )
+    assert value_result["status"] == "completed"
+    assert value_result["execution_mode"] == "uia_set_value"
+    assert value_result["uia_state_after"]["value"] == "notes.txt"
+
+
 def test_uia_backend_gracefully_reports_missing_library(monkeypatch, app_config) -> None:
     monkeypatch.setitem(sys.modules, "uiautomation", types.SimpleNamespace())
     monkeypatch.setattr(
@@ -218,3 +376,29 @@ def test_ocr_box_candidates_return_empty_when_bbox_engine_unavailable(monkeypatc
     )
 
     assert candidates == []
+
+
+def test_object_candidates_extract_non_text_regions(app_config) -> None:
+    capture_dir = app_config.agent.workspace_dir / "desktop"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    capture_path = capture_dir / "window-object-detect.png"
+    image = Image.new("RGB", (640, 480), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((120, 80, 300, 150), radius=12, outline="black", width=4, fill="#d9f5ec")
+    draw.rectangle((360, 190, 420, 250), outline="black", width=4, fill="#4a90e2")
+    image.save(capture_path)
+
+    candidates = extract_object_candidates(
+        {
+            "capture_path": str(capture_path),
+            "capture_width": 640,
+            "capture_height": 480,
+            "active_window": {"title": "Sample", "process_name": "app"},
+        },
+        limit=6,
+        config=app_config,
+    )
+
+    assert candidates
+    assert any(item["backend"] == "object_detection" for item in candidates)
+    assert any(item["kind"] in {"button", "icon", "dialog", "panel", "row", "object"} for item in candidates)

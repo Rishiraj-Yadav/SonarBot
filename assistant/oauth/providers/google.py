@@ -70,7 +70,11 @@ class GoogleOAuthProvider:
         return self._normalize_tokens(data)
 
     def _normalize_tokens(self, data: dict[str, Any]) -> dict[str, Any]:
-        expires_in = int(data.get("expires_in", 3600))
+        expires_in_raw = data.get("expires_in", 3600)
+        try:
+            expires_in = int(expires_in_raw) if expires_in_raw not in (None, "") else 3600
+        except (TypeError, ValueError):
+            expires_in = 3600
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         return {
             "provider": self.name,

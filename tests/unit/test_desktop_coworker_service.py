@@ -39,6 +39,7 @@ class CoworkerToolRegistry:
             "desktop_window_screenshot",
             "desktop_read_screen",
             "desktop_mouse_click",
+            "desktop_mouse_drag",
             "desktop_mouse_scroll",
             "apps_open",
             "apps_focus",
@@ -171,6 +172,14 @@ class CoworkerToolRegistry:
                     "screen_text_after": "Bluetooth & devices Devices Bluetooth On Add device USB GAMING MOUSE",
                 }
             return {"status": "completed", "x": int(payload.get("x", 0)), "y": int(payload.get("y", 0))}
+        if tool_name == "desktop_mouse_drag":
+            return {
+                "status": "completed",
+                "x": int(payload.get("x", 0)),
+                "y": int(payload.get("y", 0)),
+                "end_x": int(payload.get("end_x", 0)),
+                "end_y": int(payload.get("end_y", 0)),
+            }
         if tool_name == "apps_open":
             target = str(payload.get("target", ""))
             args = [str(item) for item in payload.get("args", [])] if isinstance(payload.get("args", []), list) else []
@@ -522,8 +531,9 @@ async def test_coworker_service_rejects_false_completed_visual_state(monkeypatch
     )
 
     assert task["status"] == "failed"
-    assert calls["count"] >= 2
-    assert "same screen" in str(task.get("error", "") or task["transcript"][-1]["summary"]).lower() or "evidence" in str(task["transcript"][-1]["summary"]).lower()
+    assert calls["count"] >= 1
+    summary_text = str(task.get("error", "") or task["transcript"][-1]["summary"]).lower()
+    assert "same screen" in summary_text or "evidence" in summary_text or "did not change" in summary_text
 
 
 @pytest.mark.asyncio
@@ -816,6 +826,61 @@ async def test_visual_controller_executes_scroll_action(app_config) -> None:
     assert scroll_calls[0]["expected_process_name"] == "explorer"
 
 
+@pytest.mark.asyncio
+async def test_visual_controller_executes_drag_action(app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+
+    app_config.desktop_coworker.enabled = True
+    app_config.desktop_input.enabled = True
+    registry = CoworkerToolRegistry()
+    controller = DesktopCoworkerVisualController(app_config, registry)
+
+    result = await controller._execute_action(
+        action={"type": "drag", "x": 120, "y": 180, "x2": 640, "y2": 260},
+        state={"capture_target": "window", "active_window": {"title": "Home - File Explorer", "process_name": "explorer"}},
+        session_key="webchat_main",
+        user_id=app_config.users.default_user_id,
+        connection_id="conn-drag",
+        channel_name="webchat",
+    )
+
+    assert result["status"] == "completed"
+    drag_calls = [payload for name, payload in registry.calls if name == "desktop_mouse_drag"]
+    assert len(drag_calls) == 1
+    assert drag_calls[0]["x"] == 120
+    assert drag_calls[0]["end_x"] == 640
+    assert drag_calls[0]["coordinate_space"] == "active_window"
+
+
+@pytest.mark.asyncio
+async def test_visual_controller_prefers_direct_uia_execution(app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+
+    app_config.desktop_coworker.enabled = True
+    app_config.desktop_input.enabled = True
+    registry = CoworkerToolRegistry()
+    controller = DesktopCoworkerVisualController(app_config, registry)
+    controller.uia.perform_action = lambda **kwargs: {  # type: ignore[method-assign]
+        "status": "completed",
+        "execution_mode": "uia_toggle",
+        "uia_state_before": {"toggle_state": "On"},
+        "uia_state_after": {"toggle_state": "Off"},
+    }
+    controller.uia.health = lambda: {"backend": "uia", "available": True, "detail": "mock"}  # type: ignore[method-assign]
+
+    result = await controller._execute_action(
+        action={"type": "click", "target_label": "On", "target_kind": "toggle", "backend": "uia"},
+        state={"active_window": {"title": "Settings", "process_name": "SystemSettings"}},
+        session_key="webchat_main",
+        user_id=app_config.users.default_user_id,
+        connection_id="conn-uia",
+        channel_name="webchat",
+    )
+
+    assert result["execution_mode"] == "uia_toggle"
+    assert [name for name, _payload in registry.calls if name == "desktop_mouse_click"] == []
+
+
 def test_visual_controller_verifies_type_text_and_scroll_from_screen_change(app_config) -> None:
     from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
 
@@ -892,6 +957,125 @@ def test_visual_controller_verifies_when_new_element_appears(app_config) -> None
     )
 
     assert verification["ok"] is True
+
+
+def test_visual_controller_verifies_selected_target_transition(app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+
+    controller = DesktopCoworkerVisualController(app_config, CoworkerToolRegistry())
+
+    verification = controller._verify_action(
+        action={"type": "click", "target_label": "Nikhil VCET", "target_kind": "row", "confidence": 0.79},
+        before={
+            "screen_text": "Chats Nikhil VCET",
+            "target_candidates": [{"label": "Nikhil VCET", "selected": False}],
+            "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+        },
+        after={
+            "screen_text": "Chats Nikhil VCET Type a message",
+            "target_candidates": [{"label": "Nikhil VCET", "selected": True}, {"label": "Type a message", "selected": False}],
+            "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+        },
+        tool_result={"status": "completed"},
+    )
+
+    assert verification["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_visual_controller_uses_retry_action_without_second_reasoner_call(monkeypatch, app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+    from assistant.desktop_coworker.visual_reasoner import DesktopCoworkerVisualReasoner
+
+    calls = {"count": 0}
+
+    async def fake_decide(self, **kwargs):  # noqa: ARG001
+        calls["count"] += 1
+        return {
+            "screen_summary": "WhatsApp chat list is visible.",
+            "screen_text": "Chats Nikhil VCET",
+            "completion_state": "continue",
+            "message": "",
+            "goal_completed_if_verified": True,
+            "candidates": [
+                {"label": "Nikhil VCET", "kind": "row", "confidence": 0.91, "x": 220, "y": 260, "backend": "uia"},
+            ],
+            "action": {
+                "type": "click",
+                "target_label": "Nikhil VCET",
+                "target_kind": "row",
+                "confidence": 0.91,
+                "x": 220,
+                "y": 260,
+                "goal_completed_if_verified": True,
+            },
+        }
+
+    monkeypatch.setattr(DesktopCoworkerVisualReasoner, "decide", fake_decide)
+    app_config.desktop_coworker.enabled = True
+    app_config.desktop_input.enabled = True
+    app_config.desktop_vision.enabled = True
+    registry = CoworkerToolRegistry()
+    registry.mouse_click_opens_target = False
+    controller = DesktopCoworkerVisualController(app_config, registry)
+    capture_dir = app_config.agent.workspace_dir / "desktop"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    (capture_dir / "window-1.png").write_bytes(b"fake")
+
+    states = iter(
+        [
+            {
+                "capture_path": "workspace/desktop/window-1.png",
+                "capture_width": 1200,
+                "capture_height": 800,
+                "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+                "screen_text": "Chats Nikhil VCET",
+                "target_candidates": [{"label": "Nikhil VCET", "selected": False}],
+            },
+            {
+                "capture_path": "workspace/desktop/window-1.png",
+                "capture_width": 1200,
+                "capture_height": 800,
+                "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+                "screen_text": "Chats Nikhil VCET",
+                "target_candidates": [{"label": "Nikhil VCET", "selected": False}],
+            },
+                {
+                    "capture_path": "workspace/desktop/window-1.png",
+                    "capture_width": 1200,
+                    "capture_height": 800,
+                    "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+                    "screen_text": "Chats Nikhil VCET Type a message",
+                    "target_candidates": [{"label": "Nikhil VCET", "selected": True}, {"label": "Type a message", "selected": False}],
+                },
+                {
+                    "capture_path": "workspace/desktop/window-1.png",
+                    "capture_width": 1200,
+                    "capture_height": 800,
+                    "active_window": {"title": "WhatsApp", "process_name": "WhatsApp"},
+                    "screen_text": "Nikhil VCET Type a message Attach",
+                    "target_candidates": [{"label": "Nikhil VCET", "selected": True}, {"label": "Type a message", "selected": True}],
+                },
+            ]
+        )
+
+    async def fake_capture(**kwargs):  # noqa: ARG001
+        return dict(next(states))
+
+    controller.state.capture = fake_capture  # type: ignore[method-assign]
+    controller._collect_candidates = lambda state: list(state.get("target_candidates", []))  # type: ignore[method-assign]
+
+    task = await controller.run_visual_task(
+        goal="Click on Nikhil VCET",
+        task={"latest_state": {}},
+        session_key="telegram:1",
+        user_id=app_config.users.default_user_id,
+        channel_name="telegram",
+    )
+
+    assert task["status"] == "completed"
+    assert calls["count"] == 1
+    assert task["substeps"][-1]["status"] == "completed"
 
 
 def test_visual_controller_completion_accepts_high_confidence_fallback(app_config) -> None:

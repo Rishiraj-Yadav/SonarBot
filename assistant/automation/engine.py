@@ -316,6 +316,31 @@ class AutomationEngine:
             "updated_at": reminder.updated_at,
         }
 
+    async def list_one_time_reminders(self, user_id: str) -> list[dict[str, Any]]:
+        return await self.store.list_one_time_reminders(user_id)
+
+    async def pause_one_time_reminder(self, user_id: str, reminder_id: str) -> dict[str, Any]:
+        reminder = await self.store.set_one_time_reminder_paused(user_id, reminder_id, True)
+        if reminder is None:
+            raise KeyError(f"Unknown reminder '{reminder_id}'.")
+        if self.scheduler is not None:
+            await self.scheduler.remove_one_time_reminder(reminder_id)
+        return reminder
+
+    async def resume_one_time_reminder(self, user_id: str, reminder_id: str) -> dict[str, Any]:
+        reminder = await self.store.set_one_time_reminder_paused(user_id, reminder_id, False)
+        if reminder is None:
+            raise KeyError(f"Unknown reminder '{reminder_id}'.")
+        if self.scheduler is not None:
+            await self.scheduler.register_one_time_reminder(reminder)
+        return reminder
+
+    async def delete_one_time_reminder(self, user_id: str, reminder_id: str) -> bool:
+        deleted = await self.store.delete_one_time_reminder(user_id, reminder_id)
+        if deleted and self.scheduler is not None:
+            await self.scheduler.remove_one_time_reminder(reminder_id)
+        return deleted
+
     async def create_report_job(self, job: ReportJob) -> ReportJob:
         normalized_job = ReportJob.model_validate(job.model_dump())
         if not normalized_job.topic.strip():

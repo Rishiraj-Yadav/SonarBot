@@ -229,7 +229,36 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
                     }
                 ]
             )
+        if url.endswith("/repos/octo/repo/branches"):
+            return FakeResponse(
+                [
+                    {
+                        "name": "main",
+                        "protected": True,
+                        "commit": {"sha": "sha-main"},
+                    },
+                    {
+                        "name": "Nick",
+                        "protected": False,
+                        "commit": {"sha": "sha-nick"},
+                    },
+                ]
+            )
         if url.endswith("/repos/octo/repo/pulls"):
+            if method == "POST":
+                payload = kwargs.get("json", {})
+                return FakeResponse(
+                    {
+                        "number": 9,
+                        "title": payload.get("title"),
+                        "state": "open",
+                        "draft": False,
+                        "html_url": "https://github.com/octo/repo/pull/9",
+                        "user": {"login": "octocat"},
+                        "head": {"ref": payload.get("head")},
+                        "base": {"ref": payload.get("base")},
+                    }
+                )
             return FakeResponse(
                 [
                     {
@@ -243,6 +272,23 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
                         "base": {"ref": "main"},
                     }
                 ]
+            )
+        if url.endswith("/repos/octo/repo/compare/main...Nick"):
+            return FakeResponse(
+                {
+                    "status": "ahead",
+                    "ahead_by": 2,
+                    "behind_by": 0,
+                    "total_commits": 2,
+                    "html_url": "https://github.com/octo/repo/compare/main...Nick",
+                    "commits": [
+                        {
+                            "sha": "cmp-1",
+                            "commit": {"message": "Add compare support", "author": {"name": "octocat"}},
+                        }
+                    ],
+                    "files": [{"filename": "router.py", "status": "modified", "changes": 12}],
+                }
             )
         if url.endswith("/repos/octo/repo/commits"):
             return FakeResponse(
@@ -289,12 +335,26 @@ async def test_github_tools_list_and_get_pull_request(monkeypatch) -> None:
     issues_result = await tools["github_list_issues"].handler({"owner": "octo", "repo": "repo"})
     assert issues_result["issues"][0]["title"] == "Bug report"
 
+    branches_result = await tools["github_list_branches"].handler({"owner": "octo", "repo": "repo"})
+    assert branches_result["branches"][1]["name"] == "Nick"
+
     prs_result = await tools["github_list_pull_requests"].handler({"owner": "octo", "repo": "repo"})
     assert prs_result["pull_requests"][0]["number"] == 7
 
     pr_detail = await tools["github_get_pull_request"].handler({"owner": "octo", "repo": "repo", "number": 7})
     assert pr_detail["files"][0]["filename"] == "app.py"
     assert pr_detail["reviews"][0]["state"] == "APPROVED"
+
+    comparison = await tools["github_compare_branches"].handler({"owner": "octo", "repo": "repo", "base": "main", "head": "Nick"})
+    assert comparison["ahead_by"] == 2
+    assert comparison["status"] == "ahead"
+
+    created = await tools["github_create_pull_request"].handler(
+        {"owner": "octo", "repo": "repo", "title": "Hello", "head": "Nick", "base": "main", "body": "Testing"}
+    )
+    assert created["number"] == 9
+    assert created["head"] == "Nick"
+    assert created["base"] == "main"
 
     repo_summary = await tools["github_get_repo_summary"].handler({"owner": "octo", "repo": "repo"})
     assert repo_summary["repository"]["full_name"] == "octo/repo"

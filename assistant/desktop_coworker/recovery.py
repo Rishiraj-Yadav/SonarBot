@@ -44,6 +44,24 @@ class DesktopCoworkerRecovery:
                 return keyboard_recipe
 
         action_type = str(action.get("type", "")).strip().lower()
+        if action_type == "drag":
+            if attempts_used >= max(0, int(getattr(self.config.desktop_coworker, "max_visual_replans", 2))):
+                return None
+            offsets = ((0, 0), (18, 12), (-18, 12), (18, -12), (-18, -12))
+            end_offset_x, end_offset_y = offsets[min(attempts_used + 1, len(offsets) - 1)]
+            refined = dict(action)
+            refined["x2"] = max(0, min(1000, int(refined.get("x2", refined.get("x", 500))) + end_offset_x))
+            refined["y2"] = max(0, min(1000, int(refined.get("y2", refined.get("y", 500))) + end_offset_y))
+            refined["reason"] = str(refined.get("reason", "")).strip() or "Retry the drag with a refined drop position."
+            refined["recovery_strategy"] = "refined_drag"
+            return refined
+        if action_type == "type_text" and str(action.get("target_kind", "")).strip().lower() == "field" and attempts_used == 0:
+            refined = dict(action)
+            refined["type"] = "focus_field"
+            refined["goal_completed_if_verified"] = False
+            refined["reason"] = "Refocus the field before typing again."
+            refined["recovery_strategy"] = "refocus_field"
+            return refined
         if action_type not in {"click", "double_click"}:
             return None
         if attempts_used >= max(0, int(getattr(self.config.desktop_coworker, "max_visual_replans", 2))):

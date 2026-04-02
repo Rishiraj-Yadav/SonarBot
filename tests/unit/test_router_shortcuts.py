@@ -109,6 +109,7 @@ class DummyToolRegistry:
         screen_tools_enabled: bool = False,
         input_tools_enabled: bool = False,
         app_skill_tools_enabled: bool = False,
+        browser_active_url: str = "https://github.com",
     ) -> None:
         self.calls = []
         self.llm_task_response = llm_task_response or {"content": json.dumps({"skill": "daily-briefing", "confidence": 0.91})}
@@ -118,14 +119,15 @@ class DummyToolRegistry:
         self.screen_tools_enabled = screen_tools_enabled
         self.input_tools_enabled = input_tools_enabled
         self.app_skill_tools_enabled = app_skill_tools_enabled
+        self.browser_active_url = browser_active_url
         self.browser_runtime = type(
             "BrowserRuntimeStub",
             (),
             {
                 "current_state": lambda self: {
                     "headless": False,
-                    "tabs": [{"tab_id": "tab-1", "title": "GitHub", "url": "https://github.com"}],
-                    "active_tab": {"tab_id": "tab-1", "title": "GitHub", "url": "https://github.com"},
+                    "tabs": [{"tab_id": "tab-1", "title": "GitHub", "url": browser_active_url}],
+                    "active_tab": {"tab_id": "tab-1", "title": "GitHub", "url": browser_active_url},
                     "active_profile": {"site_name": "github.com", "profile_name": "work", "status": "active"},
                 }
             },
@@ -226,6 +228,32 @@ class DummyToolRegistry:
                         "html_url": "https://github.com/octo/repo/pull/7",
                     }
                 ],
+            }
+        if tool_name == "github_list_branches":
+            return {
+                "owner": payload["owner"],
+                "repo": payload["repo"],
+                "branches": [
+                    {"name": "main", "protected": True, "sha": "sha-main"},
+                    {"name": "Nick", "protected": False, "sha": "sha-nick"},
+                    {"name": "desktop-agent", "protected": False, "sha": "sha-desktop"},
+                ],
+            }
+        if tool_name == "github_compare_branches":
+            head = str(payload.get("head", ""))
+            base = str(payload.get("base", ""))
+            if head == "main" and base == "main":
+                return {"status": "identical", "ahead_by": 0, "behind_by": 0, "total_commits": 0}
+            return {"status": "ahead", "ahead_by": 2, "behind_by": 0, "total_commits": 2}
+        if tool_name == "github_create_pull_request":
+            return {
+                "owner": payload["owner"],
+                "repo": payload["repo"],
+                "number": 12,
+                "title": payload["title"],
+                "head": payload["head"],
+                "base": payload["base"],
+                "html_url": "https://github.com/Rishiraj-Yadav/Personal-AI-Assistant/pull/12",
             }
         if tool_name == "llm_task":
             return self.llm_task_response
@@ -695,6 +723,7 @@ class DummyAutomationEngine:
     def __init__(self) -> None:
         self.dynamic_jobs: list[dict[str, object]] = []
         self.one_time_reminders: list[dict[str, object]] = []
+        self.report_jobs: list[dict[str, object]] = []
         self.desktop_rules: list[dict[str, object]] = []
         self.desktop_routines: list[dict[str, object]] = []
         self.routine_runs: list[str] = []
@@ -707,7 +736,7 @@ class DummyAutomationEngine:
             "message": message,
             "paused": False,
         }
-        self.dynamic_jobs = [job]
+        self.dynamic_jobs.append(job)
         return job
 
     async def list_dynamic_cron_jobs(self, _user_id: str) -> list[dict[str, object]]:
@@ -743,8 +772,35 @@ class DummyAutomationEngine:
             "paused": False,
             "fired": False,
         }
-        self.one_time_reminders = [reminder]
+        self.one_time_reminders.append(reminder)
         return reminder
+
+    async def list_one_time_reminders(self, _user_id: str) -> list[dict[str, object]]:
+        return list(self.one_time_reminders)
+
+    async def pause_one_time_reminder(self, _user_id: str, reminder_id: str) -> dict[str, object]:
+        for reminder in self.one_time_reminders:
+            if reminder["reminder_id"] == reminder_id:
+                reminder["paused"] = True
+                return reminder
+        raise KeyError(f"Unknown reminder '{reminder_id}'.")
+
+    async def resume_one_time_reminder(self, _user_id: str, reminder_id: str) -> dict[str, object]:
+        for reminder in self.one_time_reminders:
+            if reminder["reminder_id"] == reminder_id:
+                reminder["paused"] = False
+                return reminder
+        raise KeyError(f"Unknown reminder '{reminder_id}'.")
+
+    async def delete_one_time_reminder(self, _user_id: str, reminder_id: str) -> bool:
+        for index, reminder in enumerate(self.one_time_reminders):
+            if reminder["reminder_id"] == reminder_id:
+                self.one_time_reminders.pop(index)
+                return True
+        return False
+
+    async def list_report_jobs(self, _user_id: str | None = None) -> list[dict[str, object]]:
+        return list(self.report_jobs)
 
     async def create_desktop_automation_rule(self, user_id: str, **payload) -> dict[str, object]:
         rule = {
@@ -1095,6 +1151,91 @@ async def test_router_shortcuts_pull_request_check_uses_recent_repo_context(app_
     assert "Rishiraj-Yadav/Personal-AI-Assistant" in response.payload["command_response"]
     assert "#7: Improve routing" in response.payload["command_response"]
     assert tool_registry.calls[-1][0] == "github_list_pull_requests"
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_create_pull_request_uses_real_github_write_flow(app_config) -> None:
+    tool_registry = DummyToolRegistry(
+        browser_active_url="https://github.com/Rishiraj-Yadav/Personal-AI-Assistant"
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-pr-1",
+        request_id="req-pr-1",
+        session_key="webchat_main",
+        message="create a pull request\ntitle: hello\nbranch: Nick\nbase branch: main\ndescription: testing pr",
+        metadata={"trace_id": "trace-pr-1"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created pull request #12" in response.payload["command_response"]
+    assert "Nick -> main" in response.payload["command_response"]
+    assert [call[0] for call in tool_registry.calls[-3:]] == [
+        "github_list_branches",
+        "github_compare_branches",
+        "github_create_pull_request",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_create_pull_request_followup_uses_recent_context(app_config) -> None:
+    tool_registry = DummyToolRegistry(
+        browser_active_url="https://github.com/Rishiraj-Yadav/Personal-AI-Assistant"
+    )
+    session_manager = DummySessionManager()
+    await session_manager.append_message(
+        session_manager.session,
+        {
+            "id": "msg-pr-1",
+            "role": "assistant",
+            "content": "I can create the pull request, but I still need: title, source branch, base branch.",
+        },
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-pr-2",
+        request_id="req-pr-2",
+        session_key="webchat_main",
+        message="title: hello\nbranch: Nick\nbase branch: main\ndescription: testing pr",
+        metadata={"trace_id": "trace-pr-2"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created pull request #12" in response.payload["command_response"]
+    assert tool_registry.calls[-1][0] == "github_create_pull_request"
 
 
 @pytest.mark.asyncio
@@ -3661,6 +3802,41 @@ async def test_router_creates_dynamic_cron_from_time_of_day_phrase(app_config) -
 
 
 @pytest.mark.asyncio
+async def test_router_creates_interval_cron_from_every_five_minutes_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-interval-1",
+        request_id="req-cron-interval-1",
+        session_key="telegram:123",
+        message="remind me after every 5 minute that i have to go to VNPS",
+        metadata={"trace_id": "trace-cron-interval-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created cron job 'cron-user-1' on */5 * * * *." in response.payload["command_response"]
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "*/5 * * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: i have to go to VNPS"
+
+
+@pytest.mark.asyncio
 async def test_router_creates_one_time_reminder_for_tomorrow_phrase(app_config) -> None:
     automation_engine = DummyAutomationEngine()
     router = GatewayRouter(
@@ -3725,6 +3901,59 @@ async def test_router_creates_one_time_reminder_for_at_time_tomorrow_phrase(app_
     assert response.ok is True
     assert response.payload["queued"] is False
     assert automation_engine.one_time_reminders[0]["message"] == "Reminder: call home"
+
+
+@pytest.mark.asyncio
+async def test_router_cron_list_includes_one_time_reminders(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    automation_engine.dynamic_jobs.append(
+        {
+            "cron_id": "cron-user-1",
+            "user_id": "default",
+            "schedule": "0 8 * * *",
+            "message": "Reminder: go to college",
+            "paused": False,
+        }
+    )
+    automation_engine.one_time_reminders.append(
+        {
+            "reminder_id": "once-user-1",
+            "user_id": "default",
+            "run_at": "2026-04-03T08:00:00+00:00",
+            "message": "Reminder: submit the form",
+            "paused": False,
+            "fired": False,
+        }
+    )
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-list-1",
+        request_id="req-cron-list-1",
+        session_key="telegram:123",
+        message="/cron list",
+        metadata={"trace_id": "trace-cron-list-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "cron-user-1: active | 0 8 * * * | Reminder: go to college" in response.payload["command_response"]
+    assert "One-time reminders:" in response.payload["command_response"]
+    assert "once-user-1: active | 2026-04-03T08:00:00+00:00 | Reminder: submit the form" in response.payload["command_response"]
 
 
 @pytest.mark.asyncio

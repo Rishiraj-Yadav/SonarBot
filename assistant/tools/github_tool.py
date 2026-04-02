@@ -12,6 +12,31 @@ GITHUB_API_ROOT = "https://api.github.com"
 
 
 def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
+    async def github_list_branches(payload: dict[str, Any]) -> dict[str, Any]:
+        owner = str(payload["owner"]).strip()
+        repo = str(payload["repo"]).strip()
+        limit = max(1, min(int(payload.get("limit", 100)), 100))
+        protected_only = bool(payload.get("protected_only", False))
+        token = await _require_github_token(oauth_token_manager)
+        branches = await _github_request(
+            token,
+            "GET",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/branches",
+            params={"per_page": limit, **({"protected": "true"} if protected_only else {})},
+        )
+        return {
+            "owner": owner,
+            "repo": repo,
+            "branches": [
+                {
+                    "name": branch.get("name"),
+                    "protected": bool(branch.get("protected")),
+                    "sha": ((branch.get("commit") or {}).get("sha")),
+                }
+                for branch in branches
+            ],
+        }
+
     async def github_list_repos(payload: dict[str, Any]) -> dict[str, Any]:
         limit = max(1, min(int(payload.get("limit", 10)), 50))
         visibility = str(payload.get("visibility", "all")).strip() or "all"
@@ -145,6 +170,81 @@ def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
             ],
         }
 
+    async def github_compare_branches(payload: dict[str, Any]) -> dict[str, Any]:
+        owner = str(payload["owner"]).strip()
+        repo = str(payload["repo"]).strip()
+        base = str(payload["base"]).strip()
+        head = str(payload["head"]).strip()
+        token = await _require_github_token(oauth_token_manager)
+        comparison = await _github_request(
+            token,
+            "GET",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/compare/{base}...{head}",
+        )
+        return {
+            "owner": owner,
+            "repo": repo,
+            "base": base,
+            "head": head,
+            "status": comparison.get("status"),
+            "ahead_by": comparison.get("ahead_by", 0),
+            "behind_by": comparison.get("behind_by", 0),
+            "total_commits": comparison.get("total_commits", 0),
+            "html_url": comparison.get("html_url"),
+            "commits": [
+                {
+                    "sha": commit.get("sha"),
+                    "message": str((commit.get("commit") or {}).get("message", "")).splitlines()[0].strip(),
+                    "author": (((commit.get("commit") or {}).get("author") or {}).get("name")),
+                }
+                for commit in comparison.get("commits", [])
+            ],
+            "files": [
+                {
+                    "filename": file_item.get("filename"),
+                    "status": file_item.get("status"),
+                    "changes": file_item.get("changes"),
+                }
+                for file_item in comparison.get("files", [])
+            ],
+        }
+
+    async def github_create_pull_request(payload: dict[str, Any]) -> dict[str, Any]:
+        owner = str(payload["owner"]).strip()
+        repo = str(payload["repo"]).strip()
+        title = str(payload["title"]).strip()
+        head = str(payload["head"]).strip()
+        base = str(payload["base"]).strip()
+        body = str(payload.get("body", "")).strip()
+        draft = bool(payload.get("draft", False))
+        maintainer_can_modify = bool(payload.get("maintainer_can_modify", True))
+        token = await _require_github_token(oauth_token_manager)
+        created = await _github_request(
+            token,
+            "POST",
+            f"{GITHUB_API_ROOT}/repos/{owner}/{repo}/pulls",
+            json_body={
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": body,
+                "draft": draft,
+                "maintainer_can_modify": maintainer_can_modify,
+            },
+        )
+        return {
+            "owner": owner,
+            "repo": repo,
+            "number": created.get("number"),
+            "title": created.get("title"),
+            "state": created.get("state"),
+            "draft": created.get("draft"),
+            "html_url": created.get("html_url"),
+            "user": (created.get("user") or {}).get("login"),
+            "head": ((created.get("head") or {}).get("ref")) or head,
+            "base": ((created.get("base") or {}).get("ref")) or base,
+        }
+
     async def github_get_repo_summary(payload: dict[str, Any]) -> dict[str, Any]:
         owner = str(payload["owner"]).strip()
         repo = str(payload["repo"]).strip()
@@ -276,6 +376,21 @@ def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
 
     return [
         ToolDefinition(
+            name="github_list_branches",
+            description="List branches for a GitHub repository.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "default": 100},
+                    "protected_only": {"type": "boolean", "default": False},
+                },
+                "required": ["owner", "repo"],
+            },
+            handler=github_list_branches,
+        ),
+        ToolDefinition(
             name="github_list_repos",
             description="List repositories available to the connected GitHub account.",
             parameters={
@@ -332,6 +447,40 @@ def build_github_tools(oauth_token_manager) -> list[ToolDefinition]:
             handler=github_get_pull_request,
         ),
         ToolDefinition(
+            name="github_compare_branches",
+            description="Compare two branches in a GitHub repository to see whether the head branch has commits to merge.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "base": {"type": "string"},
+                    "head": {"type": "string"},
+                },
+                "required": ["owner", "repo", "base", "head"],
+            },
+            handler=github_compare_branches,
+        ),
+        ToolDefinition(
+            name="github_create_pull_request",
+            description="Create a pull request in a GitHub repository.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"},
+                    "title": {"type": "string"},
+                    "head": {"type": "string"},
+                    "base": {"type": "string"},
+                    "body": {"type": "string", "default": ""},
+                    "draft": {"type": "boolean", "default": False},
+                    "maintainer_can_modify": {"type": "boolean", "default": True},
+                },
+                "required": ["owner", "repo", "title", "head", "base"],
+            },
+            handler=github_create_pull_request,
+        ),
+        ToolDefinition(
             name="github_get_repo_summary",
             description="Get a high-level GitHub repository summary including metadata, open pull requests, issues, blockers, and recent commits.",
             parameters={
@@ -363,6 +512,7 @@ async def _github_request(
     url: str,
     *,
     params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
 ) -> Any:
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -370,6 +520,39 @@ async def _github_request(
         "X-GitHub-Api-Version": "2022-11-28",
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.request(method, url, headers=headers, params=params)
-        response.raise_for_status()
+        response = await client.request(method, url, headers=headers, params=params, json=json_body)
+    if getattr(response, "status_code", 200) >= 400:
+        raise RuntimeError(_format_github_error(response))
+    if getattr(response, "status_code", 200) == 204:
+        return {}
     return response.json()
+
+
+def _format_github_error(response: Any) -> str:
+    status_code = int(getattr(response, "status_code", 500))
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        message = str(payload.get("message", "")).strip()
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            parts: list[str] = []
+            for error in errors:
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or error.get("code") or "").strip()
+                    field = str(error.get("field", "")).strip()
+                    if field and detail and field not in detail:
+                        detail = f"{field}: {detail}"
+                    if detail:
+                        parts.append(detail)
+                elif error:
+                    parts.append(str(error).strip())
+            if message and parts:
+                return f"{message}: {'; '.join(part for part in parts if part)}"
+            if parts:
+                return "; ".join(part for part in parts if part)
+        if message:
+            return message
+    return f"GitHub API request failed with status {status_code}."

@@ -10,6 +10,73 @@ from assistant.desktop_coworker.targeting import clamp_confidence, clamp_normali
 from assistant.tools.image_ocr import extract_text_boxes, ocr_box_backend_health
 
 
+_BUTTON_LABELS = {
+    "add",
+    "adddevice",
+    "apply",
+    "attach",
+    "cancel",
+    "close",
+    "create",
+    "done",
+    "next",
+    "ok",
+    "open",
+    "reply",
+    "save",
+    "search",
+    "send",
+    "submit",
+}
+
+_MENU_LABELS = {
+    "edit",
+    "file",
+    "help",
+    "insert",
+    "more",
+    "settings",
+    "tools",
+    "view",
+}
+
+_TAB_LABELS = {
+    "account",
+    "audio",
+    "calls",
+    "chat",
+    "chats",
+    "communities",
+    "details",
+    "devices",
+    "favorites",
+    "general",
+    "home",
+    "input",
+    "media",
+    "messages",
+    "people",
+    "performance",
+    "privacy",
+    "recent",
+    "security",
+    "sharedwithme",
+    "status",
+}
+
+_FIELD_LABELS = {
+    "address",
+    "filename",
+    "message",
+    "search",
+    "searchhome",
+    "searchsettings",
+    "subject",
+    "to",
+    "typeamessage",
+}
+
+
 def _resolve_capture_path(config, capture_path: str) -> Path:
     raw_path = Path(capture_path).expanduser()
     candidates: list[Path] = []
@@ -29,11 +96,23 @@ def _infer_kind(line: str, active_window: dict[str, Any]) -> str:
     normalized = normalize_target_label(line)
     process_name = normalize_target_label(str(active_window.get("process_name", "")))
     title = normalize_target_label(str(active_window.get("title", "")))
+    if normalized in {"on", "off", "yes", "no"}:
+        return "toggle"
+    if normalized in _BUTTON_LABELS:
+        return "button"
+    if normalized in _MENU_LABELS:
+        return "menu"
+    if normalized in _TAB_LABELS:
+        return "tab"
+    if normalized in _FIELD_LABELS or normalized.startswith("search") or normalized.endswith("field"):
+        return "field"
     if process_name == "explorer" or "fileexplorer" in title:
         if normalized in {"desktop", "downloads", "documents", "pictures", "music", "videos"}:
             return "folder"
         if re.search(r"\.[a-z0-9]{2,5}$", line):
             return "file"
+        if normalized in {"saveas", "open", "openfile", "save"}:
+            return "dialog"
         return "row"
     if process_name in {"excel", "word"}:
         if re.search(r"\.(xlsx?|csv|docx?|txt|md)$", line, re.IGNORECASE):
@@ -58,8 +137,22 @@ def _infer_kind(line: str, active_window: dict[str, Any]) -> str:
         if normalized in {"adddevice", "save", "open", "cancel", "done"}:
             return "button"
         if normalized in {"bluetooth", "devices", "audio", "input"}:
-            return "row"
+            return "tab" if normalized in {"devices", "audio", "input"} else "row"
         return "button"
+    if process_name in {"whatsapp", "whatsapproot"} or "whatsapp" in title:
+        if normalized in {"typeamessage", "message"}:
+            return "field"
+        if normalized in {"chats", "status", "calls", "communities"}:
+            return "tab"
+        if len(normalized) >= 3:
+            return "row"
+    if process_name in {"chrome", "msedge", "firefox"}:
+        if normalized in {"back", "forward", "reload", "extensions"}:
+            return "button"
+        if normalized in {"address", "search", "searchtabs"} or "googlecom" in normalized:
+            return "field"
+        if len(normalized) >= 3 and len(normalized) <= 18:
+            return "tab"
     return "unknown"
 
 

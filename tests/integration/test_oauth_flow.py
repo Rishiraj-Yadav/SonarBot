@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from assistant.gateway.server import create_app
 from assistant.oauth.flow import OAuthFlowManager
 from assistant.oauth.manager import OAuthTokenManager
+from assistant.oauth.providers.google import GoogleOAuthProvider
 
 
 @pytest.mark.asyncio
@@ -96,3 +97,19 @@ def test_gateway_oauth_callback_endpoint_completes_flow(app_config, monkeypatch)
         response = client.get("/oauth/callback/github?code=auth-code&state=state-123")
         assert response.status_code == 200
         assert "GitHub connected" in response.text
+
+
+def test_google_oauth_provider_normalizes_missing_expires_in(app_config) -> None:
+    provider = GoogleOAuthProvider(app_config)
+
+    tokens = provider._normalize_tokens(
+        {
+            "access_token": "token-1",
+            "refresh_token": "refresh-1",
+            "expires_in": None,
+        }
+    )
+
+    assert tokens["access_token"] == "token-1"
+    assert tokens["refresh_token"] == "refresh-1"
+    assert tokens["expires_at"]

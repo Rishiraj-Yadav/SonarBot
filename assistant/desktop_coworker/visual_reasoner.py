@@ -251,9 +251,13 @@ class DesktopCoworkerVisualReasoner:
             normalized_type = "double_click"
         if normalized_type in {"type", "type text", "type-text"}:
             normalized_type = "type_text"
+        if normalized_type in {"focus", "focus field", "focus-field"}:
+            normalized_type = "focus_field"
         if normalized_type in {"hotkey", "keyboard_shortcut"}:
             normalized_type = "press_hotkey"
-        if normalized_type not in {"click", "double_click", "press_hotkey", "type_text", "scroll", "complete", "ask_user", "stop"}:
+        if normalized_type in {"dragdrop", "drag_drop"}:
+            normalized_type = "drag"
+        if normalized_type not in {"click", "double_click", "press_hotkey", "focus_field", "type_text", "scroll", "drag", "complete", "ask_user", "stop"}:
             normalized_type = "stop"
         target_label = str(action.get("target_label") or action.get("label") or "").strip()
         chosen_candidate = None
@@ -278,12 +282,17 @@ class DesktopCoworkerVisualReasoner:
         except (TypeError, ValueError):
             amount = 1
         amount = max(1, min(amount, 20))
+        normalized_x = clamp_normalized_coordinate(x)
+        normalized_y = clamp_normalized_coordinate(y)
+        default_goal_completed = normalized_type in {"click", "double_click"}
         return {
             "type": normalized_type,
             "target_label": target_label,
             "target_kind": str(action.get("target_kind") or (chosen_candidate or {}).get("kind", "")).strip().lower(),
-            "x": clamp_normalized_coordinate(x),
-            "y": clamp_normalized_coordinate(y),
+            "x": normalized_x,
+            "y": normalized_y,
+            "x2": clamp_normalized_coordinate(action.get("x2"), default=normalized_x),
+            "y2": clamp_normalized_coordinate(action.get("y2"), default=normalized_y),
             "confidence": clamp_confidence(action.get("confidence"), default=0.0),
             "reason": str(action.get("reason", "")).strip(),
             "expected_text_after": str(action.get("expected_text_after", "")).strip(),
@@ -293,7 +302,7 @@ class DesktopCoworkerVisualReasoner:
             "text": str(action.get("text", "")).strip(),
             "direction": direction,
             "amount": amount,
-            "goal_completed_if_verified": bool(action.get("goal_completed_if_verified", False)),
+            "goal_completed_if_verified": bool(action.get("goal_completed_if_verified", default_goal_completed)),
             "backend": str((chosen_candidate or {}).get("backend", action.get("backend", "unknown"))).strip().lower() or "unknown",
             "selected": bool((chosen_candidate or {}).get("selected", False)),
             "bbox": dict((chosen_candidate or {}).get("bbox", {})) if isinstance((chosen_candidate or {}).get("bbox"), dict) else {},
@@ -352,8 +361,8 @@ class DesktopCoworkerVisualReasoner:
             "Use any provided OCR text only as supporting context.\n"
             "Assume coordinates are relative to the screenshot, normalized from 0 to 1000.\n"
             "Prefer the provided target candidates. They already merge stronger backends such as UI Automation and OCR boxes.\n"
-            "Focus on OCR-visible or UIA-visible text targets only.\n"
-            "Prefer opening visible files or clicking visible list items, rows, tabs, buttons, toggles, switches, or menu items.\n"
+            "Focus on OCR-visible or UIA-visible text targets first, but you may also use generic object candidates when the screenshot clearly shows a non-text control.\n"
+            "Prefer opening visible files or clicking visible list items, rows, tree items, tabs, buttons, toggles, switches, menus, dialogs, and form fields.\n"
             "If the goal already appears complete, return completion_state=\"completed\" and action.type=\"complete\".\n"
             "If multiple plausible targets exist or confidence is low, return completion_state=\"ask_user\" with a short message.\n"
             "If the previous attempt failed and the screen still looks unchanged, do not say the task is complete.\n"
@@ -361,8 +370,11 @@ class DesktopCoworkerVisualReasoner:
             "When File Explorer is active and the target is a visible folder item such as Desktop, Downloads, or Documents, choose the correct visible label but do not claim success until the folder actually opens.\n"
             "When the goal is to turn Bluetooth on or off, only mark completion after the visible toggle text or switch state clearly changes to the requested state.\n"
             "If the best next step is keyboard fallback, return action.type=\"press_hotkey\".\n"
+            "If text entry is needed but the field is not focused yet, return action.type=\"focus_field\" first.\n"
             "If text entry is needed after the correct field is already focused, return action.type=\"type_text\" with the exact text to enter.\n"
             "If the needed target is off-screen or more content must be revealed, return action.type=\"scroll\" with direction and amount.\n"
+            "If a drag and drop interaction is clearly required, return action.type=\"drag\" with x, y, x2, and y2.\n"
+            "For chat and messaging tasks, do not mark the task complete immediately after typing. Prefer a follow-up send action and verify the message text is visible in the conversation.\n"
             "Do not guess. Return JSON only.\n\n"
             f"Goal: {goal}\n"
             f"Active window: {active_window.get('title', '')} ({active_window.get('process_name', '')})\n"
@@ -383,13 +395,15 @@ class DesktopCoworkerVisualReasoner:
             '  "message": "short explanation for user when needed",\n'
             '  "goal_completed_if_verified": true,\n'
             '  "candidates": [\n'
-            '    {"label": "visible text", "kind": "file|row|button|menu|tab|toggle|unknown", "confidence": 0.0, "x": 0, "y": 0, "click_action": "click|double_click"}\n'
+            '    {"label": "visible text", "kind": "file|folder|row|tree|table|cell|button|menu|tab|toggle|dialog|field|combobox|icon|object|unknown", "confidence": 0.0, "x": 0, "y": 0, "click_action": "click|double_click"}\n'
             "  ],\n"
             '  "action": {\n'
-            '    "type": "click|double_click|press_hotkey|type_text|scroll|complete|ask_user|stop",\n'
+            '    "type": "click|double_click|press_hotkey|focus_field|type_text|scroll|drag|complete|ask_user|stop",\n'
             '    "target_label": "chosen candidate text",\n'
             '    "x": 0,\n'
             '    "y": 0,\n'
+            '    "x2": 0,\n'
+            '    "y2": 0,\n'
             '    "confidence": 0.0,\n'
             '    "reason": "why this is the right next step",\n'
             '    "expected_text_after": "text that should appear after success",\n'

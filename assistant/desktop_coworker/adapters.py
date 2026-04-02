@@ -20,8 +20,14 @@ def detect_surface(state: dict[str, Any]) -> str:
         return "excel"
     if process_name == "word":
         return "word"
+    if process_name in {"whatsapp", "whatsapproot"} or "whatsapp" in title:
+        return "whatsapp"
+    if process_name in {"chrome", "msedge", "firefox"}:
+        return "browser"
     if process_name in {"systemsettings", "settings"} or "bluetoothdevices" in title or title.endswith("settings"):
         return "settings"
+    if any(token in title for token in {"saveas", "open", "confirm", "dialog", "properties"}):
+        return "dialog"
     return "generic"
 
 
@@ -60,9 +66,10 @@ def keyboard_fallback_recipe(
     after: dict[str, Any],
     attempts_used: int,
 ) -> dict[str, Any] | None:
-    if attempts_used > 0:
+    if attempts_used > 1:
         return None
     target_label = str(action.get("target_label", "")).strip()
+    target_kind = str(action.get("target_kind", "")).strip().lower()
     surface = detect_surface(before)
     normalized_label = normalize_target_label(target_label)
     if surface == "explorer_dialog":
@@ -84,6 +91,16 @@ def keyboard_fallback_recipe(
                 "confidence": 0.74,
                 "goal_completed_if_verified": True,
             }
+        if target_kind in {"field", "combobox"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "tab" if attempts_used == 0 else "shift+tab",
+                "reason": "Move keyboard focus to the dialog field before typing.",
+                "target_label": target_label or "dialog-field",
+                "target_kind": target_kind or "field",
+                "confidence": 0.66,
+                "goal_completed_if_verified": False,
+            }
     if surface == "explorer" and normalized_label in {"desktop", "downloads", "documents", "pictures", "music", "videos"}:
         return {
             "type": "press_hotkey",
@@ -91,6 +108,16 @@ def keyboard_fallback_recipe(
             "reason": f"Use Enter to open the selected Explorer item '{target_label}'.",
             "target_label": target_label,
             "confidence": 0.7,
+            "goal_completed_if_verified": True,
+        }
+    if surface == "explorer" and target_kind in {"row", "tree"} and target_label:
+        return {
+            "type": "press_hotkey",
+            "hotkey": "enter",
+            "reason": f"Use Enter to activate the selected Explorer target '{target_label}'.",
+            "target_label": target_label,
+            "target_kind": target_kind,
+            "confidence": 0.68,
             "goal_completed_if_verified": True,
         }
     if surface in {"excel", "word"} and target_label:
@@ -118,7 +145,101 @@ def keyboard_fallback_recipe(
             "hotkey": "tab",
             "reason": f"Use Tab to move focus to the visible Bluetooth control near '{target_label or 'Bluetooth'}'.",
             "target_label": target_label or "Bluetooth",
-            "confidence": 0.62,
+                "confidence": 0.62,
+                "goal_completed_if_verified": False,
+            }
+    if surface == "settings" and target_kind in {"button", "tab", "menu"}:
+        return {
+            "type": "press_hotkey",
+            "hotkey": "enter" if attempts_used >= 1 else "tab",
+            "reason": f"Use keyboard activation for the visible Settings control '{target_label or target_kind}'.",
+            "target_label": target_label or target_kind,
+            "target_kind": target_kind,
+            "confidence": 0.64,
+            "goal_completed_if_verified": attempts_used >= 1,
+        }
+    if surface == "whatsapp":
+        if target_kind in {"row", "tree", "tab"} and target_label:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "enter",
+                "reason": f"Use Enter to activate the selected WhatsApp target '{target_label}'.",
+                "target_label": target_label,
+                "target_kind": target_kind,
+                "confidence": 0.67,
+                "goal_completed_if_verified": True,
+            }
+        if target_kind in {"field", "combobox"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "tab",
+                "reason": "Use Tab to move focus into the current chat input field.",
+                "target_label": target_label or "message-field",
+                "target_kind": target_kind or "field",
+                "confidence": 0.63,
+                "goal_completed_if_verified": False,
+            }
+    if surface == "browser":
+        if target_kind in {"tab", "menu", "button"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "enter" if attempts_used >= 1 else "tab",
+                "reason": f"Use keyboard navigation for the visible browser control '{target_label or target_kind}'.",
+                "target_label": target_label or target_kind,
+                "target_kind": target_kind,
+                "confidence": 0.62,
+                "goal_completed_if_verified": attempts_used >= 1,
+            }
+        if target_kind in {"field", "combobox"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "ctrl+l",
+                "reason": "Use Ctrl+L to focus the browser address or search field.",
+                "target_label": target_label or "browser-field",
+                "target_kind": target_kind or "field",
+                "confidence": 0.62,
+                "goal_completed_if_verified": False,
+            }
+    if surface == "dialog":
+        if normalized_label in {"ok", "open", "save", "yes"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "enter",
+                "reason": f"Use Enter to confirm the visible dialog action '{target_label or 'confirm'}'.",
+                "target_label": target_label or "dialog-confirm",
+                "target_kind": target_kind or "button",
+                "confidence": 0.7,
+                "goal_completed_if_verified": True,
+            }
+        if normalized_label in {"cancel", "close", "no"}:
+            return {
+                "type": "press_hotkey",
+                "hotkey": "esc",
+                "reason": f"Use Escape to dismiss the visible dialog action '{target_label or 'cancel'}'.",
+                "target_label": target_label or "dialog-cancel",
+                "target_kind": target_kind or "button",
+                "confidence": 0.7,
+                "goal_completed_if_verified": True,
+            }
+    if target_kind in {"field", "combobox"} and attempts_used == 0:
+        return {
+            "type": "focus_field",
+            "target_label": target_label,
+            "target_kind": target_kind or "field",
+            "x": action.get("x"),
+            "y": action.get("y"),
+            "confidence": max(0.6, float(action.get("confidence", 0.0) or 0.0)),
+            "reason": f"Retry by explicitly focusing the field '{target_label or 'input field'}' before typing.",
+            "goal_completed_if_verified": False,
+        }
+    if str(action.get("type", "")).strip().lower() == "scroll":
+        return {
+            "type": "press_hotkey",
+            "hotkey": "pagedown" if str(action.get("direction", "down")).strip().lower() == "down" else "pageup",
+            "reason": "Use keyboard scrolling when wheel scrolling did not visibly move the surface.",
+            "target_label": target_label or surface or "page",
+            "target_kind": target_kind or "panel",
+            "confidence": 0.61,
             "goal_completed_if_verified": False,
         }
     return None
@@ -143,6 +264,7 @@ def verify_surface_transition(
     before_title = normalize_target_label(str(before_window.get("title", "")))
     after_text = normalize_target_label(str(after.get("screen_text", "")))
     before_text = normalize_target_label(str(before.get("screen_text", "")))
+    action_type = str(action.get("type", "")).strip().lower()
 
     if surface == "explorer":
         if expected_window_title and expected_window_title in after_title and after_title != before_title:
@@ -169,4 +291,21 @@ def verify_surface_transition(
             return {"ok": True, "kind": "settings_state", "message": ""}
         if expected_window_title and expected_window_title in after_title:
             return {"ok": True, "kind": "settings_window", "message": ""}
+    if surface == "whatsapp":
+        if action_type == "type_text" and expected_text_after and expected_text_after in after_text and after_text != before_text:
+            return {"ok": True, "kind": "whatsapp_message", "message": ""}
+        if target_label and target_label in after_text and after_text != before_text:
+            return {"ok": True, "kind": "whatsapp_chat", "message": ""}
+    if surface == "browser":
+        if expected_text_after and expected_text_after in after_text and after_text != before_text:
+            return {"ok": True, "kind": "browser_state", "message": ""}
+        if target_label and target_label in after_text and after_text != before_text:
+            return {"ok": True, "kind": "browser_state", "message": ""}
+        if expected_window_title and expected_window_title in after_title and after_title != before_title:
+            return {"ok": True, "kind": "browser_state", "message": ""}
+    if surface == "dialog":
+        if expected_text_after and expected_text_after in after_text and after_text != before_text:
+            return {"ok": True, "kind": "dialog_state", "message": ""}
+        if expected_window_title and expected_window_title in after_title and after_title != before_title:
+            return {"ok": True, "kind": "dialog_state", "message": ""}
     return None

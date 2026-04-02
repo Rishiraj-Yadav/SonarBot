@@ -169,6 +169,53 @@ class DesktopInputRuntime:
             "active_window": active_window,
         }
 
+    def drag_mouse(
+        self,
+        *,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        coordinate_space: str = "screen",
+        expected_window_title: str = "",
+        expected_process_name: str = "",
+    ) -> dict[str, Any]:
+        self.ensure_available()
+        self._ensure_mouse_enabled()
+        start_x, start_y, active_window = self._resolve_coordinates(
+            x,
+            y,
+            coordinate_space=coordinate_space,
+            expected_window_title=expected_window_title,
+            expected_process_name=expected_process_name,
+        )
+        target_x, target_y, _ = self._resolve_coordinates(
+            end_x,
+            end_y,
+            coordinate_space=coordinate_space,
+            expected_window_title=expected_window_title,
+            expected_process_name=expected_process_name,
+        )
+        assert self.user32 is not None
+        if not self.user32.SetCursorPos(start_x, start_y):
+            raise RuntimeError("Unable to move the mouse cursor before dragging.")
+        self._send_inputs([self._mouse_input(MOUSEEVENTF_LEFTDOWN)])
+        steps = max(4, min(14, int(max(abs(target_x - start_x), abs(target_y - start_y)) / 40) + 1))
+        for step_index in range(1, steps + 1):
+            progress = step_index / float(steps)
+            move_x = round(start_x + ((target_x - start_x) * progress))
+            move_y = round(start_y + ((target_y - start_y) * progress))
+            self.user32.SetCursorPos(move_x, move_y)
+        self._send_inputs([self._mouse_input(MOUSEEVENTF_LEFTUP)])
+        return {
+            "x": start_x,
+            "y": start_y,
+            "end_x": target_x,
+            "end_y": target_y,
+            "coordinate_space": coordinate_space,
+            "active_window": active_window,
+        }
+
     def scroll_mouse(
         self,
         *,

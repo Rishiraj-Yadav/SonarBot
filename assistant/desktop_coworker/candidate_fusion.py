@@ -10,8 +10,9 @@ from assistant.desktop_coworker.targeting import normalize_target_label, sanitiz
 _BACKEND_PRIORITY = {
     "uia": 0,
     "ocr_boxes": 1,
-    "llm": 2,
-    "unknown": 3,
+    "object_detection": 2,
+    "llm": 3,
+    "unknown": 4,
 }
 
 
@@ -29,6 +30,10 @@ def fuse_target_candidates(*candidate_lists: list[dict[str, Any]], limit: int = 
                 normalized["bbox"] = dict(candidate["bbox"])
             if "selected" in candidate:
                 normalized["selected"] = bool(candidate.get("selected"))
+            if "enabled" in candidate:
+                normalized["enabled"] = bool(candidate.get("enabled"))
+            if "control_type" in candidate:
+                normalized["control_type"] = str(candidate.get("control_type", "")).strip().lower()
             key = normalized.get("normalized_label") or normalize_target_label(normalized.get("label", ""))
             existing = deduped.get(key)
             if existing is None:

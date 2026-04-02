@@ -21,8 +21,11 @@ _COMMON_FOLDER_LABELS = {
 }
 
 _ROW_CONTROL_TYPES = {
+    "datagridcontrol",
     "dataitemcontrol",
+    "headeritemcontrol",
     "listitemcontrol",
+    "tablecontrol",
     "treeitemcontrol",
 }
 
@@ -31,20 +34,29 @@ _INTERACTIVE_CONTROL_TYPES = {
     "checkboxcontrol",
     "comboboxcontrol",
     "customcontrol",
+    "datagridcontrol",
     "dataitemcontrol",
     "documentcontrol",
     "editcontrol",
     "groupcontrol",
+    "headeritemcontrol",
     "hyperlinkcontrol",
+    "listcontrol",
     "listitemcontrol",
+    "menucontrol",
     "menuitemcontrol",
+    "panecontrol",
     "radiobuttoncontrol",
     "splitbuttoncontrol",
+    "tablecontrol",
     "tabitemcontrol",
     "textcontrol",
     "thumbcontrol",
+    "toolbarcontrol",
     "togglebuttoncontrol",
+    "treecontrol",
     "treeitemcontrol",
+    "windowcontrol",
 }
 
 
@@ -92,6 +104,38 @@ class DesktopCoworkerUIABackend:
 
     def health(self) -> dict[str, Any]:
         return self._availability.to_dict()
+
+    def perform_action(self, *, action: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        if not self._availability.available or self._library is None or self.user32 is None:
+            return {"status": "unsupported", "backend": "uia", "message": "UI Automation is unavailable."}
+        target = self._resolve_matching_control(state=state, action=action)
+        if target is None:
+            return {"status": "unresolved", "backend": "uia", "message": "No matching UI Automation element was found."}
+        control, candidate = target
+        operation = self._resolve_operation(action=action, candidate=candidate)
+        if not operation:
+            return {"status": "unsupported", "backend": "uia", "message": "The target is not suitable for direct UI Automation execution."}
+        before_state = self._capture_element_state(control)
+        success = self._execute_operation(control=control, operation=operation, action=action)
+        if not success:
+            return {
+                "status": "unsupported",
+                "backend": "uia",
+                "uia_operation": operation,
+                "candidate": candidate,
+                "message": f"Direct UI Automation could not perform '{operation}' on the matched element.",
+            }
+        after_state = self._capture_element_state(control)
+        return {
+            "status": "completed",
+            "backend": "uia",
+            "execution_mode": f"uia_{operation}",
+            "uia_operation": operation,
+            "candidate": candidate,
+            "uia_state_before": before_state,
+            "uia_state_after": after_state,
+            "screen_text_after": str(after_state.get("value") or after_state.get("label") or "").strip(),
+        }
 
     def collect_candidates(self, state: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
         if not self._availability.available or self._library is None or self.user32 is None:
@@ -163,6 +207,189 @@ class DesktopCoworkerUIABackend:
         )
         return ranked[: max(1, limit * 3)]
 
+    def _resolve_matching_control(self, *, state: dict[str, Any], action: dict[str, Any]) -> tuple[Any, dict[str, Any]] | None:
+        active_window = state.get("active_window", {}) if isinstance(state.get("active_window"), dict) else {}
+        raw_window_id = str(active_window.get("window_id", "")).strip()
+        if not raw_window_id.isdigit():
+            return None
+        hwnd = self._resolve_window_handle(state)
+        if hwnd <= 0:
+            return None
+        try:
+            window_left, window_top, window_right, window_bottom = get_window_rect(self.user32, hwnd)
+        except Exception:
+            return None
+        window_width = max(1, window_right - window_left)
+        window_height = max(1, window_bottom - window_top)
+        try:
+            root = self._library.ControlFromHandle(hwnd)
+        except Exception:
+            return None
+        if root is None:
+            return None
+        process_name = normalize_target_label(str(active_window.get("process_name", "")))
+        title = normalize_target_label(str(active_window.get("title", "")))
+        target_label = normalize_target_label(str(action.get("target_label", "")))
+        target_kind = str(action.get("target_kind", "")).strip().lower()
+        target_x = int(action.get("x", 500) or 500)
+        target_y = int(action.get("y", 500) or 500)
+        best_score = float("-inf")
+        best_match: tuple[Any, dict[str, Any]] | None = None
+        queue: deque[tuple[Any, int]] = deque([(root, 0)])
+        seen_controls: set[str] = set()
+        scanned = 0
+        while queue and scanned < self._MAX_SCANNED_NODES:
+            control, depth = queue.popleft()
+            control_id = self._control_identifier(control)
+            if control_id in seen_controls:
+                continue
+            seen_controls.add(control_id)
+            scanned += 1
+            candidate = self._candidate_from_control(
+                control=control,
+                process_name=process_name,
+                title=title,
+                window_left=window_left,
+                window_top=window_top,
+                window_right=window_right,
+                window_bottom=window_bottom,
+                window_width=window_width,
+                window_height=window_height,
+            )
+            if candidate is not None:
+                score = self._score_candidate(candidate=candidate, target_label=target_label, target_kind=target_kind, target_x=target_x, target_y=target_y)
+                if score > best_score:
+                    best_score = score
+                    best_match = (control, candidate)
+            if depth >= self._MAX_DEPTH:
+                continue
+            for child in self._iter_children(control)[: self._MAX_CHILDREN_PER_NODE]:
+                queue.append((child, depth + 1))
+        if best_score < 1.5:
+            return None
+        return best_match
+
+    def _score_candidate(
+        self,
+        *,
+        candidate: dict[str, Any],
+        target_label: str,
+        target_kind: str,
+        target_x: int,
+        target_y: int,
+    ) -> float:
+        score = float(candidate.get("confidence", 0.0))
+        candidate_label = str(candidate.get("normalized_label", ""))
+        candidate_kind = str(candidate.get("kind", "")).strip().lower()
+        if target_label:
+            if candidate_label == target_label:
+                score += 6.0
+            elif candidate_label.startswith(target_label) or target_label.startswith(candidate_label):
+                score += 3.5
+            elif target_label in candidate_label or candidate_label in target_label:
+                score += 2.2
+            else:
+                score -= 1.8
+        if target_kind:
+            if candidate_kind == target_kind:
+                score += 2.2
+            elif {candidate_kind, target_kind} <= {"row", "tree"}:
+                score += 1.1
+            elif {candidate_kind, target_kind} <= {"field", "combobox"}:
+                score += 1.1
+            elif target_kind in {"button", "menu", "tab", "toggle"}:
+                score -= 0.6
+        distance_penalty = (abs(int(candidate.get("x", 500)) - target_x) + abs(int(candidate.get("y", 500)) - target_y)) / 1000.0
+        score -= distance_penalty
+        if bool(candidate.get("selected", False)):
+            score += 0.4
+        if not bool(candidate.get("enabled", True)):
+            score -= 1.0
+        return score
+
+    def _resolve_operation(self, *, action: dict[str, Any], candidate: dict[str, Any]) -> str:
+        action_type = str(action.get("type", "")).strip().lower()
+        kind = str(candidate.get("kind") or action.get("target_kind") or "").strip().lower()
+        control_type = str(candidate.get("control_type", "")).strip().lower()
+        if action_type == "focus_field":
+            return "set_focus"
+        if action_type == "type_text":
+            if kind in {"field", "combobox"} or control_type in {"editcontrol", "comboboxcontrol", "documentcontrol"}:
+                return "set_value"
+            return ""
+        if action_type not in {"click", "double_click"}:
+            return ""
+        if kind == "toggle" or control_type in {"checkboxcontrol", "radiobuttoncontrol", "togglebuttoncontrol"}:
+            return "toggle"
+        if kind in {"tab", "menu", "row", "tree", "cell", "table"}:
+            return "select"
+        if kind in {"field", "combobox"} or control_type in {"editcontrol", "comboboxcontrol"}:
+            return "set_focus"
+        if kind in {"button", "dialog", "icon", "panel"}:
+            return "invoke"
+        return "invoke"
+
+    def _execute_operation(self, *, control: Any, operation: str, action: dict[str, Any]) -> bool:
+        action_type = str(action.get("type", "")).strip().lower()
+        if operation == "invoke":
+            if action_type == "double_click" and self._call_named_method(control, "DoubleClick"):
+                return True
+            return (
+                self._call_pattern_method(control, ("GetInvokePattern",), "Invoke")
+                or self._call_named_method(control, "Invoke")
+                or self._call_named_method(control, "Click")
+                or (action_type == "double_click" and self._call_named_method(control, "DoubleClick"))
+            )
+        if operation == "select":
+            if action_type == "double_click" and self._call_named_method(control, "DoubleClick"):
+                return True
+            return (
+                self._call_pattern_method(control, ("GetSelectionItemPattern",), "Select")
+                or self._call_named_method(control, "Select")
+                or self._call_named_method(control, "Click")
+            )
+        if operation == "toggle":
+            return (
+                self._call_pattern_method(control, ("GetTogglePattern",), "Toggle")
+                or self._call_named_method(control, "Toggle")
+                or self._call_pattern_method(control, ("GetSelectionItemPattern",), "Select")
+                or self._call_named_method(control, "Click")
+            )
+        if operation == "set_focus":
+            return self._call_named_method(control, "SetFocus") or self._call_named_method(control, "Click")
+        if operation == "set_value":
+            text = str(action.get("text", ""))
+            if not text:
+                return False
+            if self._call_pattern_method(control, ("GetValuePattern",), "SetValue", text):
+                return True
+            legacy_pattern = self._get_pattern(control, ("GetLegacyIAccessiblePattern",))
+            if legacy_pattern is not None and (
+                self._call_named_method(legacy_pattern, "SetValue", text)
+                or self._call_named_method(legacy_pattern, "SetValuePattern", text)
+            ):
+                return True
+            if self._call_named_method(control, "SetFocus"):
+                if self._call_named_method(control, "SendKeys", text):
+                    return True
+                if self._call_named_method(control, "SendKeys", text, 0.0):
+                    return True
+            return False
+        return False
+
+    def _capture_element_state(self, control: Any) -> dict[str, Any]:
+        value = self._read_pattern_value(control)
+        toggle_state = self._read_pattern_value(control, getter_names=("GetTogglePattern",), value_names=("ToggleState", "CurrentToggleState"))
+        return {
+            "label": self._best_label(control),
+            "selected": self._read_bool_property(control, ("IsSelected", "Selected", "CurrentIsSelected", "HasKeyboardFocus")),
+            "enabled": self._read_bool_property(control, ("IsEnabled", "CurrentIsEnabled"), default=True),
+            "focused": self._read_bool_property(control, ("HasKeyboardFocus", "CurrentHasKeyboardFocus")),
+            "value": value,
+            "toggle_state": toggle_state,
+            "control_type": self._normalize_control_type(control),
+        }
+
     def _resolve_window_handle(self, state: dict[str, Any]) -> int:
         active_window = state.get("active_window", {}) if isinstance(state.get("active_window"), dict) else {}
         raw_window_id = str(active_window.get("window_id", "")).strip()
@@ -219,10 +446,9 @@ class DesktopCoworkerUIABackend:
         bbox_height = bbox_bottom - bbox_top
         window_area = max(1, window_width * window_height)
         area_ratio = (bbox_width * bbox_height) / window_area
-        if area_ratio > 0.75:
-            return None
-
         kind = self._infer_kind(label=label, normalized_label=normalized_label, control_type=control_type, process_name=process_name, title=title)
+        if area_ratio > 0.75 and kind not in {"dialog", "panel"}:
+            return None
         if kind == "unknown" and area_ratio > 0.35:
             return None
 
@@ -244,7 +470,16 @@ class DesktopCoworkerUIABackend:
         )
 
         click_action = "double_click" if kind == "file" else "click"
-        if control_type in {"buttoncontrol", "checkboxcontrol", "hyperlinkcontrol", "menuitemcontrol", "tabitemcontrol", "togglebuttoncontrol"}:
+        if control_type in {
+            "buttoncontrol",
+            "checkboxcontrol",
+            "hyperlinkcontrol",
+            "menuitemcontrol",
+            "tabitemcontrol",
+            "togglebuttoncontrol",
+            "treeitemcontrol",
+            "headeritemcontrol",
+        }:
             click_action = "click"
 
         return {
@@ -263,6 +498,8 @@ class DesktopCoworkerUIABackend:
                 "bottom": int(bbox_bottom),
             },
             "selected": selected,
+            "enabled": enabled,
+            "control_type": control_type,
         }
 
     def _candidate_confidence(
@@ -282,10 +519,14 @@ class DesktopCoworkerUIABackend:
             base = 0.92
         elif kind in {"tab", "menu"}:
             base = 0.9
+        elif kind in {"tree", "cell", "table"}:
+            base = 0.88
         elif kind == "row":
             base = 0.86
         elif kind == "field":
             base = 0.82
+        elif kind in {"dialog", "panel"}:
+            base = 0.78
         elif control_type == "customcontrol":
             base = 0.74
         if selected:
@@ -301,16 +542,6 @@ class DesktopCoworkerUIABackend:
         return clamp_confidence(base, default=0.6)
 
     def _infer_kind(self, *, label: str, normalized_label: str, control_type: str, process_name: str, title: str) -> str:
-        if control_type in {"checkboxcontrol", "radiobuttoncontrol", "togglebuttoncontrol"}:
-            return "toggle"
-        if control_type in {"buttoncontrol", "splitbuttoncontrol", "hyperlinkcontrol"}:
-            return "button"
-        if control_type == "tabitemcontrol":
-            return "tab"
-        if control_type == "menuitemcontrol":
-            return "menu"
-        if control_type in {"editcontrol", "documentcontrol"}:
-            return "field"
         if process_name == "explorer" or "fileexplorer" in title:
             if normalized_label in _COMMON_FOLDER_LABELS:
                 return "folder"
@@ -318,11 +549,50 @@ class DesktopCoworkerUIABackend:
                 return "file"
             if control_type in _ROW_CONTROL_TYPES:
                 return "row"
+            if normalized_label in {"save", "open", "cancel"}:
+                return "dialog"
+        if control_type in {"checkboxcontrol", "radiobuttoncontrol", "togglebuttoncontrol"}:
+            return "toggle"
+        if control_type in {"buttoncontrol", "splitbuttoncontrol", "hyperlinkcontrol"}:
+            return "button"
+        if control_type == "tabitemcontrol":
+            return "tab"
+        if control_type in {"menucontrol", "menuitemcontrol", "toolbarcontrol"}:
+            return "menu"
+        if control_type == "comboboxcontrol":
+            return "combobox"
+        if control_type in {"editcontrol", "documentcontrol"}:
+            return "field"
+        if control_type in {"treecontrol", "treeitemcontrol"}:
+            return "tree"
+        if control_type in {"tablecontrol", "datagridcontrol"}:
+            return "table"
+        if control_type == "headeritemcontrol":
+            return "cell"
+        if control_type in {"panecontrol", "windowcontrol", "groupcontrol"}:
+            if any(token in normalized_label for token in {"saveas", "open", "confirm", "dialog", "properties"}):
+                return "dialog"
+            if process_name in {"systemsettings", "settings"}:
+                return "panel"
         if process_name in {"excel", "word"}:
             if Path(label).suffix.lower() in {".csv", ".doc", ".docx", ".md", ".txt", ".xls", ".xlsx", ".xlsm"}:
                 return "file"
             if control_type in _ROW_CONTROL_TYPES:
                 return "row"
+        if process_name in {"whatsapp", "whatsapproot"} or "whatsapp" in title:
+            if normalized_label in {"chats", "status", "calls", "communities"}:
+                return "tab"
+            if normalized_label in {"typeamessage", "message"}:
+                return "field"
+            if control_type in _ROW_CONTROL_TYPES or len(normalized_label) >= 3:
+                return "row"
+        if process_name in {"chrome", "msedge", "firefox"}:
+            if normalized_label in {"back", "forward", "reload", "extensions"}:
+                return "button"
+            if normalized_label.startswith("search") or normalized_label in {"address", "search"}:
+                return "field"
+            if control_type in {"tabitemcontrol", "listitemcontrol"}:
+                return "tab"
         if control_type in _ROW_CONTROL_TYPES:
             if Path(label).suffix:
                 return "file"
@@ -330,7 +600,7 @@ class DesktopCoworkerUIABackend:
         return "unknown"
 
     def _best_label(self, control: Any) -> str:
-        for attr_name in ("Name", "LegacyIAccessibleName", "AutomationId", "LocalizedControlType"):
+        for attr_name in ("Name", "Value", "LegacyIAccessibleName", "AutomationId", "LocalizedControlType", "HelpText"):
             value = self._read_attribute(control, attr_name)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -429,6 +699,61 @@ class DesktopCoworkerUIABackend:
             except Exception:
                 continue
         return default
+
+    def _get_pattern(self, control: Any, getter_names: tuple[str, ...]) -> Any:
+        for getter_name in getter_names:
+            if control is None or not hasattr(control, getter_name):
+                continue
+            try:
+                getter = getattr(control, getter_name)
+            except Exception:
+                continue
+            if not callable(getter):
+                continue
+            try:
+                pattern = getter()
+            except Exception:
+                continue
+            if pattern is not None:
+                return pattern
+        return None
+
+    def _call_pattern_method(self, control: Any, getter_names: tuple[str, ...], method_name: str, *args: Any) -> bool:
+        pattern = self._get_pattern(control, getter_names)
+        if pattern is None:
+            return False
+        return self._call_named_method(pattern, method_name, *args)
+
+    def _call_named_method(self, obj: Any, name: str, *args: Any) -> bool:
+        if obj is None or not hasattr(obj, name):
+            return False
+        try:
+            member = getattr(obj, name)
+        except Exception:
+            return False
+        if not callable(member):
+            return False
+        try:
+            member(*args)
+            return True
+        except Exception:
+            return False
+
+    def _read_pattern_value(
+        self,
+        control: Any,
+        *,
+        getter_names: tuple[str, ...] = ("GetValuePattern", "GetLegacyIAccessiblePattern"),
+        value_names: tuple[str, ...] = ("Value", "CurrentValue", "LegacyIAccessibleValue", "Name"),
+    ) -> str:
+        pattern = self._get_pattern(control, getter_names)
+        if pattern is None:
+            return ""
+        for value_name in value_names:
+            value = self._read_attribute(pattern, value_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def _read_attribute(self, obj: Any, name: str) -> Any:
         if obj is None or not hasattr(obj, name):
