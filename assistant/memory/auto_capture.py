@@ -31,11 +31,21 @@ SECRET_HINTS = ("api key", "token", "client secret", "secret", "password", "pass
 
 
 class MemoryAutoCaptureRunner:
-    def __init__(self, config, model_provider, tool_registry, max_messages: int = 8) -> None:
+    def __init__(
+        self,
+        config,
+        model_provider,
+        tool_registry,
+        max_messages: int = 8,
+        memory_classifier=None,
+        ml_metrics_tracker=None,
+    ) -> None:
         self.config = config
         self.model_provider = model_provider
         self.tool_registry = tool_registry
         self.max_messages = max_messages
+        self.memory_classifier = memory_classifier
+        self.ml_metrics_tracker = ml_metrics_tracker
 
     async def maybe_capture(
         self,
@@ -114,6 +124,16 @@ class MemoryAutoCaptureRunner:
             return False
         if any(secret_hint in normalized for secret_hint in SECRET_HINTS):
             return False
+        if self.memory_classifier is not None:
+            decision = self.memory_classifier.decide(normalized)
+            if self.ml_metrics_tracker is not None:
+                self.ml_metrics_tracker.record_memory_classifier(
+                    keep=decision.keep,
+                    confidence=decision.confidence,
+                    reason=decision.reason,
+                )
+            if decision.keep:
+                return True
         return any(pattern.search(normalized) for pattern in DURABLE_HINT_PATTERNS)
 
     def _memory_write_tool(self) -> dict | None:

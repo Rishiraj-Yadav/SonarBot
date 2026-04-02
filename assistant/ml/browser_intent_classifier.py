@@ -1,9 +1,7 @@
-"""Lightweight message importance classifier with safe fallback."""
+"""Lightweight local browser intent classifier for starter analytics."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,19 +12,11 @@ except Exception:  # pragma: no cover
     joblib = None
 
 
-@dataclass(slots=True)
-class MemoryDecision:
-    keep: bool
-    confidence: float
-    reason: str = ""
-
-
-class MemoryClassifier:
-    def __init__(self, *, enabled: bool = False, min_confidence: float = 0.55, model_path: Path | None = None) -> None:
-        self.enabled = enabled
-        self.min_confidence = max(0.0, min(1.0, min_confidence))
+class BrowserIntentClassifier:
+    def __init__(self, *, model_path: Path | None = None) -> None:
         self.model_path = model_path
         self._model: Any = None
+        self._labels: list[str] = []
         self._model_error = ""
         self._load_model_if_possible()
 
@@ -34,47 +24,14 @@ class MemoryClassifier:
         self._reload_if_available()
         metadata = self._artifact_metadata()
         return {
-            "enabled": self.enabled,
-            "min_confidence": self.min_confidence,
+            "enabled": bool(self.model_path and self.model_path.exists()),
             "model_path": str(self.model_path) if self.model_path else "",
             "model_loaded": self._model is not None,
             "model_error": self._model_error,
+            "labels": self._labels,
+            "label_count": len(self._labels),
             **metadata,
         }
-
-    def decide(self, text: str) -> MemoryDecision:
-        self._reload_if_available()
-        normalized = re.sub(r"\s+", " ", text).strip()
-        if not normalized:
-            return MemoryDecision(keep=False, confidence=0.0, reason="empty")
-        if not self.enabled:
-            return MemoryDecision(keep=self._heuristic_keep(normalized), confidence=0.6, reason="disabled_heuristic")
-
-        if self._model is not None:
-            try:
-                pred = self._model.predict([normalized])[0]  # type: ignore[index]
-                keep = bool(pred)
-                confidence = 0.85
-                if confidence >= self.min_confidence:
-                    return MemoryDecision(keep=keep, confidence=confidence, reason="model")
-            except Exception:
-                pass
-        return MemoryDecision(keep=self._heuristic_keep(normalized), confidence=0.55, reason="fallback_heuristic")
-
-    def _heuristic_keep(self, text: str) -> bool:
-        lowered = text.lower()
-        signals = (
-            "remember",
-            "preference",
-            "my name is",
-            "i prefer",
-            "always",
-            "never",
-            "important",
-            "deadline",
-            "appointment",
-        )
-        return any(token in lowered for token in signals)
 
     def _load_model_if_possible(self) -> None:
         if self.model_path is None:
@@ -86,18 +43,22 @@ class MemoryClassifier:
             self._model_error = "model_not_found"
             return
         try:
-            self._model = joblib.load(self.model_path)
+            artifact = joblib.load(self.model_path)
+            if isinstance(artifact, dict):
+                self._model = artifact.get("pipeline")
+                raw_labels = artifact.get("labels", [])
+                self._labels = [str(item).strip() for item in raw_labels if str(item).strip()]
+            else:
+                self._model = artifact
             self._model_error = ""
         except Exception as exc:
-            self._model_error = str(exc)
             self._model = None
+            self._model_error = str(exc)
 
     def _reload_if_available(self) -> None:
         if self._model is not None:
             return
-        if self.model_path is None:
-            return
-        if not self.model_path.exists():
+        if self.model_path is None or not self.model_path.exists():
             return
         self._load_model_if_possible()
 

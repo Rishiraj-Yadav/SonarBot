@@ -1,0 +1,2 @@
+{"ts": "2026-04-02T03:31:08.992768+00:00", "component": "memory_classifier", "keep": true, "confidence": 0.81, "reason": "model"}
+{"ts": "2026-04-02T03:31:08.992768+00:00", "component": "memory_classifier", "keep": false, "confidence": 0.34, "reason": "fallback_heuristic"}

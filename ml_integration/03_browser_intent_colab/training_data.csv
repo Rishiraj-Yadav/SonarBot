@@ -1,0 +1,21 @@
+message,label
+open github.com,browser_navigate
+go to leetcode,browser_navigate
+search google for openai,browser_search
+search youtube for lofi,browser_search
+open the first result,browser_click_result
+click the first search result,browser_click_result
+switch to tab 2,browser_tab_switch
+close this tab,browser_tab_close
+take browser screenshot,browser_screenshot
+show browser logs,browser_logs
+show browser downloads,browser_downloads
+log in to gmail,browser_login
+fill this form with my details,browser_fill_form
+upload resume.pdf,browser_upload
+extract the table from this page,browser_extract_table
+open amazon and search shoes,browser_search
+open netflix,browser_navigate
+play the video,browser_media_control
+pause the video,browser_media_control
+scroll down on the page,browser_scroll

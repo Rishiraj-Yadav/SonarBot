@@ -43,7 +43,7 @@ from assistant.gateway.protocol import ConnectFrame, HelloOkFrame, RequestFrame,
 from assistant.gateway.router import GatewayRouter
 from assistant.hooks.runner import HookRunner
 from assistant.memory import MemoryAutoCaptureRunner, MemoryManager
-from assistant.ml import MLMetricsTracker, MemoryClassifier, ToolRouter
+from assistant.ml import BrowserIntentClassifier, MLMetricsTracker, MemoryClassifier, ToolRouter
 from assistant.models import get_provider
 from assistant.multi_agent import ACPClient, PresenceRegistry, SubAgentManager
 from assistant.oauth import OAuthFlowManager, OAuthTokenManager
@@ -127,6 +127,7 @@ class GatewayServices:
     browser_monitor_service: BrowserMonitorService | None
     tool_router: ToolRouter | None
     memory_classifier: MemoryClassifier | None
+    browser_intent_classifier: BrowserIntentClassifier | None
     ml_metrics: MLMetricsTracker | None
 
 
@@ -170,6 +171,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         provider = model_provider or get_provider(runtime_config)
         tool_router: ToolRouter | None = None
         memory_classifier: MemoryClassifier | None = None
+        browser_intent_classifier: BrowserIntentClassifier | None = None
         ml_metrics: MLMetricsTracker | None = None
         if getattr(runtime_config, "ml", None) is not None and bool(runtime_config.ml.enabled):
             ml_metrics = MLMetricsTracker(Path(str(runtime_config.ml.metrics_log_path)).expanduser().resolve())
@@ -184,6 +186,9 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
                 enabled=bool(runtime_config.ml.memory_classifier.enabled),
                 min_confidence=float(runtime_config.ml.memory_classifier.min_confidence),
                 model_path=Path(str(runtime_config.ml.memory_classifier.model_path)).expanduser().resolve(),
+            )
+            browser_intent_classifier = BrowserIntentClassifier(
+                model_path=(runtime_config.assistant_home / "ml_models" / "browser_intent_classifier.joblib")
             )
         tool_registry = create_default_tool_registry(
             runtime_config,
@@ -212,7 +217,13 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             tool_registry,
             chunk_emitter=_browser_chunk_emitter,
         )
-        memory_capture_runner = MemoryAutoCaptureRunner(runtime_config, provider, tool_registry)
+        memory_capture_runner = MemoryAutoCaptureRunner(
+            runtime_config,
+            provider,
+            tool_registry,
+            memory_classifier=memory_classifier,
+            ml_metrics_tracker=ml_metrics,
+        )
         presence_registry = PresenceRegistry()
         agent_loop = AgentLoop(
             config=runtime_config,
@@ -325,6 +336,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             browser_monitor_service=browser_monitor_service,
             tool_router=tool_router,
             memory_classifier=memory_classifier,
+            browser_intent_classifier=browser_intent_classifier,
             ml_metrics=ml_metrics,
         )
         browser_health_task: asyncio.Task[None] | None = None
@@ -439,18 +451,24 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         metrics_payload = services.ml_metrics.snapshot() if services.ml_metrics is not None else {}
         onnx_path = services.config.assistant_home / "ml_models" / "browser_intent.onnx"
         onnx_available = bool(importlib.util.find_spec("onnxruntime"))
+        browser_intent_local_payload = (
+            services.browser_intent_classifier.status()
+            if services.browser_intent_classifier is not None
+            else {"enabled": False}
+        )
         browser_intent_payload = {
             "enabled": bool(onnx_path.exists()),
             "model_path": str(onnx_path),
             "model_loaded": bool(onnx_path.exists() and onnx_available),
             "model_error": "" if onnx_path.exists() and onnx_available else (
-                "model_not_found" if not onnx_path.exists() else "onnxruntime_not_installed"
+                "pending_training_colab" if not onnx_path.exists() else "onnxruntime_not_installed"
             ),
             "onnxruntime_available": onnx_available,
         }
         models_payload = {
             "tool_router": tool_router_payload,
             "memory_classifier": memory_classifier_payload,
+            "browser_intent_local": browser_intent_local_payload,
             "browser_intent_onnx": browser_intent_payload,
         }
         return {
@@ -458,6 +476,7 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
             "models": models_payload,
             "tool_router": tool_router_payload,
             "memory_classifier": memory_classifier_payload,
+            "browser_intent_local": browser_intent_local_payload,
             "browser_intent_onnx": browser_intent_payload,
             "metrics": metrics_payload,
             "timestamp": datetime.now(timezone.utc).isoformat(),
