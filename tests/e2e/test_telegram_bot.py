@@ -155,6 +155,44 @@ async def test_telegram_host_approval_inline_buttons_round_trip(app_config) -> N
 
 
 @pytest.mark.asyncio
+async def test_telegram_host_approval_inline_button_handles_stale_approval(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [123]
+    app_config.telegram.bot_token = "test-token"
+    fake_bot = FakeBot()
+
+    async def inbound_handler(message):
+        return "route-inline"
+
+    async def host_approval_handler(approval_id: str, decision: str):
+        raise KeyError(f"Unknown host approval '{approval_id}'.")
+
+    channel = TelegramChannel(
+        config=app_config,
+        inbound_handler=inbound_handler,
+        bot=fake_bot,
+        host_approval_handler=host_approval_handler,
+    )
+
+    approval = {
+        "approval_id": "approval-stale",
+        "action_kind": "write_host_file",
+        "target_summary": "C:/Users/Test/Desktop/note.txt",
+        "category": "ask_once",
+        "status": "pending",
+        "payload": {"path": "C:/Users/Test/Desktop/note.txt"},
+    }
+    await channel.send_host_approval_request("456", approval)
+
+    sent = fake_bot.sent_messages[-1]
+    callback = FakeCallbackQuery(data="hostapprove:approval-stale:approved", message=sent)
+    await channel.handle_callback_query(callback)
+
+    assert callback.answered == ["Approval approval-stale is no longer active."]
+    assert "This host approval is no longer active." in sent.text
+    assert "Status: expired or already resolved" in sent.text
+
+
+@pytest.mark.asyncio
 async def test_telegram_buffers_immediate_command_responses(app_config) -> None:
     app_config.telegram.allowed_user_ids = [123]
     app_config.telegram.bot_token = "test-token"

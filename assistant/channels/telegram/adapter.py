@@ -113,7 +113,23 @@ class TelegramChannel(Channel):
             return
         _, approval_id, decision = parts
         normalized = "approved" if decision == "approved" else "rejected"
-        approval = await self.host_approval_handler(approval_id, normalized)
+        try:
+            approval = await self.host_approval_handler(approval_id, normalized)
+        except KeyError:
+            message_text = (
+                f"This host approval is no longer active.\n"
+                f"Approval id: {approval_id}\n"
+                f"Status: expired or already resolved"
+            )
+            if hasattr(callback_query, "answer"):
+                await callback_query.answer(f"Approval {approval_id} is no longer active.")
+            if callback_query.message is not None:
+                try:
+                    await self._edit_text(callback_query.message, message_text)
+                except TypeError:
+                    await callback_query.message.edit_text(message_text)
+            self._host_approval_messages.pop(approval_id, None)
+            return
         if hasattr(callback_query, "answer"):
             await callback_query.answer(f"{normalized.title()} {approval_id}")
         if callback_query.message is not None:

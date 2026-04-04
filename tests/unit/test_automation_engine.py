@@ -101,6 +101,7 @@ class FakeSystemAccessManager:
 class FakeToolRegistry:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.dir_entries_by_path: dict[str, list[dict[str, object]]] = {}
 
     async def dispatch(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool_name, dict(payload)))
@@ -129,7 +130,8 @@ class FakeToolRegistry:
         if tool_name == "write_host_file":
             return {"status": "completed", "path": payload.get("path", ""), "content": payload.get("content", "")}
         if tool_name == "list_host_dir":
-            return {"status": "completed", "entries": [], "path": payload.get("path", "")}
+            path = str(payload.get("path", ""))
+            return {"status": "completed", "entries": list(self.dir_entries_by_path.get(path, [])), "path": path}
         if tool_name == "read_host_file":
             return {"status": "completed", "path": payload.get("path", ""), "content": "hello"}
         if tool_name == "exec_shell":
@@ -499,3 +501,60 @@ async def test_automation_engine_registers_scheduled_desktop_routine_with_schedu
     assert paused["paused"] is True
     assert resumed["paused"] is False
     assert scheduler.routine_removed == [str(created["routine_id"])]
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_runs_scheduled_directory_move_routine(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    tool_registry = FakeToolRegistry()
+    tool_registry.dir_entries_by_path["R:/Download2"] = [
+        {"name": "note.txt", "path": "R:/Download2/note.txt", "is_dir": False, "size": 12},
+        {"name": "nested", "path": "R:/Download2/nested", "is_dir": True, "size": 0},
+    ]
+    engine = AutomationEngine(
+        app_config,
+        FakeAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+        tool_registry=tool_registry,
+    )
+
+    created = await engine.create_desktop_routine_rule(
+        app_config.users.default_user_id,
+        name="Move Download2 to Documents",
+        trigger_type="schedule",
+        schedule="0 21 * * *",
+        steps=[
+            {
+                "type": "move_host_dir_contents",
+                "source_dir": "R:/Download2",
+                "destination_dir": "C:/Users/Ritesh/OneDrive/Documents",
+            }
+        ],
+    )
+    result = await engine.run_desktop_routine_now(
+        app_config.users.default_user_id,
+        str(created["routine_id"]),
+        notify=False,
+    )
+
+    move_calls = [payload for tool_name, payload in tool_registry.calls if tool_name == "move_host_file"]
+    assert result["status"] == "completed"
+    assert len(move_calls) == 1
+    assert move_calls[0]["source"] == "R:/Download2/note.txt"
+    assert move_calls[0]["destination"] == "C:/Users/Ritesh/OneDrive/Documents/note.txt"
+    assert move_calls[0]["session_key"] == f"automation:{app_config.users.default_user_id}:move-download2-to-documents"
+    assert move_calls[0]["user_id"] == app_config.users.default_user_id
+    assert move_calls[0]["connection_id"] == ""
+    assert move_calls[0]["channel_name"] == ""
+    assert str(move_calls[0]["session_id"])

@@ -2043,6 +2043,17 @@ class GatewayRouter:
         if immediate_report_shortcut is not None:
             return immediate_report_shortcut
 
+        gmail_shortcut = await self._handle_gmail_shortcut(
+            request_id,
+            session_key,
+            message,
+            display_message,
+            lowered,
+            metadata,
+        )
+        if gmail_shortcut is not None:
+            return gmail_shortcut
+
         desktop_vision_shortcut = await self._handle_desktop_vision_shortcut(
             request_id,
             session_key,
@@ -2106,19 +2117,6 @@ class GatewayRouter:
         host_shortcut = await self._handle_host_shortcut(request_id, session_key, display_message, lowered, metadata)
         if host_shortcut is not None:
             return host_shortcut
-
-        if self._looks_like_latest_email_request(lowered):
-            try:
-                result = await self.tool_registry.dispatch("gmail_latest_email", {"session_key": session_key})
-            except Exception as exc:
-                return ResponseFrame(id=request_id, ok=False, error=str(exc))
-            response_text = self._format_latest_email_response(result)
-            await self._persist_inline_exchange(session_key, display_message, response_text, metadata)
-            return ResponseFrame(
-                id=request_id,
-                ok=True,
-                payload={"queued": False, "session_key": session_key, "command_response": response_text},
-            )
 
         if self._looks_like_repo_count_request(lowered):
             try:
@@ -2315,6 +2313,9 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         parsed = self._parse_natural_language_cron_request(original_message, lowered)
+        original_lowered = original_message.lower().strip()
+        if self._should_retry_original_shortcut_parse(parsed) and original_lowered != lowered:
+            parsed = self._parse_natural_language_cron_request(original_message, original_lowered)
         if parsed is None:
             return None
         if isinstance(parsed, dict) and parsed.get("kind") == "report":
@@ -2373,6 +2374,9 @@ class GatewayRouter:
         metadata: dict[str, Any],
     ) -> ResponseFrame | None:
         parsed = self._parse_natural_language_one_time_reminder_request(original_message, lowered)
+        original_lowered = original_message.lower().strip()
+        if self._should_retry_original_shortcut_parse(parsed) and original_lowered != lowered:
+            parsed = self._parse_natural_language_one_time_reminder_request(original_message, original_lowered)
         if parsed is None:
             return None
         if isinstance(parsed, dict) and parsed.get("kind") == "report":
@@ -2683,6 +2687,99 @@ class GatewayRouter:
             payload={"queued": False, "session_key": session_key, "command_response": response_text},
         )
 
+    async def _handle_gmail_shortcut(
+        self,
+        request_id: str,
+        session_key: str,
+        canonical_message: str,
+        original_message: str,
+        lowered: str,
+        metadata: dict[str, Any],
+    ) -> ResponseFrame | None:
+        compose_request = self._parse_gmail_compose_request(canonical_message)
+        if compose_request is None and canonical_message != original_message:
+            compose_request = self._parse_gmail_compose_request(original_message)
+        if compose_request is not None:
+            tool_name = "gmail_create_draft" if compose_request["mode"] == "draft" else "gmail_send"
+            try:
+                result = await self.tool_registry.dispatch(
+                    tool_name,
+                    {
+                        "session_key": session_key,
+                        "to": compose_request["to"],
+                        "subject": compose_request["subject"],
+                        "body": compose_request["body"],
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = (
+                self._format_gmail_draft_response(result, compose_request)
+                if compose_request["mode"] == "draft"
+                else self._format_gmail_send_response(result, compose_request)
+            )
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        recent_list_limit = self._parse_gmail_recent_list_limit(lowered)
+        if recent_list_limit is not None:
+            try:
+                result = await self.tool_registry.dispatch(
+                    "gmail_search",
+                    {
+                        "session_key": session_key,
+                        "query": "in:inbox newer_than:14d",
+                        "limit": recent_list_limit,
+                    },
+                )
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_gmail_search_response(result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if self._looks_like_latest_email_request(lowered):
+            try:
+                result = await self.tool_registry.dispatch("gmail_latest_email", {"session_key": session_key})
+            except Exception as exc:
+                return ResponseFrame(id=request_id, ok=False, error=str(exc))
+            response_text = self._format_latest_email_response(result)
+            await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+            return ResponseFrame(
+                id=request_id,
+                ok=True,
+                payload={"queued": False, "session_key": session_key, "command_response": response_text},
+            )
+
+        if not self._looks_like_inbox_overview_request(lowered):
+            return None
+        try:
+            result = await self.tool_registry.dispatch(
+                "gmail_search",
+                {
+                    "session_key": session_key,
+                    "query": "in:inbox newer_than:14d",
+                    "limit": 5,
+                },
+            )
+        except Exception as exc:
+            return ResponseFrame(id=request_id, ok=False, error=str(exc))
+        response_text = self._format_gmail_search_response(result)
+        await self._persist_inline_exchange(session_key, original_message, response_text, metadata)
+        return ResponseFrame(
+            id=request_id,
+            ok=True,
+            payload={"queued": False, "session_key": session_key, "command_response": response_text},
+        )
+
     async def _handle_app_control_shortcut(
         self,
         request_id: str,
@@ -2751,6 +2848,9 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": management_response},
             )
         parsed = await self._parse_desktop_automation_request(session_key, original_message, lowered, metadata)
+        original_lowered = original_message.lower().strip()
+        if self._should_retry_original_shortcut_parse(parsed) and original_lowered != lowered:
+            parsed = await self._parse_desktop_automation_request(session_key, original_message, original_lowered, metadata)
         if parsed is None:
             return None
         if parsed.get("response_text"):
@@ -2835,6 +2935,9 @@ class GatewayRouter:
                 payload={"queued": False, "session_key": session_key, "command_response": management_response},
             )
         parsed = await self._parse_desktop_routine_request(session_key, original_message, lowered, metadata)
+        original_lowered = original_message.lower().strip()
+        if self._should_retry_original_shortcut_parse(parsed) and original_lowered != lowered:
+            parsed = await self._parse_desktop_routine_request(session_key, original_message, original_lowered, metadata)
         if parsed is None:
             return None
         if parsed.get("response_text"):
@@ -2849,6 +2952,13 @@ class GatewayRouter:
             ok=True,
             payload={"queued": False, "session_key": session_key, "command_response": response_text},
         )
+
+    def _should_retry_original_shortcut_parse(self, parsed: Any) -> bool:
+        if parsed is None:
+            return True
+        if isinstance(parsed, dict) and parsed.get("response_text") and len(parsed) == 1:
+            return True
+        return False
 
     async def _handle_desktop_routine_management_shortcut(
         self,
@@ -3350,6 +3460,7 @@ class GatewayRouter:
                 self._match_known_host_folder(lowered) is not None,
                 self._extract_host_search_root(lowered) is not None,
                 self._looks_like_latest_email_request(lowered),
+                self._looks_like_inbox_overview_request(lowered),
                 self._looks_like_repo_count_request(lowered),
                 self._looks_like_pull_request_check(lowered),
             )
@@ -3674,6 +3785,8 @@ class GatewayRouter:
 
     async def _parse_desktop_coworker_request(self, session_key: str, original_message: str, lowered: str) -> dict[str, Any] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
+        if self._looks_like_gmail_request(normalized):
+            return None
         if hasattr(self.coworker_service, "analyze_request"):
             analysis = await self.coworker_service.analyze_request(session_key=session_key, request_text=original_message.strip())
             if bool(analysis.get("desktop_ui_task", False)):
@@ -4414,6 +4527,16 @@ class GatewayRouter:
             return None
         return f"{minute} {hour} * * {day_of_week}"
 
+    def _normalize_schedule_frequency_phrase(self, value: str) -> str | None:
+        normalized = re.sub(r"\s+", " ", value.strip().lower())
+        if not normalized:
+            return None
+        if normalized in {"everyday", "every day", "daily"}:
+            return "day"
+        if normalized.startswith("every "):
+            normalized = normalized.removeprefix("every ").strip()
+        return normalized.rstrip("s") or None
+
     def _build_interval_schedule(self, interval_text: str, unit_text: str) -> str | None:
         try:
             interval = int(interval_text)
@@ -4626,16 +4749,22 @@ class GatewayRouter:
         explicit = self._extract_explicit_host_path(raw)
         if explicit is not None:
             return explicit
-        raw_normalized = raw.replace("\\", "/").strip().strip("/")
+        cleaned_reference = re.sub(r"^(?:my|the)\s+", "", raw, flags=re.IGNORECASE).strip()
+        cleaned_reference = re.sub(r"\s+(?:folder|directory)\s*$", "", cleaned_reference, flags=re.IGNORECASE).strip()
+        cleaned_reference = cleaned_reference or raw
+        raw_normalized = cleaned_reference.replace("\\", "/").strip().strip("/")
         if "/" in raw_normalized:
             base_name, *rest = [segment for segment in raw_normalized.split("/") if segment]
             base_path = self._resolve_known_host_folder_reference(base_name)
             if base_path is not None:
                 return str(Path(base_path, *rest)).replace("\\", "/")
-        known = self._resolve_known_host_folder_reference(raw)
+        known = self._resolve_known_host_folder_reference(cleaned_reference)
         if known is not None:
             return known
-        resolution = await self._resolve_host_directory_reference(session_key, raw, None, metadata)
+        known_folder_name = self._match_known_host_folder(cleaned_reference.lower())
+        if known_folder_name is not None:
+            return self._resolve_known_host_folder_path(known_folder_name)
+        resolution = await self._resolve_host_directory_reference(session_key, cleaned_reference, None, metadata)
         if resolution is not None and resolution.get("path"):
             return str(resolution["path"])
         return None
@@ -4722,7 +4851,61 @@ class GatewayRouter:
         lowered: str,
         metadata: dict[str, Any],
     ) -> dict[str, Any] | None:
-        normalized = re.sub(r"\s+", " ", lowered).strip()
+        normalized = re.sub(r"\s+", " ", lowered).strip().rstrip(".!?")
+        scheduled_transfer_patterns = (
+            r"^(?P<frequency>everyday|every\s+day|daily|every\s+weekday|every\s+monday|every\s+tuesday|every\s+wednesday|every\s+thursday|every\s+friday|every\s+saturday|every\s+sunday)(?:\s+after)?\s+at\s+(?P<time>.+?)\s*,?\s*if\s+(?:any\s+)?(?:(?P<ext>[a-z0-9]+)\s+)?files?\s+(?:come|arrive|appear|show\s+up|are\s+present|exist)\s+(?:in|inside)\s+(?P<source>.+?)\s+(?:then\s+)?move\s+(?:it|them)?\s+(?:to|into)\s+(?P<dest>.+)$",
+            r"^(?P<frequency>everyday|every\s+day|daily|every\s+weekday|every\s+monday|every\s+tuesday|every\s+wednesday|every\s+thursday|every\s+friday|every\s+saturday|every\s+sunday)(?:\s+after)?\s+at\s+(?P<time>.+?)\s*,?\s*move\s+(?:the\s+)?(?:any\s+)?(?:(?P<ext>[a-z0-9]+)\s+)?files?\s+from\s+(?P<source>.+?)\s+(?:to|into)\s+(?P<dest>.+)$",
+        )
+        for pattern in scheduled_transfer_patterns:
+            schedule_transfer_match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if schedule_transfer_match is None:
+                continue
+            source_value = str(schedule_transfer_match.group("source"))
+            source_path = await self._resolve_desktop_automation_path(session_key, source_value, metadata)
+            if source_path is None:
+                return {"response_text": f"I couldn't resolve the source folder '{source_value}' inside your allowed host locations."}
+            dest_value = str(schedule_transfer_match.group("dest")).strip()
+            destination_path = await self._resolve_desktop_automation_path(session_key, dest_value, metadata)
+            if destination_path is None:
+                return {"response_text": f"I couldn't resolve the destination '{dest_value}' inside your allowed host locations."}
+            frequency = self._normalize_schedule_frequency_phrase(str(schedule_transfer_match.group("frequency")))
+            if frequency is None:
+                return {"response_text": "I couldn't understand that routine schedule."}
+            schedule = self._build_schedule_from_frequency_and_time(
+                frequency,
+                str(schedule_transfer_match.group("time")),
+            )
+            if schedule is None:
+                return {
+                    "response_text": (
+                        "I couldn't understand that schedule. Try something like "
+                        "'every day at 9 pm move files from download2 to documents'."
+                    )
+                }
+            extension = (schedule_transfer_match.group("ext") or "").strip().lower()
+            step: dict[str, Any] = {
+                "type": "move_host_dir_contents",
+                "source_dir": source_path,
+                "destination_dir": destination_path,
+            }
+            if extension:
+                step["file_extensions"] = [extension]
+            return {
+                "name": f"Move {Path(source_path).name} to {Path(destination_path).name}",
+                "trigger_type": "schedule",
+                "steps": [step],
+                "summary": "",
+                "schedule": schedule,
+                "event_types": ["scheduled"],
+                "file_extensions": [extension] if extension else [],
+                "filename_pattern": "*",
+                "cooldown_seconds": 0,
+                "dedupe_window_seconds": 0,
+                "delivery_policy": "primary",
+                "severity": "info",
+                "approval_mode": "ask_on_risky_step",
+            }
+
         watch_match = re.match(
             r"^when\s+(?:a|an)\s+(?:(?P<ext>[a-z0-9]+)\s+)?file\s+appears\s+in\s+(?P<source>.+?)\s*,?\s*(?P<action>move|copy)\s+it\s+to\s+(?P<dest>.+?)\s+and\s+notify\s+me$",
             normalized,
@@ -5131,6 +5314,10 @@ class GatewayRouter:
             return f"move {step.get('source', '{event_path}')} to {step.get('destination', '')}"
         if step_type == "copy_host_file":
             return f"copy {step.get('source', '{event_path}')} to {step.get('destination', '')}"
+        if step_type == "move_host_dir_contents":
+            return f"move files from {step.get('source_dir', '')} to {step.get('destination_dir', '')}"
+        if step_type == "copy_host_dir_contents":
+            return f"copy files from {step.get('source_dir', '')} to {step.get('destination_dir', '')}"
         if step_type == "notify":
             return f"notify: {step.get('text', '')}"
         if step_type == "desktop_keyboard_hotkey":
@@ -5157,6 +5344,8 @@ class GatewayRouter:
                 "write_host_file",
                 "delete_host_file",
                 "move_host_file",
+                "move_host_dir_contents",
+                "copy_host_dir_contents",
             }:
                 risky += 1
                 continue
@@ -5211,10 +5400,164 @@ class GatewayRouter:
         return None, "No host approvals found."
 
     def _looks_like_latest_email_request(self, lowered: str) -> bool:
-        has_email_word = "mail" in lowered or "email" in lowered
-        has_latest_word = "last" in lowered or "latest" in lowered or "newest" in lowered
-        received_hint = "received" in lowered or "got" in lowered or "inbox" in lowered
-        return has_email_word and has_latest_word and received_hint
+        normalized = re.sub(r"\s+", " ", lowered.strip())
+        if not normalized:
+            return False
+
+        # Keep explicit Outlook/browser requests on their existing path.
+        if "outlook" in normalized:
+            return False
+        if any(token in normalized for token in ("gmail.com", "outlook.com", "browser", "website", "tab")):
+            return False
+        if re.search(r"\b(open|launch|start|focus|switch)\b", normalized) is not None:
+            return False
+
+        # Preserve inbox-oriented skills such as "check my inbox".
+        if normalized in {"check my inbox", "inbox briefing"}:
+            return False
+        if any(token in normalized for token in ("triage my email", "triage my emails", "email briefing", "emails briefing")):
+            return False
+
+        # Mail composition/reply flows should not be treated as inbox reads.
+        if any(token in normalized for token in ("send", "draft", "compose", "reply")):
+            return False
+
+        requested_count = self._extract_requested_item_count(normalized)
+        if requested_count is not None and requested_count > 1:
+            return False
+
+        if re.fullmatch(r"(?:my\s+)?(?:mail|email|emails|gmail|inbox)", normalized) is not None:
+            return True
+        if re.fullmatch(r"(?:show|read|check)\s+(?:me\s+)?(?:my\s+)?(?:mail|email|emails|gmail|inbox)", normalized) is not None:
+            return True
+
+        has_email_word = re.search(r"\b(mail|mails|email|emails|gmail|inbox)\b", normalized) is not None
+        has_latest_word = re.search(r"\b(last|latest|newest|recent)\b", normalized) is not None
+        received_hint = re.search(r"\b(received|receive|got|have|had|inbox|show|read)\b", normalized) is not None
+        return bool(has_email_word and has_latest_word and (received_hint or "recent email" in normalized))
+
+    def _looks_like_inbox_overview_request(self, lowered: str) -> bool:
+        normalized = re.sub(r"\s+", " ", lowered.strip())
+        if not normalized:
+            return False
+        if normalized in {"check my inbox", "inbox briefing"}:
+            return False
+        if any(token in normalized for token in ("triage my email", "triage my emails", "email briefing", "emails briefing")):
+            return False
+        if "outlook" in normalized:
+            return False
+        if any(token in normalized for token in ("gmail.com", "outlook.com", "browser", "website", "tab")):
+            return False
+        if re.search(r"\b(open|launch|start|focus|switch|compose|draft|send|reply)\b", normalized) is not None:
+            return False
+        if self._looks_like_latest_email_request(normalized):
+            return False
+        if normalized in {"mail", "email", "emails", "gmail", "inbox", "my mail", "my email", "my emails", "my inbox"}:
+            return True
+        if re.fullmatch(r"(?:show|read|check|list)\s+(?:me\s+)?(?:my\s+)?(?:mails?|emails?|gmail|inbox)", normalized) is not None:
+            return True
+        has_email_word = re.search(r"\b(mail|mails|email|emails|gmail|inbox)\b", normalized) is not None
+        has_recent_word = re.search(r"\b(recent|latest|newest|last)\b", normalized) is not None
+        requested_count = self._extract_requested_item_count(normalized)
+        if has_email_word and has_recent_word and ((requested_count is not None and requested_count > 1) or "mails" in normalized or "emails" in normalized):
+            return True
+        return False
+
+    def _looks_like_gmail_request(self, lowered: str) -> bool:
+        return (
+            self._parse_gmail_compose_request(lowered) is not None
+            or self._parse_gmail_recent_list_limit(lowered) is not None
+            or self._looks_like_latest_email_request(lowered)
+            or self._looks_like_inbox_overview_request(lowered)
+        )
+
+    def _parse_gmail_recent_list_limit(self, lowered: str) -> int | None:
+        normalized = re.sub(r"\s+", " ", lowered.strip())
+        if not normalized:
+            return None
+        if "outlook" in normalized:
+            return None
+        if any(token in normalized for token in ("send", "draft", "compose", "reply", "open outlook", "launch outlook")):
+            return None
+        has_email_word = re.search(r"\b(mail|mails|email|emails|gmail|inbox)\b", normalized) is not None
+        has_recent_word = re.search(r"\b(recent|latest|newest|last)\b", normalized) is not None
+        if not (has_email_word and has_recent_word):
+            return None
+        requested_count = self._extract_requested_item_count(normalized)
+        if requested_count is not None and requested_count > 1:
+            return requested_count
+        if "mails" in normalized or "emails" in normalized:
+            return 5
+        return None
+
+    def _extract_requested_item_count(self, text: str) -> int | None:
+        match = re.search(r"\b(\d{1,2})\b", text)
+        if match is not None:
+            return max(1, min(int(match.group(1)), 25))
+        word_map = {
+            "one": 1,
+            "two": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+            "six": 6,
+            "seven": 7,
+            "eight": 8,
+            "nine": 9,
+            "ten": 10,
+        }
+        for word, value in word_map.items():
+            if re.search(rf"\b{word}\b", text) is not None:
+                return value
+        return None
+
+    def _parse_gmail_compose_request(self, message: str) -> dict[str, str] | None:
+        normalized = re.sub(r"\s+", " ", message.strip())
+        if not normalized:
+            return None
+        lowered = normalized.lower()
+        if "outlook" in lowered:
+            return None
+        mode = ""
+        if re.search(r"\b(?:send|s+end)\b", lowered) is not None and re.search(r"\b(mail|email)\b", lowered) is not None:
+            mode = "send"
+        elif re.search(r"\b(?:draft|compose|compoze)\b", lowered) is not None and re.search(r"\b(mail|email)\b", lowered) is not None:
+            mode = "draft"
+        if not mode:
+            return None
+
+        email_match = re.search(r"(?P<to>[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", normalized, flags=re.IGNORECASE)
+        if email_match is None:
+            return None
+        to = str(email_match.group("to")).strip()
+
+        subject = ""
+        body = ""
+
+        subject_match = re.search(
+            r"(?:with\s+)?subject\s+(?P<subject>.+?)(?=\s+(?:with\s+)?(?:content|body|message)\s+|$)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if subject_match is not None:
+            subject = str(subject_match.group("subject")).strip(" .\"'")
+
+        body_match = re.search(
+            r"(?:with\s+)?(?:content|body|message)\s+(?P<body>.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if body_match is not None:
+            body = str(body_match.group("body")).strip(" \"'")
+        else:
+            saying_match = re.search(r"\bsaying\s+(?P<body>.+)$", normalized, flags=re.IGNORECASE)
+            if saying_match is not None:
+                body = str(saying_match.group("body")).strip(" \"'")
+
+        if not body:
+            return None
+
+        return {"mode": mode, "to": to, "subject": subject, "body": body}
 
     def _looks_like_repo_count_request(self, lowered: str) -> bool:
         has_repo_word = "repo" in lowered or "repository" in lowered
@@ -6309,6 +6652,40 @@ class GatewayRouter:
             f"Subject: {result.get('subject', '(no subject)')}\n"
             f"Date: {result.get('date', 'Unknown date')}\n\n"
             f"Preview:\n{preview}"
+        )
+
+    def _format_gmail_search_response(self, result: dict[str, Any]) -> str:
+        threads = result.get("threads", []) if isinstance(result, dict) else []
+        if not threads:
+            return "I couldn't find any recent Gmail messages in your inbox."
+        lines = ["Here are your recent Gmail messages:"]
+        for thread in threads[:5]:
+            sender = str(thread.get("from", "Unknown sender")).strip() or "Unknown sender"
+            subject = str(thread.get("subject", "(no subject)")).strip() or "(no subject)"
+            date = str(thread.get("date", "Unknown date")).strip() or "Unknown date"
+            snippet = str(thread.get("snippet", "")).strip()
+            preview = f" | {snippet[:120].strip()}" if snippet else ""
+            lines.append(f"- {sender} | {subject} | {date}{preview}")
+        if len(threads) > 5:
+            lines.append(f"...and {len(threads) - 5} more.")
+        return "\n".join(lines)
+
+    def _format_gmail_send_response(self, result: dict[str, Any], request: dict[str, str]) -> str:
+        subject = request.get("subject", "").strip() or "(no subject)"
+        return (
+            f"Sent your Gmail message to {request.get('to', 'unknown recipient')}.\n"
+            f"Subject: {subject}\n"
+            f"Message id: {result.get('id', 'unknown')}\n"
+            f"Thread id: {result.get('thread_id', 'unknown')}"
+        )
+
+    def _format_gmail_draft_response(self, result: dict[str, Any], request: dict[str, str]) -> str:
+        subject = request.get("subject", "").strip() or "(no subject)"
+        return (
+            f"Created a Gmail draft for {request.get('to', 'unknown recipient')}.\n"
+            f"Subject: {subject}\n"
+            f"Draft id: {result.get('draft_id', 'unknown')}\n"
+            f"Thread id: {result.get('thread_id', 'unknown')}"
         )
 
     def _format_pull_request_response(self, owner: str, repo: str, result: dict[str, Any]) -> str:

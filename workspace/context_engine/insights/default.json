@@ -146,6 +146,223 @@
       "sent_at": "2026-04-02T02:37:35.162261+00:00",
       "confidence": 0.95,
       "urgency": 0.7
+    },
+    {
+      "fingerprint": "google-service-warning-aistudio-2026-04",
+      "title": "Action Required: Avoid Google AI Studio Disruption",
+      "sent_at": "2026-04-02T03:39:22.468934+00:00",
+      "confidence": 1.0,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "github-pr-failure-2026-04-02",
+      "title": "Trouble with GitHub Pull Requests",
+      "sent_at": "2026-04-02T03:39:22.912476+00:00",
+      "confidence": 1.0,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "email_action_required:google-ai-studio:19d462c5f7032be3",
+      "title": "Action Required on Google AI Studio Account",
+      "sent_at": "2026-04-02T04:14:38.137039+00:00",
+      "confidence": 0.95,
+      "urgency": 0.85
+    },
+    {
+      "fingerprint": "noisy_reminder:dynamic-cron:dbc92808aac1",
+      "title": "Your recurring \"Go to VNPS\" reminder is noisy",
+      "sent_at": "2026-04-02T04:14:38.629462+00:00",
+      "confidence": 0.98,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "repeated-reminder-vnps-2026-04-02",
+      "title": "Your recurring \"Go to VNPS\" reminder is noisy",
+      "sent_at": "2026-04-02T04:25:25.488846+00:00",
+      "confidence": 0.95,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "email-action-required-google-ai-studio-2026-04",
+      "title": "Action Required on Google AI Studio Account",
+      "sent_at": "2026-04-02T04:25:25.930650+00:00",
+      "confidence": 0.9,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "failed-email-ashish-vcet-8136c7913081",
+      "title": "Failed Email to Ashish at VCET",
+      "sent_at": "2026-04-02T04:32:27.789246+00:00",
+      "confidence": 1.0,
+      "urgency": 0.75
+    },
+    {
+      "fingerprint": "looming-action-google-ai-studio-apr-2026",
+      "title": "Action Required This Month: Google AI Studio",
+      "sent_at": "2026-04-02T04:32:28.219725+00:00",
+      "confidence": 0.95,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "noisy-reminder-vnps-2026-04-02",
+      "title": "Your \"Go to VNPS\" Reminder is Noisy",
+      "sent_at": "2026-04-02T04:39:28.782674+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "google-ai-studio-action-required-apr-2026",
+      "title": "Action Required on Google AI Studio Account",
+      "sent_at": "2026-04-02T04:39:29.202673+00:00",
+      "confidence": 1.0,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "noisy-automation-vnps-dbc92808aac1-pause-offer-2026-04-02",
+      "title": "Mute Noisy \"Go to VNPS\" Reminder?",
+      "sent_at": "2026-04-02T04:41:27.637476+00:00",
+      "confidence": 1.0,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "noisy-reminder-vnps-consolidate-2026-04-02",
+      "title": "Consolidate Noisy \"Go to VNPS\" Reminders?",
+      "sent_at": "2026-04-02T06:49:02.494122+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "google-ai-studio-disruption-alert-apr-2026",
+      "title": "Action Required: Google AI Studio Service Disruption",
+      "sent_at": "2026-04-02T07:19:35.448978+00:00",
+      "confidence": 1.0,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "repeated-reminders-2026-04-02-college-vnps",
+      "title": "Today's Focus: College and VNPS",
+      "sent_at": "2026-04-02T07:33:45.355674+00:00",
+      "confidence": 0.9,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "gmail-google-ai-studio-disruption-apr2026",
+      "title": "Urgent: Google AI Studio Service Disruption Risk",
+      "sent_at": "2026-04-02T07:50:46.591779+00:00",
+      "confidence": 0.95,
+      "urgency": 0.95
+    },
+    {
+      "fingerprint": "automation-loop-college-vnps-spam-20260402",
+      "title": "System Alert: Automation Loop Spamming Reminders",
+      "sent_at": "2026-04-02T07:50:47.149832+00:00",
+      "confidence": 0.98,
+      "urgency": 0.85
+    },
+    {
+      "fingerprint": "auto-loop-college-vnps-ongoing",
+      "title": "Action Required: Reminder Spam Loop is Still Active",
+      "sent_at": "2026-04-02T08:17:36.520881+00:00",
+      "confidence": 0.95,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "leetcode-agent-debugging-mini-project",
+      "title": "Desktop Agent Project: Visual Task Limit Reached on LeetCode",
+      "sent_at": "2026-04-02T08:17:37.085119+00:00",
+      "confidence": 0.85,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "ai_studio_action_required_apr2026",
+      "title": "Action Required: Google AI Studio Service Disruption Risk",
+      "sent_at": "2026-04-02T08:59:34.870615+00:00",
+      "confidence": 0.95,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "recurring_reminders_college_vnps",
+      "title": "Notification Spam: Recurring Reminders",
+      "sent_at": "2026-04-02T08:59:35.321891+00:00",
+      "confidence": 0.98,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "telegram-file-move-fail-5sem-r-drive",
+      "title": "Failed File Transfer: 5th Semester Coursework",
+      "sent_at": "2026-04-02T09:12:09.582646+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "repetitive-reminder-heartbeat-standing-orders-college-vnps-2026-04-02",
+      "title": "Resolve Repetitive 'College' & 'VNPS' Reminders",
+      "sent_at": "2026-04-02T09:16:09.399835+00:00",
+      "confidence": 0.95,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "automation-failures-telegram-5_sem-download2-2026-04-02",
+      "title": "Troubleshoot File Automation Failures",
+      "sent_at": "2026-04-02T09:16:09.859295+00:00",
+      "confidence": 0.9,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "gmail-thread-19d462c5f7032be3-action-required",
+      "title": "Action Required: Google AI Studio Usage Tier",
+      "sent_at": "2026-04-02T09:22:06.426700+00:00",
+      "confidence": 0.95,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "repetitive-reminders-college-vnps-2026-04-02",
+      "title": "Silence Repetitive 'College' & 'VNPS' Reminders?",
+      "sent_at": "2026-04-02T09:27:58.804998+00:00",
+      "confidence": 1.0,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "telegram-desktop-automation-failure-context-2026-04-02",
+      "title": "Desktop Actions Failing from Telegram",
+      "sent_at": "2026-04-02T09:27:59.332724+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "automation-failure-telegram-file-move-20260402",
+      "title": "Help Setting Up Your File Automation?",
+      "sent_at": "2026-04-02T09:47:35.600851+00:00",
+      "confidence": 0.9,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "google-aistudio-disruption-apr2026",
+      "title": "Action Required on Google AI Studio Account",
+      "sent_at": "2026-04-02T09:57:56.809612+00:00",
+      "confidence": 0.95,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "automation-file-move-telegram-failure",
+      "title": "Still Stuck on File Automation?",
+      "sent_at": "2026-04-02T09:57:58.003651+00:00",
+      "confidence": 0.9,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "failed-task-access-r-drive-a95d23ec64ee",
+      "title": "Trouble Accessing R Drive?",
+      "sent_at": "2026-04-04T13:58:15.954163+00:00",
+      "confidence": 1.0,
+      "urgency": 0.7
+    },
+    {
+      "fingerprint": "repeated-reminders-a419131bfe80-8d5cc893b588",
+      "title": "Difficulty with Reminders?",
+      "sent_at": "2026-04-04T13:58:16.514937+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
     }
   ]
 }

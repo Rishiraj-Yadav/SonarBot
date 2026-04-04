@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+import socket
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import typer
 import uvicorn
@@ -26,6 +30,27 @@ app.add_typer(sessions_app, name="sessions")
 console = Console()
 
 
+def _probe_gateway(host: str, port: int, timeout: float = 0.6) -> tuple[bool, dict[str, object] | None]:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            pass
+    except OSError:
+        return False, None
+
+    health_url = f"http://{probe_host}:{port}/__health"
+    try:
+        with urllib_request.urlopen(health_url, timeout=timeout) as response:
+            if response.status != 200:
+                return True, None
+            payload = json.loads(response.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                return True, payload
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return True, None
+    return True, None
+
+
 @app.command()
 def onboard() -> None:
     """Create local config and workspace templates."""
@@ -36,6 +61,22 @@ def onboard() -> None:
 def start() -> None:
     """Start the gateway daemon."""
     config = load_config()
+    port_in_use, health = _probe_gateway(config.gateway.host, config.gateway.port)
+    if port_in_use:
+        base = f"http://{config.gateway.host}:{config.gateway.port}"
+        if health is not None:
+            active_sessions = health.get("active_sessions")
+            active_text = f" Active sessions: {active_sessions}." if active_sessions is not None else ""
+            console.print(
+                f"[yellow]SonarBot is already running at {base}.{active_text} "
+                "Use `uv run assistant status` or stop the existing process before starting another instance.[/yellow]"
+            )
+            raise typer.Exit(code=0)
+        console.print(
+            f"[red]Port {config.gateway.port} on {config.gateway.host} is already in use by another process. "
+            "Stop the process using that port or change `gateway.port` in your config.[/red]"
+        )
+        raise typer.Exit(code=1)
     uvicorn.run(asgi_app, host=config.gateway.host, port=config.gateway.port, log_level="info")
 
 

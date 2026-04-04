@@ -25,6 +25,8 @@ class DesktopRoutineExecutor:
             "write_host_file",
             "delete_host_file",
             "move_host_file",
+            "move_host_dir_contents",
+            "copy_host_dir_contents",
         }:
             return True
         if step_type == "desktop_keyboard_hotkey":
@@ -46,6 +48,10 @@ class DesktopRoutineExecutor:
                 parts.append("move file")
             elif step_type == "copy_host_file":
                 parts.append("copy file")
+            elif step_type == "move_host_dir_contents":
+                parts.append("move folder contents")
+            elif step_type == "copy_host_dir_contents":
+                parts.append("copy folder contents")
             elif step_type == "notify":
                 parts.append("notify")
             elif step_type == "desktop_read_screen":
@@ -214,6 +220,13 @@ class DesktopRoutineExecutor:
             destination = self._render_required(step.get("destination"), context, "copy_host_file.destination")
             result = await self.tool_registry.dispatch("copy_host_file", {"source": source, "destination": destination, **common_host})
             return {"status": result.get("status", "completed"), "summary": f"Copied {Path(source).name} to {destination}.", "path": destination}
+        if step_type in {"move_host_dir_contents", "copy_host_dir_contents"}:
+            return await self._execute_host_dir_transfer(
+                step_type=step_type,
+                step=step,
+                context=context,
+                common_host=common_host,
+            )
         if step_type == "delete_host_file":
             path = self._render_required(step.get("path", "{event_path}"), context, "delete_host_file.path")
             result = await self.tool_registry.dispatch("delete_host_file", {"path": path, **common_host})
@@ -286,6 +299,92 @@ class DesktopRoutineExecutor:
             text = self._render_required(step.get("text"), context, "notify.text")
             return {"status": "completed", "summary": text}
         raise ValueError(f"Unsupported desktop routine step '{step_type}'.")
+
+    async def _execute_host_dir_transfer(
+        self,
+        *,
+        step_type: str,
+        step: dict[str, Any],
+        context: dict[str, str],
+        common_host: dict[str, str],
+    ) -> dict[str, Any]:
+        source_dir = self._render_required(step.get("source_dir"), context, f"{step_type}.source_dir")
+        destination_dir = self._render_required(step.get("destination_dir"), context, f"{step_type}.destination_dir")
+        limit = max(1, int(step.get("limit", 200) or 200))
+        raw_extensions = step.get("file_extensions", [])
+        allowed_extensions = {
+            str(item).strip().lower().lstrip(".")
+            for item in raw_extensions
+            if str(item).strip()
+        } if isinstance(raw_extensions, list) else set()
+
+        listing = await self.tool_registry.dispatch(
+            "list_host_dir",
+            {
+                "path": source_dir,
+                "limit": limit,
+                "session_id": common_host["session_id"],
+                "user_id": common_host["user_id"],
+            },
+        )
+        entries = listing.get("entries", []) if isinstance(listing, dict) else []
+        candidates: list[tuple[str, str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or bool(entry.get("is_dir")):
+                continue
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                continue
+            if allowed_extensions:
+                suffix = Path(name).suffix.lower().lstrip(".")
+                if suffix not in allowed_extensions:
+                    continue
+            source_path = str(entry.get("path") or Path(source_dir, name)).replace("\\", "/")
+            destination_path = str(Path(destination_dir, name)).replace("\\", "/")
+            candidates.append((name, source_path, destination_path))
+
+        if not candidates:
+            extension_text = ""
+            if allowed_extensions:
+                extension_text = f" matching {', '.join(f'.{ext}' for ext in sorted(allowed_extensions))}"
+            return {
+                "status": "completed",
+                "summary": f"No files{extension_text} were waiting in {source_dir}.",
+                "path": source_dir,
+            }
+
+        tool_name = "move_host_file" if step_type == "move_host_dir_contents" else "copy_host_file"
+        past_tense = "Moved" if tool_name == "move_host_file" else "Copied"
+        completed = 0
+        last_path = destination_dir
+        for _, source_path, destination_path in candidates:
+            result = await self.tool_registry.dispatch(
+                tool_name,
+                {
+                    "source": source_path,
+                    "destination": destination_path,
+                    **common_host,
+                },
+            )
+            status = str(result.get("status", "completed"))
+            if "completed" not in status:
+                error_text = str(result.get("stderr") or result.get("error") or f"{tool_name} failed")
+                if completed:
+                    error_text = f"{error_text} after processing {completed} file(s)."
+                return {
+                    "status": "failed",
+                    "summary": error_text,
+                    "error": error_text,
+                    "path": destination_path,
+                }
+            completed += 1
+            last_path = str(result.get("destination") or destination_path)
+
+        return {
+            "status": "completed",
+            "summary": f"{past_tense} {completed} file(s) from {source_dir} to {destination_dir}.",
+            "path": last_path,
+        }
 
     def _build_context(self, rule: dict[str, Any], event_payload: dict[str, Any]) -> dict[str, str]:
         event_path = str(event_payload.get("path", "")).strip()

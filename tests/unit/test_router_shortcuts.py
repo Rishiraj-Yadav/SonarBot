@@ -205,6 +205,27 @@ class DummyToolRegistry:
 
     async def dispatch(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool_name, payload))
+        if tool_name == "gmail_search":
+            return {
+                "query": payload.get("query", "in:inbox"),
+                "count": 2,
+                "threads": [
+                    {
+                        "thread_id": "thread-1",
+                        "from": "sender@example.com",
+                        "subject": "First subject",
+                        "date": "Mon, 01 Jan 2026 10:00:00 +0000",
+                        "snippet": "First snippet",
+                    },
+                    {
+                        "thread_id": "thread-2",
+                        "from": "another@example.com",
+                        "subject": "Second subject",
+                        "date": "Mon, 01 Jan 2026 09:00:00 +0000",
+                        "snippet": "Second snippet",
+                    },
+                ],
+            }
         if tool_name == "gmail_latest_email":
             return {
                 "found": True,
@@ -213,6 +234,18 @@ class DummyToolRegistry:
                 "date": "Mon, 01 Jan 2026 10:00:00 +0000",
                 "snippet": "Snippet text",
                 "body": "Body preview",
+            }
+        if tool_name == "gmail_send":
+            return {
+                "id": "message-123",
+                "thread_id": "thread-send-123",
+                "label_ids": ["SENT"],
+            }
+        if tool_name == "gmail_create_draft":
+            return {
+                "draft_id": "draft-123",
+                "message_id": "message-draft-123",
+                "thread_id": "thread-draft-123",
             }
         if tool_name == "github_list_repos":
             return {"repositories": [{"full_name": "octo/repo-1"}, {"full_name": "octo/repo-2"}]}
@@ -855,7 +888,15 @@ class DummyAutomationEngine:
             "risky_step_count": sum(
                 1
                 for step in routine["steps"]
-                if str(step.get("type", "")).lower() in {"move_host_file", "copy_host_file", "write_host_file", "delete_host_file"}
+                if str(step.get("type", "")).lower()
+                in {
+                    "move_host_file",
+                    "copy_host_file",
+                    "write_host_file",
+                    "delete_host_file",
+                    "move_host_dir_contents",
+                    "copy_host_dir_contents",
+                }
             ),
             "paused": False,
             "routine": True,
@@ -1073,6 +1114,269 @@ async def test_router_shortcuts_latest_email_without_model(app_config) -> None:
     assert "Latest email in your inbox" in response.payload["command_response"]
     assert tool_registry.calls[0][0] == "gmail_latest_email"
     assert [message["role"] for message in session_manager.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_bare_mail_prefers_gmail_tool(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-short",
+        session_key="webchat_main",
+        message="mail",
+        metadata={"trace_id": "trace-mail-short"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Latest email in your inbox" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_latest_email"
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_check_my_mails_uses_gmail_search(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    session_manager = DummySessionManager()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=session_manager,
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-list",
+        session_key="webchat_main",
+        message="check my mails",
+        metadata={"trace_id": "trace-mail-list"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Here are your recent Gmail messages:" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_search"
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_recent_mails_with_count_uses_gmail_search(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-count",
+        session_key="webchat_main",
+        message="what are the 5 recent mails that i have received",
+        metadata={"trace_id": "trace-mail-count"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Here are your recent Gmail messages:" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_search"
+    assert tool_registry.calls[0][1]["limit"] == 5
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_send_mail_uses_gmail_send(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-send",
+        session_key="webchat_main",
+        message="send a mail to ashish.232933105@vcet.edu.in with content hello",
+        metadata={"trace_id": "trace-mail-send"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Sent your Gmail message to ashish.232933105@vcet.edu.in." in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_send"
+    assert tool_registry.calls[0][1]["to"] == "ashish.232933105@vcet.edu.in"
+    assert tool_registry.calls[0][1]["body"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_typoed_send_mail_still_uses_gmail_send_before_coworker(app_config) -> None:
+    class EmailHijackCoworkerService(DummyCoworkerService):
+        async def analyze_request(self, *, session_key: str, request_text: str) -> dict[str, object]:  # noqa: ARG002
+            lowered = request_text.lower()
+            if "mail" in lowered or "email" in lowered:
+                return {
+                    "desktop_ui_task": True,
+                    "task_kind": "visual",
+                    "summary": request_text.strip(),
+                    "normalized_request": request_text.strip(),
+                    "requires_visual_context": False,
+                    "route_kind": "visual",
+                }
+            return await super().analyze_request(session_key=session_key, request_text=request_text)
+
+    app_config.desktop_coworker.enabled = True
+    coworker_service = EmailHijackCoworkerService()
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-send-typo",
+        session_key="webchat_main",
+        message="ssend a mail to ashish.232933105@vcet.edu.in with content hello",
+        metadata={"trace_id": "trace-mail-send-typo"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Sent your Gmail message to ashish.232933105@vcet.edu.in." in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_send"
+    assert coworker_service.ran == []
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_create_draft_uses_gmail_create_draft(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-mail-draft",
+        session_key="webchat_main",
+        message="create a draft email to ashish.232933105@vcet.edu.in with subject hello with content test body",
+        metadata={"trace_id": "trace-mail-draft"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Created a Gmail draft for ashish.232933105@vcet.edu.in." in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_create_draft"
+    assert tool_registry.calls[0][1]["subject"] == "hello"
+    assert tool_registry.calls[0][1]["body"] == "test body"
+
+
+@pytest.mark.asyncio
+async def test_router_shortcuts_open_outlook_does_not_hit_gmail_tool(app_config) -> None:
+    tool_registry = DummyToolRegistry()
+    agent_loop = DummyAgentLoop()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=agent_loop,
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-1",
+        request_id="req-outlook-open",
+        session_key="webchat_main",
+        message="open outlook",
+        metadata={"trace_id": "trace-outlook-open"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert not any(tool_name == "gmail_latest_email" for tool_name, _payload in tool_registry.calls)
+    assert len(agent_loop.enqueued) <= 1
 
 
 @pytest.mark.asyncio
@@ -3260,6 +3564,328 @@ async def test_router_creates_file_watch_desktop_routine_from_natural_language(a
 
 
 @pytest.mark.asyncio
+async def test_router_creates_scheduled_file_move_desktop_routine_from_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    create_response = await router.route_user_message(
+        connection_id="conn-routine-create-4",
+        request_id="req-routine-create-4",
+        session_key="telegram:123",
+        message="everyday at 9pm if any files come in download2 then move it to the document folder",
+        metadata={"trace_id": "trace-routine-create-4", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+    list_response = await router.route_user_message(
+        connection_id="conn-routine-create-5",
+        request_id="req-routine-create-5",
+        session_key="telegram:123",
+        message="/routine list",
+        metadata={"trace_id": "trace-routine-create-5", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert create_response.ok is True
+    assert "Created desktop routine 'Move Download2 to Documents'." in create_response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["trigger_type"] == "schedule"
+    assert automation_engine.desktop_routines[0]["schedule"] == "0 21 * * *"
+    assert automation_engine.desktop_routines[0]["steps"][0]["type"] == "move_host_dir_contents"
+    assert "Desktop routines:" in list_response.payload["command_response"]
+    assert "Move Download2 to Documents" in list_response.payload["command_response"]
+
+
+@pytest.mark.asyncio
+async def test_router_creates_scheduled_file_move_desktop_routine_from_natural_language_with_extra_after(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-6",
+        request_id="req-routine-create-6",
+        session_key="telegram:123",
+        message="everyday after at 9pm if any files come in download2 then move it to the document folder",
+        metadata={"trace_id": "trace-routine-create-6", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'Move Download2 to Documents'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["schedule"] == "0 21 * * *"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_scheduled_file_move_desktop_routine_from_short_natural_language(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-short",
+        request_id="req-routine-create-short",
+        session_key="telegram:123",
+        message="every day at 9 pm move files from download2 to documents",
+        metadata={"trace_id": "trace-routine-create-short", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'Move Download2 to Documents'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["schedule"] == "0 21 * * *"
+
+
+@pytest.mark.asyncio
+async def test_router_desktop_routine_shortcut_falls_back_to_original_message_when_canonical_rewrite_misses(app_config) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    async def fake_rewrite(message: str) -> str:
+        return 'Every day at 9 PM, if any files are present in the "download2" folder, move them to the "document" folder.'
+
+    async def fake_classify(_message: str) -> dict[str, object]:
+        return {
+            "intent": "file_op",
+            "target": "file",
+            "action": "move",
+            "time_expr": "every day at 9 PM",
+            "corrected": 'Every day at 9 PM, if any files are present in the "download2" folder, move them to the "document" folder.',
+            "confidence": 0.95,
+            "raw_slots": {"source_folder": "download2", "destination_folder": "document"},
+        }
+
+    router._nlp.rewrite_canonical = fake_rewrite
+    router._nlp.classify = fake_classify
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-7",
+        request_id="req-routine-create-7",
+        session_key="telegram:123",
+        message="everyday at 9pm if any files come in download2 then move it to the document folder",
+        metadata={"trace_id": "trace-routine-create-7", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'Move Download2 to Documents'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["schedule"] == "0 21 * * *"
+
+
+@pytest.mark.asyncio
+async def test_router_desktop_routine_shortcut_falls_back_to_original_message_when_canonical_rewrite_returns_parse_error(
+    app_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_config.automation.desktop.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "R:/Download2",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Documents",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        },
+    ]
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(host_tools_enabled=True),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    async def fake_rewrite(_message: str) -> str:
+        return 'Every day at 9:00 PM, move the files from the "download2" directory to the "documents" directory.'
+
+    original_parse = GatewayRouter._parse_desktop_routine_request
+
+    async def fake_parse(self, session_key: str, message: str, lowered: str, metadata: dict[str, object]):
+        if lowered == 'every day at 9:00 pm, move the files from the "download2" directory to the "documents" directory.':
+            return {"response_text": "I couldn't understand that schedule."}
+        return await original_parse(self, session_key, message, lowered, metadata)
+
+    async def fake_classify(_message: str) -> dict[str, object]:
+        return {
+            "intent": "file_op",
+            "target": "files",
+            "action": "move",
+            "time_expr": "every day at 9 PM",
+            "corrected": 'Every day at 9:00 PM, move the files from the "download2" directory to the "documents" directory.',
+            "confidence": 0.95,
+            "raw_slots": {"source_folder": "download2", "destination_folder": "documents"},
+        }
+
+    router._nlp.rewrite_canonical = fake_rewrite
+    router._nlp.classify = fake_classify
+    monkeypatch.setattr(GatewayRouter, "_parse_desktop_routine_request", fake_parse)
+
+    response = await router.route_user_message(
+        connection_id="conn-routine-create-parse-error",
+        request_id="req-routine-create-parse-error",
+        session_key="telegram:123",
+        message="every day at 9 pm move files from download2 to documents'",
+        metadata={"trace_id": "trace-routine-create-parse-error", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Created desktop routine 'Move Download2 to Documents'." in response.payload["command_response"]
+    assert automation_engine.desktop_routines
+    assert automation_engine.desktop_routines[0]["schedule"] == "0 21 * * *"
+
+
+@pytest.mark.asyncio
 async def test_router_routine_management_flow(app_config) -> None:
     app_config.automation.desktop.enabled = True
     automation_engine = DummyAutomationEngine()
@@ -4358,6 +4984,83 @@ async def test_router_natural_language_coworker_shortcut_runs_task(app_config) -
     assert "Latest window: Task Manager" in response.payload["command_response"]
     assert coworker_service.ran == ["help me open task manager and summarize system usage"]
     assert [message["role"] for message in session_manager.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_router_mail_shortcut_wins_before_coworker(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-mail",
+        request_id="req-coworker-mail",
+        session_key="webchat_main",
+        message="check my mails",
+        metadata={"trace_id": "trace-coworker-mail"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Here are your recent Gmail messages:" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_search"
+    assert coworker_service.ran == []
+
+
+@pytest.mark.asyncio
+async def test_router_recent_mails_shortcut_wins_before_coworker(app_config) -> None:
+    app_config.desktop_coworker.enabled = True
+    coworker_service = DummyCoworkerService()
+    tool_registry = DummyToolRegistry()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-coworker-mail-count",
+        request_id="req-coworker-mail-count",
+        session_key="webchat_main",
+        message="what are the 5 recent mails that i have received",
+        metadata={"trace_id": "trace-coworker-mail-count"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert "Here are your recent Gmail messages:" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "gmail_search"
+    assert tool_registry.calls[0][1]["limit"] == 5
+    assert coworker_service.ran == []
 
 
 @pytest.mark.asyncio
