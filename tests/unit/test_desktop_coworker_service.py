@@ -6,6 +6,7 @@ import re
 import pytest
 
 from assistant.desktop_coworker import DesktopCoworkerService
+from assistant.desktop_coworker.adapters import keyboard_fallback_recipe
 
 
 class CoworkerToolRegistry:
@@ -1155,6 +1156,17 @@ async def test_visual_reasoner_build_plan_uses_richer_analysis(app_config) -> No
     assert plan["steps"][0]["payload"]["goal"] == "launch chrome and go to google.com"
 
 
+def test_visual_reasoner_prefers_fast_model_before_agent_model(app_config) -> None:
+    from assistant.desktop_coworker.visual_reasoner import DesktopCoworkerVisualReasoner
+
+    app_config.agent.model = "gemini-2.5-pro"
+    app_config.desktop_coworker.reasoning_model = "gemini-2.0-flash"
+    reasoner = DesktopCoworkerVisualReasoner(app_config)
+
+    assert reasoner._candidate_models() == ["gemini-2.0-flash", "gemini-2.5-pro"]
+    assert reasoner._classification_models() == ["gemini-2.0-flash", "gemini-2.5-pro"]
+
+
 def test_visual_controller_immediate_verifier_accepts_high_confidence_fallback(app_config) -> None:
     from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
 
@@ -1173,6 +1185,137 @@ def test_visual_controller_immediate_verifier_accepts_high_confidence_fallback(a
             "target_candidates": [{"label": "Settings"}],
         },
         tool_result={"status": "completed"},
+    )
+
+    assert verification["ok"] is True
+
+
+def test_keyboard_fallback_does_not_press_enter_for_unselected_explorer_target() -> None:
+    fallback = keyboard_fallback_recipe(
+        action={"type": "click", "target_label": "5_sem", "target_kind": "row"},
+        before={
+            "active_window": {"title": "Save As", "process_name": "explorer"},
+            "target_candidates": [
+                {"label": "5_sem", "selected": False},
+                {"label": "6_semester", "selected": True},
+            ],
+        },
+        after={
+            "active_window": {"title": "Save As", "process_name": "explorer"},
+            "target_candidates": [
+                {"label": "5_sem", "selected": False},
+                {"label": "6_semester", "selected": True},
+            ],
+        },
+        attempts_used=0,
+    )
+
+    assert fallback is None
+
+
+@pytest.mark.asyncio
+async def test_executor_skips_post_ocr_for_tool_status_verification(app_config) -> None:
+    from assistant.desktop_coworker.executor import DesktopCoworkerExecutor
+
+    app_config.desktop_coworker.ocr_after_each_step = True
+    registry = CoworkerToolRegistry()
+    executor = DesktopCoworkerExecutor(app_config, registry)
+
+    result = await executor.execute_next_step(
+        task={
+            "task_id": "task-1",
+            "current_step_index": 0,
+            "latest_state": {},
+            "steps": [
+                {
+                    "type": "desktop_keyboard_hotkey",
+                    "title": "Press Enter",
+                    "payload": {"hotkey": "enter"},
+                    "verification": {"kind": "tool_status"},
+                }
+            ],
+        },
+        session_key="telegram:1",
+        user_id=app_config.users.default_user_id,
+        connection_id="conn-1",
+        channel_name="telegram",
+    )
+
+    assert result["status"] == "completed"
+    assert [name for name, _payload in registry.calls if name == "desktop_read_screen"] == []
+    assert [name for name, _payload in registry.calls if name == "desktop_window_screenshot"] == ["desktop_window_screenshot"]
+
+
+@pytest.mark.asyncio
+async def test_visual_controller_uses_dialog_path_navigation_for_resolved_folder(app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+
+    app_config.desktop_coworker.enabled = True
+    app_config.desktop_input.enabled = True
+    app_config.system_access.enabled = True
+    registry = CoworkerToolRegistry()
+    controller = DesktopCoworkerVisualController(app_config, registry)
+    original_dispatch = registry.dispatch
+
+    async def fake_dispatch(tool_name: str, payload: dict[str, object]) -> dict[str, object]:
+        if tool_name == "search_host_files":
+            assert str(payload.get("root", "")) == "R:/"
+            assert str(payload.get("name_query", "")).strip().lower() == "5_sem"
+            return {"matches": [{"name": "5_sem", "path": "R:/5_sem", "is_dir": True}]}
+        return await original_dispatch(tool_name, payload)
+
+    registry.dispatch = fake_dispatch  # type: ignore[method-assign]
+    state = {
+        "active_window": {"title": "Save As", "process_name": "explorer"},
+        "screen_text": "Save As New Volume R 6_semester 5_sem File name",
+        "target_candidates": [
+            {"label": "5_sem", "selected": False},
+            {"label": "6_semester", "selected": True},
+        ],
+    }
+
+    prepared = await controller._prepare_action(
+        goal="save the file in the 5_sem folder in r drive",
+        action={"type": "click", "target_label": "5_sem folder in R drive", "target_kind": "folder", "confidence": 0.92},
+        state=state,
+        session_key="telegram:1",
+        user_id=app_config.users.default_user_id,
+    )
+
+    assert prepared["execution_mode"] == "dialog_open_known_path"
+    assert prepared["resolved_path"] == "R:/5_sem"
+    result = await controller._execute_action(
+        action=prepared,
+        state=state,
+        session_key="telegram:1",
+        user_id=app_config.users.default_user_id,
+        connection_id="conn-dialog",
+        channel_name="telegram",
+    )
+
+    hotkey_calls = [payload for name, payload in registry.calls if name == "desktop_keyboard_hotkey"]
+    type_calls = [payload for name, payload in registry.calls if name == "desktop_keyboard_type"]
+    assert result["execution_mode"] == "dialog_open_known_path"
+    assert [str(call["hotkey"]) for call in hotkey_calls[-2:]] == ["ctrl+l", "enter"]
+    assert type_calls[-1]["text"] == r"R:\5_sem"
+
+
+def test_visual_controller_verifies_dialog_path_navigation(app_config) -> None:
+    from assistant.desktop_coworker.visual_controller import DesktopCoworkerVisualController
+
+    controller = DesktopCoworkerVisualController(app_config, CoworkerToolRegistry())
+
+    verification = controller._verify_action(
+        action={"type": "click", "target_label": "5_sem", "target_kind": "folder", "expected_text_after": "5_sem"},
+        before={
+            "screen_text": "Save As R 6_semester File name",
+            "active_window": {"title": "Save As", "process_name": "explorer"},
+        },
+        after={
+            "screen_text": "Save As R 5_sem File name",
+            "active_window": {"title": "Save As", "process_name": "explorer"},
+        },
+        tool_result={"status": "completed", "execution_mode": "dialog_open_known_path", "resolved_path": "R:/5_sem"},
     )
 
     assert verification["ok"] is True

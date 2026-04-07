@@ -2054,6 +2054,25 @@ class GatewayRouter:
         if gmail_shortcut is not None:
             return gmail_shortcut
 
+        original_lowered = display_message.lower().strip()
+        host_shortcut = await self._handle_host_shortcut(
+            request_id,
+            session_key,
+            display_message,
+            original_lowered,
+            metadata,
+        )
+        if host_shortcut is None and original_lowered != lowered:
+            host_shortcut = await self._handle_host_shortcut(
+                request_id,
+                session_key,
+                display_message,
+                lowered,
+                metadata,
+            )
+        if host_shortcut is not None:
+            return host_shortcut
+
         desktop_vision_shortcut = await self._handle_desktop_vision_shortcut(
             request_id,
             session_key,
@@ -2113,10 +2132,6 @@ class GatewayRouter:
         )
         if desktop_automation_shortcut is not None:
             return desktop_automation_shortcut
-
-        host_shortcut = await self._handle_host_shortcut(request_id, session_key, display_message, lowered, metadata)
-        if host_shortcut is not None:
-            return host_shortcut
 
         if self._looks_like_repo_count_request(lowered):
             try:
@@ -3786,6 +3801,8 @@ class GatewayRouter:
     async def _parse_desktop_coworker_request(self, session_key: str, original_message: str, lowered: str) -> dict[str, Any] | None:
         normalized = re.sub(r"\s+", " ", lowered).strip()
         if self._looks_like_gmail_request(normalized):
+            return None
+        if self._has_host_tools() and self._looks_like_host_information_request(original_message, normalized):
             return None
         if hasattr(self.coworker_service, "analyze_request"):
             analysis = await self.coworker_service.analyze_request(session_key=session_key, request_text=original_message.strip())
@@ -5661,6 +5678,19 @@ class GatewayRouter:
         has_tool = getattr(self.tool_registry, "has", None)
         return callable(has_tool) and all(
             has_tool(name) for name in ("list_host_dir", "search_host_files", "read_host_file", "write_host_file", "exec_shell")
+        )
+
+    def _looks_like_host_information_request(self, original_message: str, lowered: str) -> bool:
+        explicit_path = self._extract_explicit_host_path(original_message)
+        folder_name = self._match_known_host_folder(lowered)
+        browse_term = self._extract_host_browse_folder_term(lowered)
+        explicit_root = self._extract_host_search_root(lowered)
+        return bool(
+            self._looks_like_host_file_read_request(lowered)
+            or (explicit_path is not None and self._looks_like_list_folder_request(lowered))
+            or (folder_name and self._looks_like_list_folder_request(lowered))
+            or (browse_term is not None)
+            or (explicit_root is not None and self._looks_like_list_folder_request(lowered))
         )
 
     def _looks_like_list_folder_request(self, lowered: str) -> bool:

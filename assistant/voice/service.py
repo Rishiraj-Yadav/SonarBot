@@ -25,6 +25,9 @@ class GeminiVoiceService:
 
     _transcription_fallback_models = ("gemini-2.5-flash", "gemini-2.0-flash")
     _tts_fallback_models = ("gemini-2.5-flash-preview-tts",)
+    _legacy_tts_aliases = {
+        "gemini-2.5-flash-tts": "gemini-2.5-flash-preview-tts",
+    }
     _supported_mime_types = {
         "audio/webm": ".webm",
         "audio/ogg": ".ogg",
@@ -219,7 +222,8 @@ class GeminiVoiceService:
         return self._unique_models([configured, *self._transcription_fallback_models])
 
     def _tts_candidate_models(self) -> list[str]:
-        configured = str(getattr(self.voice_config, "tts_model", "gemini-2.5-flash-tts")).strip()
+        configured = str(getattr(self.voice_config, "tts_model", "gemini-2.5-flash-preview-tts")).strip()
+        configured = self._legacy_tts_aliases.get(configured, configured)
         return self._unique_models([configured, *self._tts_fallback_models])
 
     def _unique_models(self, models: list[str]) -> list[str]:

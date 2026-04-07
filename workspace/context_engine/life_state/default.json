@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-04T13:57:57.436033+00:00",
+  "generated_at": "2026-04-07T18:39:04.571570+00:00",
   "user_id": "default",
   "memory": {
     "long_term": "# Long-Term Memory",
@@ -40,27 +40,27 @@
       "messages": [
         {
           "role": "user",
-          "content": "belira."
+          "content": "Open notepad and write hello world."
         },
         {
           "role": "assistant",
-          "content": "I'm not familiar with the word \"belira.\" Could you please clarify what you mean? Perhaps it was a typo?"
+          "content": "Coworker task 36a6d8e9f973 Status: failed Goal: Open Notepad and type 'hello world' Progress: 0 / 2 step(s) Transcript: - Step 1 (apps_open): Open Notepad: Active window 'sonarbot webchat - google chrome chrome' did not…"
         },
         {
           "role": "user",
-          "content": "yellow sea"
+          "content": "Okay."
         },
         {
           "role": "assistant",
-          "content": "Of course. The Yellow Sea is the northern part of the East China Sea, which is a marginal sea of the Pacific Ocean. It's located between mainland China and the Korean Peninsula. Here are a few key facts about it: * **Na…"
+          "content": "Is there anything else I can help you with?"
         },
         {
           "role": "user",
-          "content": "hi"
+          "content": "check my inbox"
         },
         {
           "role": "assistant",
-          "content": "Hello! How can I help you today?"
+          "content": "Coworker task c5185a3668b7 Status: failed Goal: Open Outlook and check the email inbox. Progress: 0 / 2 step(s) Transcript: - Step 1 (apps_open): Open Outlook: Active window 'chatwindow.tsx - new_sonar - visual studio c…"
         }
       ]
     },
@@ -69,27 +69,19 @@
       "messages": [
         {
           "role": "user",
-          "content": "send a mail to rishiraj.232963101@vcet.edu.in with content helllllllo worldddd"
+          "content": "What is the content of 5 sem foldee"
         },
         {
           "role": "assistant",
-          "content": "Sent your Gmail message to rishiraj.232963101@vcet.edu.in. Subject: (no subject) Message id: 19d4dd1b8f3ce626 Thread id: 19d4dd1b8f3ce626"
+          "content": "Coworker task 5e1affc9d8b7 Status: failed Goal: Read the content of the folder '5 sem foldee'. Progress: 0 / 2 step(s) Transcript: - Step 1 (apps_open): Open File Explorer: Active window 'config.toml - new_sonar - visua…"
         },
         {
           "role": "user",
-          "content": "what is the content of R drive"
+          "content": "What is the content of the 6 semester folder"
         },
         {
           "role": "assistant",
-          "content": "Coworker task b635203b7a71 Status: failed Goal: Open File Explorer and navigate to the R drive. Progress: 0 / 2 step(s) Transcript: - Step 1 (apps_open): Open File Explorer: Active window 'readme.md - new_sonar - visual…"
-        },
-        {
-          "role": "user",
-          "content": "what is the content of R drive"
-        },
-        {
-          "role": "assistant",
-          "content": "Coworker task a95d23ec64ee Status: failed Goal: Open File Explorer and navigate to the R drive. Progress: 0 / 2 step(s) Transcript: - Step 1 (apps_open): Open File Explorer: Active window 'task switching explorer' did n…"
+          "content": "The \"6_semester\" folder contains the following files and directories: **Files:** * 18.txt * Agent.md * AI expt 10.pdf * ashish\\_sonarbot.zip * backend.zip * directed-sun-486019-a1-41750ea9dc4d.json * hello.txt * MITVPU-…"
         }
       ]
     }
@@ -97,102 +89,102 @@
   "automation": {
     "notifications": [
       {
-        "title": "Got it. Reminder: go to the presentation.",
-        "body": "Got it. Reminder: go to the presentation. I've received this reminder from you several times now. Is this a recurring reminder you'd like me to handle differently, or is there something specific I can help you with rega…",
-        "source": "dynamic-cron:a419131bfe80",
-        "created_at": "2026-04-02T16:40:16.568641+00:00"
-      },
-      {
-        "title": "I am not able to set reminders. I can, however, save this to my daily memory for",
-        "body": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "source": "dynamic-cron:8d5cc893b588",
-        "created_at": "2026-04-02T16:40:08.729013+00:00"
-      },
-      {
-        "title": "This is a cron test message. Since it's a test and doesn't require any action fr",
-        "body": "This is a cron test message. Since it's a test and doesn't require any action from the user, I will reply with NO_REPLY. NO_REPLY",
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
         "source": "cron:0",
-        "created_at": "2026-04-02T16:40:03.618451+00:00"
+        "created_at": "2026-04-07T18:00:00.074731+00:00"
       },
       {
-        "title": "I am not able to set reminders. I can, however, save this to my daily memory for",
-        "body": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "source": "dynamic-cron:8d5cc893b588",
-        "created_at": "2026-04-02T16:38:04.731776+00:00"
+        "title": "Experiencing Trouble with Desktop Tasks?",
+        "body": "I've noticed that several recent requests to automate actions on your desktop (like opening Notepad, Outlook, and specific folders) have failed. There might be an issue with my connection or permissions. Would you like…",
+        "source": "context-engine",
+        "created_at": "2026-04-07T17:56:06.711772+00:00"
       },
       {
-        "title": "You have two reminders:",
-        "body": "You have two reminders: * Go to college * Go to VNPS",
-        "source": "heartbeat:standing-orders",
-        "created_at": "2026-04-02T16:36:26.024591+00:00"
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-04-07T17:00:00.102637+00:00"
       },
       {
-        "title": "I am not able to set reminders. I can, however, save this to my daily memory for",
-        "body": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "source": "dynamic-cron:8d5cc893b588",
-        "created_at": "2026-04-02T16:36:04.708775+00:00"
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-04-07T16:20:00.152799+00:00"
       },
       {
-        "title": "This is your reminder to go to the presentation. Do you need me to open any note",
-        "body": "This is your reminder to go to the presentation. Do you need me to open any notes, join a meeting, or do anything else to help you prepare?",
-        "source": "dynamic-cron:a419131bfe80",
-        "created_at": "2026-04-02T16:35:12.339197+00:00"
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-04-07T16:10:00.209469+00:00"
       },
       {
-        "title": "I am not able to set reminders. I can, however, save this to my daily memory for",
-        "body": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "source": "dynamic-cron:8d5cc893b588",
-        "created_at": "2026-04-02T16:34:04.569863+00:00"
+        "title": "Cron test message from SonarBot",
+        "body": "Cron test message from SonarBot",
+        "source": "cron:0",
+        "created_at": "2026-04-07T16:00:00.162580+00:00"
+      },
+      {
+        "title": "Internship Application Accepted",
+        "body": "Congratulations! An email from Unstop Events indicates your application for the Data Structures and Algorithms Internship has been accepted. You should review the email for next steps.",
+        "source": "context-engine",
+        "created_at": "2026-04-07T15:56:04.098085+00:00"
+      },
+      {
+        "title": "Security Alert: Failed Login to Kotak Banking App",
+        "body": "An email received today from Kotak Bank reports a failed attempt to access your 811 Mobile Banking App. If this wasn't you, you should review the email and secure your account immediately.",
+        "source": "context-engine",
+        "created_at": "2026-04-07T15:56:03.045475+00:00"
       }
     ],
     "runs": [
       {
-        "rule_name": "heartbeat:standing-orders",
-        "status": "running",
-        "result_text": "",
-        "created_at": "2026-04-02T16:41:26.715194+00:00"
-      },
-      {
-        "rule_name": "dynamic-cron:a419131bfe80",
+        "rule_name": "cron:0",
         "status": "completed",
-        "result_text": "Got it. Reminder: go to the presentation. I've received this reminder from you several times now. Is this a recurring reminder you'd like me to handle differently, or is there something specific I can help you with rega…",
-        "created_at": "2026-04-02T16:40:00.173906+00:00"
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-04-07T18:00:00.054950+00:00"
       },
       {
         "rule_name": "cron:0",
         "status": "completed",
-        "result_text": "This is a cron test message. Since it's a test and doesn't require any action from the user, I will reply with NO_REPLY. NO_REPLY",
-        "created_at": "2026-04-02T16:40:00.157771+00:00"
-      },
-      {
-        "rule_name": "dynamic-cron:8d5cc893b588",
-        "status": "completed",
-        "result_text": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "created_at": "2026-04-02T16:40:00.140373+00:00"
-      },
-      {
-        "rule_name": "dynamic-cron:8d5cc893b588",
-        "status": "completed",
-        "result_text": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "created_at": "2026-04-02T16:38:00.082724+00:00"
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-04-07T17:00:00.078424+00:00"
       },
       {
         "rule_name": "heartbeat:standing-orders",
         "status": "completed",
-        "result_text": "You have two reminders: * Go to college * Go to VNPS",
-        "created_at": "2026-04-02T16:36:18.305658+00:00"
+        "result_text": "",
+        "created_at": "2026-04-07T16:58:14.529110+00:00"
       },
       {
-        "rule_name": "dynamic-cron:8d5cc893b588",
+        "rule_name": "heartbeat:standing-orders",
         "status": "completed",
-        "result_text": "I am not able to set reminders. I can, however, save this to my daily memory for you. Would you like me to do that?",
-        "created_at": "2026-04-02T16:36:00.083429+00:00"
+        "result_text": "",
+        "created_at": "2026-04-07T16:21:35.510499+00:00"
       },
       {
-        "rule_name": "dynamic-cron:a419131bfe80",
+        "rule_name": "cron:0",
         "status": "completed",
-        "result_text": "This is your reminder to go to the presentation. Do you need me to open any notes, join a meeting, or do anything else to help you prepare?",
-        "created_at": "2026-04-02T16:35:00.085637+00:00"
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-04-07T16:20:00.099138+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-04-07T16:16:15.452297+00:00"
+      },
+      {
+        "rule_name": "heartbeat:standing-orders",
+        "status": "completed",
+        "result_text": "",
+        "created_at": "2026-04-07T16:11:01.670068+00:00"
+      },
+      {
+        "rule_name": "cron:0",
+        "status": "completed",
+        "result_text": "Cron test message from SonarBot",
+        "created_at": "2026-04-07T16:10:00.156686+00:00"
       }
     ]
   },
@@ -200,38 +192,38 @@
     "connected": true,
     "gmail_threads": [
       {
-        "thread_id": "19d587d7892c8d90",
-        "subject": "IIT Ropar is hiring interns - Apply now!",
-        "from": "Jia from Unstop <noreply@dare2compete.news>",
-        "date": "Sat, 4 Apr 2026 12:35:10 +0000",
+        "thread_id": "19d6899cf4956c86",
+        "subject": "\"Am I the only one who used to think they were brother and sister? 😭\"",
+        "from": "Reddit <noreply@redditmail.com>",
+        "date": "Tue, 7 Apr 2026 15:40:02 +0000",
         "snippet": ""
       },
       {
-        "thread_id": "19d57ff029cf911f",
-        "subject": "Win an IPL Jersey! Introducing the Unstop Prediction League (UPL)!",
-        "from": "Team Unstop <noreply@unstop.news>",
-        "date": "Sat, 04 Apr 2026 15:47:03 +0530",
+        "thread_id": "19d67a005476babc",
+        "subject": "Why climb slowly when you can take the elevator?",
+        "from": "Kotak Mutual Fund <info@kotakmf.com>",
+        "date": "Tue, 07 Apr 2026 16:37:13 +0530",
         "snippet": ""
       },
       {
-        "thread_id": "19d57c6054a6c97d",
-        "subject": "[Oracle University Learning Community] Oracle University Learning Community – Weekly Digest",
-        "from": "\"Oracle University Learning Community (NO-REPLY)\" <ou.oracle@vanillaforums.email>",
-        "date": "Mon, 30 Mar 2026 13:00:00 +0000 (UTC)",
+        "thread_id": "19d6796d92942fab",
+        "subject": "1 new job(s) at Microsoft for: Internship jobs in Mumbai,  MH,  India - Distance (Within 160 km) Inclu...",
+        "from": "Microsoft Careers <donotreply@email.careers.microsoft.com>",
+        "date": "Tue, 7 Apr 2026 10:57:11 +0000",
         "snippet": ""
       },
       {
-        "thread_id": "19d57c2495e01a42",
-        "subject": "March Replit Product Updates",
-        "from": "Raouf Chebri <raouf.chebri@mail.replit.com>",
-        "date": "Sat, 04 Apr 2026 09:10:41 +0000",
+        "thread_id": "19d674bf3ce3a3bb",
+        "subject": "Failed Attempt to access Kotak 811 Mobile Banking App",
+        "from": "Kotak811 <no-reply@kotak.com>",
+        "date": "Tue, 07 Apr 2026 15:05:23 +0530",
         "snippet": ""
       },
       {
-        "thread_id": "19d5798357506095",
-        "subject": "Rishiraj, your Google AI Pro plan now has more storage",
-        "from": "Google One <googleone-noreply@google.com>",
-        "date": "Sat, 04 Apr 2026 01:24:45 -0700",
+        "thread_id": "19d66d130fe217b3",
+        "subject": "Your application has been accepted for the role of Data Structures and Algorithms Internship",
+        "from": "Unstop Events <updates@unstop.email>",
+        "date": "Tue, 7 Apr 2026 07:21:17 +0000",
         "snippet": ""
       }
     ],

@@ -466,7 +466,8 @@ class DesktopCoworkerVisualReasoner:
         }
 
     async def _request_text_completion(self, *, payload: dict[str, Any], model_names: list[str]) -> str:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        timeout_seconds = float(getattr(self.config.desktop_coworker, "reasoning_timeout_seconds", 30.0) or 30.0)
+        async with httpx.AsyncClient(timeout=max(5.0, timeout_seconds)) as client:
             data: dict[str, Any] | None = None
             last_error: Exception | None = None
             for index, model_name in enumerate(model_names):
@@ -495,19 +496,16 @@ class DesktopCoworkerVisualReasoner:
         return "\n".join(chunks).strip()
 
     def _candidate_models(self) -> list[str]:
-        candidates = [str(self.config.agent.model), "gemini-2.0-flash"]
-        unique: list[str] = []
-        seen: set[str] = set()
-        for item in candidates:
-            normalized = str(item).strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            unique.append(normalized)
-        return unique
+        preferred = str(getattr(self.config.desktop_coworker, "reasoning_model", "") or "gemini-2.0-flash").strip()
+        return self._unique_model_candidates(preferred, "gemini-2.0-flash", str(self.config.agent.model))
 
     def _classification_models(self) -> list[str]:
-        candidates = ["gemini-2.0-flash", str(self.config.agent.model)]
+        preferred = str(getattr(self.config.desktop_coworker, "reasoning_model", "") or "gemini-2.0-flash").strip()
+        candidates = [preferred, "gemini-2.0-flash", str(self.config.agent.model)]
+        return self._unique_model_candidates(*candidates)
+
+    @staticmethod
+    def _unique_model_candidates(*candidates: str) -> list[str]:
         unique: list[str] = []
         seen: set[str] = set()
         for item in candidates:

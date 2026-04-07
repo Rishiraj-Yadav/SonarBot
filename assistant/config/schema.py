@@ -193,6 +193,8 @@ class DesktopCoworkerConfig(BaseModel):
     ask_before_submission: bool = True
     screenshot_after_each_step: bool = True
     ocr_after_each_step: bool = False
+    reasoning_model: str = "gemini-2.0-flash"
+    reasoning_timeout_seconds: float = 30.0
     store_transcripts: bool = True
     visual_tasks_enabled: bool = True
     max_visual_steps: int = 8
@@ -237,7 +239,7 @@ class ReportsConfig(BaseModel):
 class VoiceConfig(BaseModel):
     enabled: bool = True
     stt_model: str = "gemini-2.5-flash"
-    tts_model: str = "gemini-2.5-flash-tts"
+    tts_model: str = "gemini-2.5-flash-preview-tts"
     tts_voice_name: str = "Kore"
     webchat_enabled: bool = True
     telegram_enabled: bool = True

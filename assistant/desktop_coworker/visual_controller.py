@@ -374,6 +374,7 @@ class DesktopCoworkerVisualController:
         prepared = dict(action)
         action_type = str(prepared.get("type", "")).strip().lower()
         normalized_goal = normalize_target_label(goal)
+        surface = detect_surface(state)
         if action_type == "type_text":
             text_value = str(prepared.get("text", "")).strip()
             if text_value:
@@ -405,13 +406,13 @@ class DesktopCoworkerVisualController:
             return prepared
         if resolved_kind == "file" and not opener_alias:
             return prepared
-        prepared["execution_mode"] = "open_known_path"
+        prepared["execution_mode"] = "dialog_open_known_path" if surface == "explorer_dialog" and resolved_kind == "folder" else "open_known_path"
         prepared["resolved_path"] = resolved_path
         prepared["resolved_kind"] = resolved_kind
         prepared["opener_alias"] = opener_alias or ("explorer" if resolved_kind == "folder" else "")
         prepared["target_kind"] = resolved_kind
         prepared.update({key: value for key, value in verification_hint_for_path(resolved_path, opener_alias=opener_alias).items() if value})
-        prepared["goal_completed_if_verified"] = True
+        prepared["goal_completed_if_verified"] = not (surface == "explorer_dialog" and resolved_kind == "folder")
         human_label = Path(resolved_path).name or str(prepared.get("target_label", "")).strip()
         prepared["reason"] = str(prepared.get("reason") or f"Open the visible target '{human_label}' using a deterministic path.")
         if re.search(r"\bclick(?:\s+on)?\b", goal.lower()) and not re.search(r"\bdouble click\b|\bdouble-click\b", goal.lower()):
@@ -450,6 +451,58 @@ class DesktopCoworkerVisualController:
                 "execution_mode": execution_mode,
                 "resolved_path": resolved_path,
                 "opener_alias": opener_alias,
+            }
+        if execution_mode == "dialog_open_known_path":
+            resolved_path = str(action.get("resolved_path", "")).strip()
+            if not resolved_path:
+                raise RuntimeError("The visual coworker could not resolve a concrete folder path for the visible dialog target.")
+            if not self.tool_registry.has("desktop_keyboard_hotkey") or not self.tool_registry.has("desktop_keyboard_type"):
+                raise RuntimeError("Dialog path navigation requires desktop hotkey and typing tools.")
+            windows_path = resolved_path.replace("/", "\\")
+            await self.tool_registry.dispatch(
+                "desktop_keyboard_hotkey",
+                {
+                    "hotkey": "ctrl+l",
+                    "expected_window_title": expected_window_title,
+                    "expected_process_name": expected_process_name,
+                    "session_key": session_key,
+                    "session_id": str(session_key),
+                    "user_id": user_id,
+                    "connection_id": connection_id,
+                    "channel_name": channel_name,
+                },
+            )
+            await self.tool_registry.dispatch(
+                "desktop_keyboard_type",
+                {
+                    "text": windows_path,
+                    "expected_window_title": expected_window_title,
+                    "expected_process_name": expected_process_name,
+                    "session_key": session_key,
+                    "session_id": str(session_key),
+                    "user_id": user_id,
+                    "connection_id": connection_id,
+                    "channel_name": channel_name,
+                },
+            )
+            await self.tool_registry.dispatch(
+                "desktop_keyboard_hotkey",
+                {
+                    "hotkey": "enter",
+                    "expected_window_title": expected_window_title,
+                    "expected_process_name": expected_process_name,
+                    "session_key": session_key,
+                    "session_id": str(session_key),
+                    "user_id": user_id,
+                    "connection_id": connection_id,
+                    "channel_name": channel_name,
+                },
+            )
+            return {
+                "status": "completed",
+                "execution_mode": execution_mode,
+                "resolved_path": resolved_path,
+                "typed_path": windows_path,
             }
         if action_type in {"click", "double_click"}:
             label = normalize_target_label(str(action.get("target_label", "")))
@@ -853,7 +906,9 @@ class DesktopCoworkerVisualController:
         label = str(target_label).strip().strip("\"'")
         if not label:
             return None
-        normalized = normalize_target_label(label)
+        queries = self._path_query_variants(label)
+        normalized_queries = [self._compact_path_query(item) for item in queries]
+        explicit_root = self._path_search_root(label)
         configured = getattr(self.config.system_access, "path_rules", [])
         for rule in configured:
             raw_path = getattr(rule, "path", None)
@@ -862,7 +917,8 @@ class DesktopCoworkerVisualController:
             if raw_path is None:
                 continue
             candidate = Path(str(raw_path)).expanduser().resolve()
-            if normalize_target_label(candidate.name) == normalized:
+            candidate_compact = self._compact_path_query(candidate.name)
+            if candidate_compact and candidate_compact in normalized_queries:
                 return {"path": str(candidate).replace("\\", "/"), "kind": "folder", "opener_alias": "explorer"}
 
         common_folders = {
@@ -873,49 +929,92 @@ class DesktopCoworkerVisualController:
             "music": "~/Music",
             "videos": "~/Videos",
         }
-        if normalized in common_folders:
-            return {
-                "path": str(Path(common_folders[normalized]).expanduser().resolve()).replace("\\", "/"),
-                "kind": "folder",
-                "opener_alias": "explorer",
-            }
+        for query in queries:
+            normalized = normalize_target_label(query)
+            if normalized in common_folders:
+                return {
+                    "path": str(Path(common_folders[normalized]).expanduser().resolve()).replace("\\", "/"),
+                    "kind": "folder",
+                    "opener_alias": "explorer",
+                }
 
         if not self.tool_registry.has("search_host_files"):
             return None
-        try:
-            result = await self.tool_registry.dispatch(
-                "search_host_files",
-                {
-                    "root": "@allowed",
-                    "name_query": label,
-                    "directories_only": bool(target_kind == "folder"),
-                    "files_only": bool(target_kind == "file"),
-                    "limit": 5,
-                    "session_id": str(session_key or "coworker-visual"),
-                    "user_id": str(user_id),
-                },
-            )
-        except Exception:
-            return None
-        matches = [
-            item
-            for item in result.get("matches", [])
-            if isinstance(item, dict)
-            and (
-                target_kind not in {"file", "folder"}
-                or (target_kind == "folder" and bool(item.get("is_dir")))
-                or (target_kind == "file" and not bool(item.get("is_dir")))
-            )
-        ]
-        exact = [
-            item
-            for item in matches
-            if normalize_target_label(str(item.get("name", ""))) == normalized
-        ]
-        if len(exact) == 1:
-            return self._resolved_target_for_path(str(exact[0].get("path", "")).replace("\\", "/"), state=state)
-        if len(matches) == 1:
-            return self._resolved_target_for_path(str(matches[0].get("path", "")).replace("\\", "/"), state=state)
+        for query in queries:
+            try:
+                result = await self.tool_registry.dispatch(
+                    "search_host_files",
+                    {
+                        "root": explicit_root or "@allowed",
+                        "name_query": query,
+                        "directories_only": bool(target_kind == "folder"),
+                        "files_only": bool(target_kind == "file"),
+                        "limit": 8,
+                        "session_id": str(session_key or "coworker-visual"),
+                        "user_id": str(user_id),
+                    },
+                )
+            except Exception:
+                continue
+            matches = [
+                item
+                for item in result.get("matches", [])
+                if isinstance(item, dict)
+                and (
+                    target_kind not in {"file", "folder"}
+                    or (target_kind == "folder" and bool(item.get("is_dir")))
+                    or (target_kind == "file" and not bool(item.get("is_dir")))
+                )
+            ]
+            query_compact = self._compact_path_query(query)
+            exact = [
+                item
+                for item in matches
+                if self._compact_path_query(str(item.get("name", ""))) == query_compact
+            ]
+            if len(exact) == 1:
+                return self._resolved_target_for_path(str(exact[0].get("path", "")).replace("\\", "/"), state=state)
+            if len(matches) == 1:
+                return self._resolved_target_for_path(str(matches[0].get("path", "")).replace("\\", "/"), state=state)
+        return None
+
+    def _path_query_variants(self, label: str) -> list[str]:
+        raw = re.sub(r"\s+", " ", str(label).strip().strip("\"'"))
+        if not raw:
+            return []
+        variants: list[str] = []
+
+        def add(candidate: str) -> None:
+            cleaned = re.sub(r"\s+", " ", candidate.strip().strip("\"'"))
+            if cleaned and cleaned not in variants:
+                variants.append(cleaned)
+
+        add(raw)
+        cleaned = re.sub(
+            r"\b(?:folder|directory|dir|path|drive|dive|in r drive|on r drive|inside r drive|in c drive|on c drive|inside c drive)\b",
+            " ",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\b(?:in|inside|on|to|into)\s+(?:the\s+)?(?:r|c)\s*:?\s*(?:drive|dive)\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(?:in|inside|on|to|into)\s+(?:the\s+)?(?:r|c):\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:the\s+)?", "", cleaned, flags=re.IGNORECASE)
+        add(cleaned)
+        compact_semester = re.sub(r"\bsemester\b", "sem", cleaned, flags=re.IGNORECASE)
+        add(compact_semester)
+        return variants
+
+    def _compact_path_query(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+    def _path_search_root(self, label: str) -> str | None:
+        lowered = str(label).lower()
+        drive_match = re.search(r"\b([a-z])\s*:?\s*(?:drive|dive)\b", lowered)
+        if drive_match:
+            return f"{drive_match.group(1).upper()}:/"
+        explicit_path = re.search(r"\b([a-z]):[\\/]", str(label))
+        if explicit_path:
+            return f"{explicit_path.group(1).upper()}:/"
         return None
 
     def _resolved_target_for_path(self, path: str, *, state: dict[str, Any]) -> dict[str, Any]:

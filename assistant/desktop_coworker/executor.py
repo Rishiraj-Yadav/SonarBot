@@ -78,7 +78,7 @@ class DesktopCoworkerExecutor:
                 connection_id=connection_id,
                 channel_name=channel_name,
             )
-            include_ocr = bool(getattr(self.config.desktop_coworker, "ocr_after_each_step", False))
+            include_ocr = self._should_collect_post_ocr(step)
             include_capture = bool(getattr(self.config.desktop_coworker, "screenshot_after_each_step", True))
             post_state = await self.state.capture(
                 include_capture=include_capture,
@@ -108,6 +108,27 @@ class DesktopCoworkerExecutor:
 
         assert last_result is not None
         return {**last_result, "latest_state": latest_state}
+
+    def _should_collect_post_ocr(self, step: dict[str, Any]) -> bool:
+        if not bool(getattr(self.config.desktop_coworker, "ocr_after_each_step", False)):
+            return False
+        payload = dict(step.get("payload", {}))
+        verification = dict(step.get("verification", {}))
+        if bool(payload.get("force_post_ocr")) or bool(verification.get("requires_screen_text")):
+            return True
+        kind = str(verification.get("kind", "tool_status")).strip().lower()
+        if kind in {
+            "tool_status",
+            "active_window_contains",
+            "document_contains",
+            "clipboard_nonempty",
+            "summary_has_keys",
+            "bluetooth_state",
+            "volume_state",
+            "brightness_state",
+        }:
+            return False
+        return True
 
     async def _dispatch_step(
         self,

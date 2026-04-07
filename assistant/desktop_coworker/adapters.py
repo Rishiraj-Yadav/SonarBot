@@ -72,6 +72,7 @@ def keyboard_fallback_recipe(
     target_kind = str(action.get("target_kind", "")).strip().lower()
     surface = detect_surface(before)
     normalized_label = normalize_target_label(target_label)
+    target_is_selected = _candidate_selected(after, target_label) or _candidate_selected(before, target_label)
     if surface == "explorer_dialog":
         if normalized_label in {"save", "open"}:
             return {
@@ -102,6 +103,8 @@ def keyboard_fallback_recipe(
                 "goal_completed_if_verified": False,
             }
     if surface == "explorer" and normalized_label in {"desktop", "downloads", "documents", "pictures", "music", "videos"}:
+        if not target_is_selected:
+            return None
         return {
             "type": "press_hotkey",
             "hotkey": "enter",
@@ -111,6 +114,8 @@ def keyboard_fallback_recipe(
             "goal_completed_if_verified": True,
         }
     if surface == "explorer" and target_kind in {"row", "tree"} and target_label:
+        if not target_is_selected:
+            return None
         return {
             "type": "press_hotkey",
             "hotkey": "enter",
@@ -277,6 +282,20 @@ def verify_surface_transition(
                 "kind": "explorer_path",
                 "message": f"The Explorer surface did not visibly navigate to '{action.get('target_label', '')}'.",
             }
+    if surface == "explorer_dialog":
+        execution_mode = str(tool_result.get("execution_mode", "")).strip().lower()
+        if execution_mode == "dialog_open_known_path":
+            resolved_path = str(tool_result.get("resolved_path", "")).replace("\\", "/").strip()
+            resolved_name = normalize_target_label(Path(resolved_path).name if resolved_path else "")
+            if resolved_name and resolved_name in after_text and after_text != before_text:
+                return {"ok": True, "kind": "dialog_path", "message": ""}
+            if expected_text_after and expected_text_after in after_text and after_text != before_text:
+                return {"ok": True, "kind": "dialog_path", "message": ""}
+            return {
+                "ok": False,
+                "kind": "dialog_path",
+                "message": f"The Save/Open dialog did not visibly navigate to '{action.get('target_label', '')}'.",
+            }
     if surface in {"excel", "word"}:
         if expected_window_title and expected_window_title in after_title and after_title != before_title:
             return {"ok": True, "kind": f"{surface}_window", "message": ""}
@@ -309,3 +328,20 @@ def verify_surface_transition(
         if expected_window_title and expected_window_title in after_title and after_title != before_title:
             return {"ok": True, "kind": "dialog_state", "message": ""}
     return None
+
+
+def _candidate_selected(state: dict[str, Any], target_label: str) -> bool:
+    normalized_target = normalize_target_label(target_label)
+    if not normalized_target:
+        return False
+    candidates = state.get("target_candidates", [])
+    if not isinstance(candidates, list):
+        return False
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        normalized = normalize_target_label(str(candidate.get("normalized_label") or candidate.get("label") or ""))
+        if normalized != normalized_target:
+            continue
+        return bool(candidate.get("selected", False))
+    return False

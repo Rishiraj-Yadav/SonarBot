@@ -1691,6 +1691,85 @@ async def test_router_host_shortcut_lists_desktop_for_content_phrase(app_config)
 
 
 @pytest.mark.asyncio
+async def test_router_host_shortcut_wins_before_coworker_for_folder_contents_after_canonical_rewrite(app_config) -> None:
+    class FolderHijackCoworkerService(DummyCoworkerService):
+        async def analyze_request(self, *, session_key: str, request_text: str) -> dict[str, object]:  # noqa: ARG002
+            lowered = request_text.lower()
+            if "folder" in lowered or "explorer" in lowered:
+                return {
+                    "desktop_ui_task": True,
+                    "task_kind": "visual",
+                    "summary": request_text.strip(),
+                    "normalized_request": request_text.strip(),
+                    "requires_visual_context": False,
+                    "route_kind": "visual",
+                }
+            return await super().analyze_request(session_key=session_key, request_text=request_text)
+
+    app_config.desktop_coworker.enabled = True
+    app_config.system_access.path_rules = [
+        {
+            "path": "C:/Users/Ritesh/OneDrive/Desktop",
+            "read": "auto_allow",
+            "write": "ask_once",
+            "overwrite": "always_ask",
+            "delete": "always_ask",
+            "execute": "ask_once",
+        }
+    ]
+    tool_registry = DummyToolRegistry(host_tools_enabled=True)
+    coworker_service = FolderHijackCoworkerService()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=tool_registry,
+        automation_engine=DummyAutomationEngine(),
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+        coworker_service=coworker_service,
+    )
+
+    async def fake_rewrite(_message: str) -> str:
+        return "open file explorer to the desktop folder"
+
+    async def fake_classify(_message: str) -> dict[str, object]:
+        return {
+            "intent": "open_app",
+            "target": "explorer",
+            "action": "open",
+            "time_expr": "",
+            "corrected": "open file explorer to the desktop folder",
+            "confidence": 0.95,
+            "raw_slots": {"folder": "desktop"},
+        }
+
+    router._nlp.rewrite_canonical = fake_rewrite
+    router._nlp.classify = fake_classify
+
+    response = await router.route_user_message(
+        connection_id="conn-host-1c-coworker",
+        request_id="req-host-1c-coworker",
+        session_key="telegram:123",
+        message="what is the content of the desktop folder",
+        metadata={"trace_id": "trace-host-1c-coworker", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert "Desktop" in response.payload["command_response"]
+    assert tool_registry.calls[0][0] == "list_host_dir"
+    assert tool_registry.calls[0][1]["path"] == "C:/Users/Ritesh/OneDrive/Desktop"
+    assert coworker_service.ran == []
+
+
+@pytest.mark.asyncio
 async def test_router_host_shortcut_lists_downloads_for_typo_content_phrase(app_config) -> None:
     tool_registry = DummyToolRegistry(host_tools_enabled=True)
     router = GatewayRouter(

@@ -363,6 +363,41 @@
       "sent_at": "2026-04-04T13:58:16.514937+00:00",
       "confidence": 0.95,
       "urgency": 0.6
+    },
+    {
+      "fingerprint": "failed-coworker-task-R-drive-2026-04-04",
+      "title": "Follow-up on Accessing 'R Drive'",
+      "sent_at": "2026-04-04T14:44:05.183797+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
+    },
+    {
+      "fingerprint": "gmail-thread-19d674bf3ce3a3bb-failed-login",
+      "title": "Security Alert: Failed Login to Kotak Banking App",
+      "sent_at": "2026-04-07T15:56:04.097869+00:00",
+      "confidence": 0.95,
+      "urgency": 0.9
+    },
+    {
+      "fingerprint": "gmail-thread-19d66d130fe217b3-application-accepted",
+      "title": "Internship Application Accepted",
+      "sent_at": "2026-04-07T15:56:04.735983+00:00",
+      "confidence": 0.99,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "agent-task-failure-pattern-20260407",
+      "title": "Experiencing Trouble with Desktop Tasks?",
+      "sent_at": "2026-04-07T17:56:07.508832+00:00",
+      "confidence": 0.95,
+      "urgency": 0.8
+    },
+    {
+      "fingerprint": "gmail-thread-19d6796d92942fab-career-opportunity",
+      "title": "New Microsoft Internship Opportunity",
+      "sent_at": "2026-04-07T18:39:31.861867+00:00",
+      "confidence": 0.95,
+      "urgency": 0.6
     }
   ]
 }

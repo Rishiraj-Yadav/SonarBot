@@ -27,6 +27,14 @@ class FakeAgentLoop:
         return True
 
 
+class FailingAgentLoop:
+    async def enqueue(self, request) -> None:  # noqa: ARG002
+        raise AssertionError("Direct reminder notifications should not enqueue the agent loop.")
+
+    def is_idle(self) -> bool:
+        return True
+
+
 class FakeConnectionManager:
     def __init__(self) -> None:
         self.user_events: list[tuple[str, str, dict[str, object], str | None]] = []
@@ -282,6 +290,37 @@ async def test_automation_engine_does_not_hijack_cron_message_with_generic_rule(
     assert result["status"] == "completed"
     runs = await store.list_runs(app_config.users.default_user_id)
     assert runs[0]["rule_name"] == "cron:0"
+
+
+@pytest.mark.asyncio
+async def test_automation_engine_sends_plain_reminder_without_agent_roundtrip(app_config) -> None:
+    app_config.telegram.allowed_user_ids = [8616242206]
+    app_config.users.primary_channel = "telegram"
+    app_config.users.fallback_channels = ["webchat"]
+    session_manager = SessionManager(app_config)
+    user_profiles = UserProfileStore(app_config)
+    await user_profiles.initialize()
+    store = AutomationStore(app_config)
+    await store.initialize()
+    connection_manager = FakeConnectionManager()
+    dispatcher = NotificationDispatcher(app_config, store, user_profiles, connection_manager)
+    engine = AutomationEngine(
+        app_config,
+        FailingAgentLoop(),
+        session_manager,
+        StandingOrdersManager(app_config.agent.workspace_dir),
+        user_profiles,
+        store,
+        dispatcher,
+    )
+
+    result = await engine.handle_cron_job("dynamic-cron:reminder", "Reminder: go to VNPS")
+
+    assert result["status"] == "completed"
+    notifications = await store.list_notifications(app_config.users.default_user_id)
+    assert len(notifications) == 1
+    assert notifications[0]["body"] == "Reminder: go to VNPS"
+    assert connection_manager.channel_messages == [("telegram", "8616242206", "Reminder: go to VNPS")]
 
 
 @pytest.mark.asyncio

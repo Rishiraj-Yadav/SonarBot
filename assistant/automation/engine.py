@@ -837,6 +837,43 @@ class AutomationEngine:
         await self.store.create_run(run)
         await self.store.update_event_status(event.event_id, "running")
 
+        direct_notification_text = self._direct_notification_text(
+            rule=rule,
+            user_prompt=user_prompt,
+            payload=event.payload,
+        )
+        if direct_notification_text is not None:
+            if not direct_notification_text or direct_notification_text.upper() == "NO_REPLY":
+                await self.store.finish_run(run.run_id, status="completed", result_text=direct_notification_text)
+                await self.store.update_event_status(event.event_id, "completed")
+                return {"status": "completed", "rule_name": rule.name, "notified": False}
+            notification = Notification(
+                notification_id=uuid4().hex,
+                user_id=event.user_id,
+                title=self._notification_title(rule, direct_notification_text),
+                body=direct_notification_text,
+                source=rule.name,
+                severity=rule.severity or self.config.automation.notifications.default_severity,
+                delivery_mode=rule.delivery_policy,
+                status="queued",
+                target_channels=[],
+                metadata={
+                    "rule_name": rule.name,
+                    "event_id": event.event_id,
+                    "delivery_policy": rule.delivery_policy,
+                    "delivery_mode": "direct",
+                },
+            )
+            delivered = await self.dispatcher.dispatch(notification)
+            await self.store.finish_run(
+                run.run_id,
+                status="completed",
+                result_text=direct_notification_text,
+                notification_id=delivered.notification_id,
+            )
+            await self.store.update_event_status(event.event_id, "completed")
+            return {"status": "completed", "notification_id": delivered.notification_id, "rule_name": rule.name}
+
         result_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         request = AgentRequest(
             connection_id="",
@@ -1168,6 +1205,68 @@ class AutomationEngine:
         if first_line:
             return first_line[:80]
         return f"Automation update: {rule.name}"
+
+    def _direct_notification_text(
+        self,
+        *,
+        rule: AutomationRule,
+        user_prompt: str,
+        payload: dict[str, Any],
+    ) -> str | None:
+        if str(rule.action_policy).strip().lower() != "notify_first":
+            return None
+        candidate = str(payload.get("message", "") or user_prompt).strip()
+        if not candidate:
+            return None
+        trigger = str(rule.trigger).strip().lower()
+        if trigger == "one-time":
+            return candidate
+        if trigger != "cron":
+            return None
+        normalized = re.sub(r"\s+", " ", candidate).strip().lower()
+        if normalized == "cron test message from sonarbot":
+            return candidate
+        if normalized.startswith("reminder:") or normalized.startswith("this is your reminder"):
+            return candidate
+        if normalized.startswith("dont forget to ") or normalized.startswith("don't forget to "):
+            return candidate
+        if normalized.startswith("time to ") or normalized.startswith("it is time to ") or normalized.startswith("it's time to "):
+            return candidate
+        if "?" in candidate:
+            return None
+        if any(
+            keyword in normalized
+            for keyword in (
+                "briefing",
+                "digest",
+                "summary",
+                "summarize",
+                "report",
+                "analyze",
+                "analysis",
+                "research",
+                "review",
+                "scan",
+                "search",
+                "look up",
+                "check ",
+                "monitor",
+                "gmail",
+                "email",
+                "calendar",
+                "github",
+                "browser",
+                "open ",
+                "send ",
+                "create ",
+                "generate ",
+            )
+        ):
+            return None
+        words = re.findall(r"[a-z0-9']+", normalized)
+        if 0 < len(words) <= 14:
+            return candidate
+        return None
 
     def _cron_rule(self, rule_name: str, message: str) -> AutomationRule:
         return AutomationRule(

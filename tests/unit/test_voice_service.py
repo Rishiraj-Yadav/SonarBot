@@ -100,3 +100,10 @@ async def test_synthesize_speech_returns_wav_bytes(app_config, monkeypatch) -> N
 
     assert wav_bytes[:4] == b"RIFF"
     assert b"WAVE" in wav_bytes[:16]
+
+
+def test_tts_candidate_models_normalize_legacy_model_name(app_config) -> None:
+    app_config.voice.tts_model = "gemini-2.5-flash-tts"
+    service = GeminiVoiceService(app_config)
+
+    assert service._tts_candidate_models() == ["gemini-2.5-flash-preview-tts"]
