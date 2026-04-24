@@ -220,6 +220,8 @@ class DesktopCoworkerExecutor:
                 },
             )
             return {"status": "completed", "content": str(result.get("content", "")).strip()}
+        if step_type == "host_file_move":
+            return await self._dispatch_host_file_move(step=step, session_key=session_key, user_id=user_id, connection_id=connection_id)
         raise RuntimeError(f"Unsupported coworker step '{step_type}'.")
 
     def _verify_step(
@@ -369,4 +371,102 @@ class DesktopCoworkerExecutor:
             return f"{title}: Applied {tool_result.get('replacements', 0)} replacement(s)."
         if step_type == "llm_summarize_text":
             return f"{title}: Summary generated."
+        if step_type == "host_file_move":
+            moved = tool_result.get("moved_count", tool_result.get("count", 0))
+            return f"{title}: {moved} file(s) processed successfully."
         return f"{title}: completed."
+
+    async def _dispatch_host_file_move(
+        self,
+        *,
+        step: dict[str, Any],
+        session_key: str,
+        user_id: str,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        """Move or copy files from src to dst using host file tools directly.
+
+        Actual registered tools:
+          - list_host_dir  (params: path, limit)
+          - move_host_file (params: source, destination)
+          - copy_host_file (params: source, destination)
+
+        This avoids opening File Explorer or any GUI, which prevents
+        window-matching verification failures when another window is in focus.
+        """
+        payload = dict(step.get("payload", {}))
+        src = str(payload.get("src", "")).strip()
+        dst = str(payload.get("dst", "")).strip()
+        operation = str(payload.get("operation", "move")).strip().lower()
+        tool_name = "copy_host_file" if operation == "copy" else "move_host_file"
+
+        if not src or not dst:
+            return {"status": "failed", "error": "Source or destination path is missing.", "moved_count": 0}
+
+        # Common context fields expected by host tools
+        context = {
+            "session_key": session_key,
+            "session_id": session_key,
+            "user_id": user_id,
+            "connection_id": connection_id,
+            "channel_name": "",
+        }
+
+        # Step 1: list the source directory
+        try:
+            list_result = await self.tool_registry.dispatch(
+                "list_host_dir", {"path": src, "limit": 200, **context}
+            )
+        except Exception as exc:
+            return {"status": "failed", "error": f"Could not list source directory '{src}': {exc}", "moved_count": 0}
+
+        entries = list_result.get("entries", []) if isinstance(list_result, dict) else []
+        # Filter to files only (entries whose type is not a directory)
+        files = [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and str(entry.get("type", "file")).lower() not in {"directory", "dir", "d"}
+        ]
+
+        if not files:
+            return {"status": "completed", "message": f"No files found in '{src}'.", "moved_count": 0}
+
+        # Sort by modification time desc so that the most-recent file comes first
+        def _sort_key(e: dict[str, Any]) -> str:
+            return str(e.get("modified", e.get("mtime", e.get("name", ""))))
+
+        files_sorted = sorted(files, key=_sort_key, reverse=True)
+
+        # If the user asked to move "folder contents" / "files" move all; otherwise just the latest
+        src_label = str(payload.get("src_label", "")).lower()
+        move_all = any(kw in src_label for kw in ("contents", "files", "all"))
+        targets = files_sorted if move_all else files_sorted[:1]
+
+        import os
+        moved_count = 0
+        errors: list[str] = []
+        for entry in targets:
+            filename = str(entry.get("name", "")).strip()
+            if not filename:
+                continue
+            src_path = os.path.join(src, filename)
+            dst_path = os.path.join(dst, filename)
+            try:
+                await self.tool_registry.dispatch(
+                    tool_name,
+                    {"source": src_path, "destination": dst_path, **context},
+                )
+                moved_count += 1
+            except Exception as exc:
+                errors.append(f"{filename}: {exc}")
+
+        if moved_count == 0 and errors:
+            return {"status": "failed", "error": "; ".join(errors), "moved_count": 0}
+        return {
+            "status": "completed",
+            "moved_count": moved_count,
+            "errors": errors,
+            "src": src,
+            "dst": dst,
+            "operation": operation,
+        }

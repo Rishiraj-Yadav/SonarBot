@@ -70,24 +70,27 @@ DESKTOP_VISION_READ_WINDOW_PHRASES = {
 NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN = (
     r"daily|day|weekdays|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekly"
 )
+REMINDER_VERB_PATTERN = r"(?:remind|remaind)"
+REMINDER_NOUN_PATTERN = r"(?:reminder|remainder)"
 NATURAL_LANGUAGE_CRON_PATTERNS = (
-    rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-    rf"^remind me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-    rf"^every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+remind me to\s+(?P<message>.+)$",
-    rf"^(?:set|create|make)\s+(?:a\s+)?reminder\s+for\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-    rf"^remind me at\s+(?P<time>.+?)\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+to\s+(?P<message>.+)$",
-    rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+reminder\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
-    rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+remind me to\s+(?P<message>.+)$",
+    rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|{REMINDER_NOUN_PATTERN})\s+to\s+{REMINDER_VERB_PATTERN}\s+me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^{REMINDER_VERB_PATTERN}\s+me every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^every\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+{REMINDER_VERB_PATTERN}\s+me to\s+(?P<message>.+)$",
+    rf"^(?:set|create|make)\s+(?:a\s+)?{REMINDER_NOUN_PATTERN}\s+for\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^{REMINDER_VERB_PATTERN}\s+me at\s+(?P<time>.+?)\s+(?P<frequency>{NATURAL_LANGUAGE_CRON_FREQUENCY_PATTERN})s?\s+to\s+(?P<message>.+)$",
+    rf"^(?:set|create|make)\s+(?:a\s+)?(?:daily|weekday|weekly)\s+{REMINDER_NOUN_PATTERN}\s+at\s+(?P<time>.+?)\s+to\s+(?P<message>.+)$",
+    rf"^every\s+(?P<time_of_day>morning|afternoon|evening|night)\s+{REMINDER_VERB_PATTERN}\s+me to\s+(?P<message>.+)$",
 )
 NATURAL_LANGUAGE_INTERVAL_CRON_PATTERNS = (
-    r"^remind me (?:after\s+)?every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
-    r"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|reminder)\s+to\s+remind me (?:after\s+)?every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
-    r"^every\s+(?P<interval>\d{1,2})\s+(?P<unit>minute|minutes|hour|hours)\s+remind me\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+    rf"^(?:create|set|make)\s+(?:a\s+)?{REMINDER_NOUN_PATTERN}\s+(?:to\s+)?(?P<message>.+?)\s+and\s+{REMINDER_VERB_PATTERN}\s+me (?:after\s+)?every\s+(?P<interval>\d{{1,2}})\s+(?P<unit>minute|minutes|hour|hours)$",
+    rf"^{REMINDER_VERB_PATTERN}\s+me (?:after\s+)?every\s+(?P<interval>\d{{1,2}})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+    rf"^(?:create|set|make)\s+(?:a\s+)?(?:cron\s+job|{REMINDER_NOUN_PATTERN})\s+to\s+{REMINDER_VERB_PATTERN}\s+me (?:after\s+)?every\s+(?P<interval>\d{{1,2}})\s+(?P<unit>minute|minutes|hour|hours)\s+(?:to\s+|that\s+)?(?P<message>.+)$",
+    rf"^every\s+(?P<interval>\d{{1,2}})\s+(?P<unit>minute|minutes|hour|hours)\s+{REMINDER_VERB_PATTERN}\s+me\s+(?:to\s+|that\s+)?(?P<message>.+)$",
 )
 ONE_TIME_REMINDER_PATTERNS = (
-    r"^remind me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
-    r"^remind me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
-    r"^(?:set|create|make)\s+(?:a\s+)?reminder for (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+    rf"^{REMINDER_VERB_PATTERN}\s+me (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
+    rf"^{REMINDER_VERB_PATTERN}\s+me at (?P<time>.+?) (?P<day>today|tomorrow) to (?P<message>.+)$",
+    rf"^(?:set|create|make)\s+(?:a\s+)?{REMINDER_NOUN_PATTERN}\s+for (?P<day>today|tomorrow) at (?P<time>.+?) to (?P<message>.+)$",
 )
 
 

@@ -4542,6 +4542,74 @@ async def test_router_creates_interval_cron_from_every_five_minutes_phrase(app_c
 
 
 @pytest.mark.asyncio
+async def test_router_creates_interval_cron_from_remaind_typo_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-interval-typo-1",
+        request_id="req-cron-interval-typo-1",
+        session_key="telegram:123",
+        message="Remaind me after every 5 minutes to go to college for presentation",
+        metadata={"trace_id": "trace-cron-interval-typo-1", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "*/5 * * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: go to college for presentation"
+
+
+@pytest.mark.asyncio
+async def test_router_creates_interval_cron_from_remainder_typo_phrase(app_config) -> None:
+    automation_engine = DummyAutomationEngine()
+    router = GatewayRouter(
+        config=app_config,
+        agent_loop=DummyAgentLoop(),
+        connection_manager=DummyConnectionManager(),
+        session_manager=DummySessionManager(),
+        memory_manager=None,
+        skill_registry=DummySkillRegistry(),
+        hook_runner=DummyHookRunner(),
+        presence_registry=DummyPresenceRegistry(),
+        oauth_flow_manager=DummyOAuthFlowManager(),
+        tool_registry=DummyToolRegistry(),
+        automation_engine=automation_engine,
+        user_profiles=DummyUserProfiles(),
+        started_at=datetime.now(timezone.utc),
+    )
+
+    response = await router.route_user_message(
+        connection_id="conn-cron-interval-typo-2",
+        request_id="req-cron-interval-typo-2",
+        session_key="telegram:123",
+        message="Set a remainder to go to college for the presentation and remind me after every 5 minutes",
+        metadata={"trace_id": "trace-cron-interval-typo-2", "user_id": "default"},
+        mode=QueueMode.STEER,
+    )
+
+    assert response.ok is True
+    assert response.payload["queued"] is False
+    assert automation_engine.dynamic_jobs[0]["schedule"] == "*/5 * * * *"
+    assert automation_engine.dynamic_jobs[0]["message"] == "Reminder: go to college for the presentation"
+
+
+@pytest.mark.asyncio
 async def test_router_creates_one_time_reminder_for_tomorrow_phrase(app_config) -> None:
     automation_engine = DummyAutomationEngine()
     router = GatewayRouter(

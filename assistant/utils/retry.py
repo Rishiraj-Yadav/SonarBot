@@ -9,6 +9,11 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
+# When Gemini returns 429 (RESOURCE_EXHAUSTED) the quota window is typically
+# 60 seconds.  A short base_delay (0.5 s) just fires the retries in a burst
+# and wastes the attempts.  Use a much longer base for 429 responses.
+_RATE_LIMIT_BASE_DELAY = 8.0
+
 
 def async_retry(max_attempts: int = 3, base_delay: float = 0.5) -> Callable[[F], F]:
     def decorator(func: F) -> F:
@@ -24,13 +29,34 @@ def async_retry(max_attempts: int = 3, base_delay: float = 0.5) -> Callable[[F],
                     last_exc = exc
                     if attempt >= max_attempts:
                         raise
-                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+                    # Use a longer delay for rate-limit errors so that we
+                    # don't burn all retries in a fraction of a second.
+                    is_rate_limit = _is_rate_limit_error(exc)
+                    delay = (
+                        _RATE_LIMIT_BASE_DELAY * (2 ** (attempt - 1))
+                        if is_rate_limit
+                        else base_delay * (2 ** (attempt - 1))
+                    )
+                    await asyncio.sleep(delay)
             if last_exc is not None:
                 raise last_exc
 
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if exc looks like an HTTP 429 / RESOURCE_EXHAUSTED error."""
+    try:
+        import httpx  # local import to avoid coupling
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code == 429
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return "429" in msg or "resource_exhausted" in msg or "too many requests" in msg
 
 
 class CircuitBreaker:

@@ -56,6 +56,7 @@ class DesktopCoworkerPlanner:
             self._plan_preset_run,
             self._plan_vscode_open,
             self._plan_document_replace,
+            self._plan_host_file_move,
         ):
             plan = builder(stripped_original, lowered)
             if plan is not None:
@@ -109,6 +110,7 @@ class DesktopCoworkerPlanner:
             "- vscode_open_target payload={target:string,prefer?:'file'|'directory'|'either'}\n"
             "- preset_run payload={name:string}\n"
             "- visual_task payload={goal:string}\n"
+            "- host_file_move payload={src:string,dst:string,pattern?:string}\n"
             "Each step must include: type, title, payload, verification, retryable, risky.\n"
             "Verification kinds you may use: tool_status, active_window_contains, bluetooth_state, brightness_state, volume_state, visual_task.\n"
             "Examples:\n"
@@ -476,6 +478,7 @@ class DesktopCoworkerPlanner:
             "vscode_open_target",
             "preset_run",
             "visual_task",
+            "host_file_move",
         }
         steps: list[dict[str, Any]] = []
         for raw_step in raw_steps[:max_steps]:
@@ -561,4 +564,94 @@ class DesktopCoworkerPlanner:
             return {"kind": "brightness_state", "percent": int(payload.get("percent", 0) or 0)}
         if step_type == "visual_task":
             return {"kind": "visual_task"}
+        if step_type == "host_file_move":
+            return {"kind": "tool_status"}
         return {"kind": "tool_status"}
+
+    # ------------------------------------------------------------------
+    # New: direct host file-move plan (no GUI / File Explorer needed)
+    # ------------------------------------------------------------------
+
+    def _plan_host_file_move(self, original: str, lowered: str) -> dict[str, Any] | None:
+        """Build a direct file-move coworker plan using host file tools.
+
+        Matches requests like:
+        - "move files from download2 to desktop"
+        - "move folder contents of X to Y"
+        - "move the most recent file from X to Y"
+        - "copy files from X to Y"
+        """
+        move_pattern = re.compile(
+            r"(?:move|copy)\s+(?:the\s+)?(?:files?|folder contents?|contents?|most recent file|latest file)?\s*"
+            r"(?:from|in|inside)?\s*['\"]?(.+?)['\"]?\s+(?:to|into)\s+['\"]?(.+?)['\"]?$",
+            re.IGNORECASE,
+        )
+        match = move_pattern.search(lowered)
+        if match is None:
+            return None
+
+        # Check that host tools are actually available
+        if not self.tool_registry.has("list_host_dir") or not self.tool_registry.has("move_host_file"):
+            # Not a hard error - fall through so LLM can handle it
+            return None
+
+        src_hint = match.group(1).strip().strip("'\"")
+        dst_hint = match.group(2).strip().strip("'\"")
+
+        operation = "copy" if lowered.startswith("copy") else "move"
+        op_label = "Copy" if operation == "copy" else "Move"
+
+        # Resolve common Windows path aliases
+        src_resolved = self._resolve_path_alias(src_hint)
+        dst_resolved = self._resolve_path_alias(dst_hint)
+
+        steps: list[dict[str, Any]] = [
+            {
+                "type": "host_file_move",
+                "title": f"{op_label} contents of {src_hint!r} to {dst_hint!r}",
+                "payload": {
+                    "operation": operation,
+                    "src": src_resolved,
+                    "dst": dst_resolved,
+                    "src_label": src_hint,
+                    "dst_label": dst_hint,
+                },
+                "verification": {"kind": "tool_status"},
+                "retryable": False,
+                "risky": True,
+            }
+        ]
+        return {
+            "summary": f"{op_label} the most recent file from {src_hint!r} to {dst_hint!r}.",
+            "steps": steps,
+        }
+
+    @staticmethod
+    def _resolve_path_alias(hint: str) -> str:
+        """Map common short names to full Windows paths."""
+        import os
+        home = Path.home()
+        aliases: dict[str, str] = {
+            "desktop": str(home / "Desktop"),
+            "downloads": str(home / "Downloads"),
+            "download": str(home / "Downloads"),
+            "documents": str(home / "Documents"),
+            "document": str(home / "Documents"),
+            "pictures": str(home / "Pictures"),
+            "music": str(home / "Music"),
+            "videos": str(home / "Videos"),
+            "downloads2": str(home / "Downloads"),
+            "download2": str(home / "Downloads"),
+            # common drive-letter shortcuts
+            "c": "C:\\",
+            "d": "D:\\",
+        }
+        lowered = hint.strip().lower().rstrip("/\\").replace(" ", "")
+        if lowered in aliases:
+            return aliases[lowered]
+        # If it already looks like an absolute path, pass through
+        if len(hint.strip()) >= 3 and hint.strip()[1] == ":":
+            return hint.strip()
+        # Expand ~ and env vars
+        expanded = os.path.expandvars(os.path.expanduser(hint.strip()))
+        return expanded

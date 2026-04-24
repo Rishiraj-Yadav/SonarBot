@@ -61,13 +61,23 @@ class GeminiProvider(ModelProvider):
                 return await self._perform_request_for_model(model_name, payload)
             except httpx.HTTPStatusError as exc:
                 last_error = exc
-                if exc.response.status_code not in {400, 404} or index == len(candidate_models) - 1:
+                status = exc.response.status_code
+                # A structural 400 (bad turn order) is caused by the payload
+                # itself, not by the choice of model.  Sending the same broken
+                # payload to the fallback model will also 400, and then burn
+                # through that model's quota until it 429s.
+                # Only allow model-fallback for 404 (model not found) errors.
+                is_structural_400 = status == 400 and (
+                    "function call turn" in exc.response.text.lower()
+                    or "INVALID_ARGUMENT" in exc.response.text
+                )
+                if is_structural_400 or status not in {400, 404} or index == len(candidate_models) - 1:
                     raise
                 self.logger.warning(
                     "gemini_model_fallback",
                     failed_model=model_name,
                     fallback_model=candidate_models[index + 1],
-                    status_code=exc.response.status_code,
+                    status_code=status,
                 )
             except Exception as exc:
                 last_error = exc
@@ -112,6 +122,9 @@ class GeminiProvider(ModelProvider):
         tools: list[dict[str, Any]],
     ) -> dict[str, Any]:
         contents = self._messages_to_contents(messages)
+        # Guard against orphaned functionCall / functionResponse turns that
+        # would cause a 400 INVALID_ARGUMENT from Gemini.
+        contents = self._sanitize_contents(contents)
 
         payload: dict[str, Any] = {
             "contents": contents,
@@ -162,6 +175,69 @@ class GeminiProvider(ModelProvider):
                 contents.append(content)
             index += 1
         return contents
+
+    def _sanitize_contents(self, contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove orphaned functionCall / functionResponse turns.
+
+        Gemini enforces strict turn ordering:
+          - A model turn with functionCall parts MUST be immediately followed
+            by a user turn that contains only functionResponse parts.
+          - A user turn with functionResponse parts MUST be immediately preceded
+            by such a model turn.
+
+        Violating either rule returns a 400 INVALID_ARGUMENT.  Orphaned turns
+        can appear when session compaction cuts the history at a bad boundary.
+        This method silently drops them and logs a warning so the root cause
+        can be spotted in the logs.
+        """
+        if not contents:
+            return contents
+
+        def _has_fc(entry: dict[str, Any]) -> bool:
+            return any("functionCall" in part for part in entry.get("parts", []))
+
+        def _has_fr(entry: dict[str, Any]) -> bool:
+            return any("functionResponse" in part for part in entry.get("parts", []))
+
+        cleaned: list[dict[str, Any]] = []
+        i = 0
+        while i < len(contents):
+            entry = contents[i]
+            role = entry.get("role", "")
+
+            # user turn carrying functionResponse parts must be immediately
+            # preceded by a model turn that has functionCall parts.
+            if role == "user" and _has_fr(entry):
+                prev = cleaned[-1] if cleaned else None
+                if prev is None or not _has_fc(prev):
+                    self.logger.warning(
+                        "gemini_orphaned_function_response_dropped", index=i
+                    )
+                    i += 1
+                    continue
+
+            # model turn carrying functionCall parts must be immediately
+            # followed by a user turn that has functionResponse parts.
+            if role == "model" and _has_fc(entry):
+                nxt = contents[i + 1] if i + 1 < len(contents) else None
+                if nxt is None or not _has_fr(nxt):
+                    self.logger.warning(
+                        "gemini_orphaned_function_call_dropped", index=i
+                    )
+                    i += 1
+                    continue
+
+            cleaned.append(entry)
+            i += 1
+
+        # Gemini requires the conversation to start with a user turn.
+        while cleaned and cleaned[0].get("role") != "user":
+            self.logger.warning(
+                "gemini_dropping_non_user_first_turn", role=cleaned[0].get("role")
+            )
+            cleaned.pop(0)
+
+        return cleaned
 
     def _sanitize_schema(self, schema: Any) -> Any:
         if isinstance(schema, list):

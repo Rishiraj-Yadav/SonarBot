@@ -26,6 +26,21 @@ class CompactionManager:
             await self.flush_runner.maybe_flush(session, system_prompt)
 
         trim_count = max(1, int(len(session.messages) * 0.4))
+        # Walk backward to a safe cut boundary so we never split an
+        # assistant(tool_calls) → tool response pair.  A safe boundary is any
+        # point where the last trimmed message is a plain user or plain
+        # assistant (no pending tool calls) message.
+        safe_trim = trim_count
+        while safe_trim > 1:
+            last_msg = session.messages[safe_trim - 1]
+            role = last_msg.get("role", "user")
+            # If we'd end on an assistant awaiting tool results, or on a tool
+            # result itself, back up one more message.
+            if role == "tool" or (role == "assistant" and last_msg.get("tool_calls")):
+                safe_trim -= 1
+            else:
+                break
+        trim_count = max(1, safe_trim)
         trimmed_messages = session.messages[:trim_count]
         transcript = "\n".join(
             f"{message.get('role', 'user')}: {message.get('content', '')}" for message in trimmed_messages

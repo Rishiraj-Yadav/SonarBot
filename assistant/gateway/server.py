@@ -1,4 +1,4 @@
-"""FastAPI server and WebSocket gateway."""
+﻿"""FastAPI server and WebSocket gateway."""
 
 from __future__ import annotations
 
@@ -238,6 +238,10 @@ def create_app(config: AppConfig | None = None, model_provider=None) -> FastAPI:
         automation_scheduler = AutomationScheduler(runtime_config, automation_engine)
         automation_engine.set_scheduler(automation_scheduler)
         heartbeat_service = HeartbeatService(runtime_config, agent_loop, automation_engine)
+        # Register automation tools so the LLM can actually create/list/delete reminders
+        from assistant.tools.automation_tool import build_automation_tools
+        for _auto_tool in build_automation_tools(automation_engine):
+            tool_registry.register(_auto_tool)
         app.state.services = GatewayServices(
             config=runtime_config,
             connection_manager=connection_manager,
